@@ -4,7 +4,7 @@ Copy the constants and functions below over the same names in cc_calc_core.py,
 then reload notebook cell 0.
 
 Changes vs first version:
-- peak window 5 ms -> 8 ms
+- peak window 5 ms -> 15 ms
 - noise gate 3*RMS -> 1.5 * MAD (less strict, less inflated by artifacts)
 - allow peak at the END of the window if the trace is still rising
 - reject only if the max is at the first sample (no rise after AP start)
@@ -13,7 +13,7 @@ Changes vs first version:
 
 # --- replace these constants in cc_calc_core.py ---
 SPIKELET_BASELINE_MS = 1.0
-SPIKELET_PEAK_MS = 8.0  # was 5
+SPIKELET_PEAK_MS = 15.0  # was 5, then 8
 SPIKELET_NOISE_K = 1.5  # was 3; 1.5 x noise
 SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps in ultra-low noise still need 0.15 mV
 
@@ -38,7 +38,7 @@ def _spikelet_local_peak_index(seg):
 
     Relaxed vs v1 (which required a strict interior local max):
     - first sample -> not a spikelet (no rise after start)
-    - last sample OK if still rising (peak may sit at 8 ms edge)
+    - last sample OK if still rising (peak may sit at 15 ms edge)
     - otherwise argmax in the window
     """
     if seg is None or len(seg) < 2:
@@ -196,4 +196,4 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
 #     ok, _ = spikelet_amp_passes(amp_p_avg, rms)
 #     avg_detected = ok
 #
-# Also set SPIKELET_PEAK_MS = 8.0 and SPIKELET_NOISE_K = 1.5 at the top of cc_calc_core.py.
+# Also set SPIKELET_PEAK_MS = 15.0 and SPIKELET_NOISE_K = 1.5 at the top of cc_calc_core.py.
