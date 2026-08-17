@@ -298,13 +298,13 @@ def ask_analysis_blocks(initial=None):
     from tkinter import BooleanVar, Button, Checkbutton, Frame, Label, Tk
 
     chosen = resolve_analysis_blocks(initial)
-    print(">>> A window should open: «Analysis blocks / Выбор блоков».")
+    print(">>> A window should open: Analysis blocks.")
     print(">>> If you do not see it, check behind Jupyter or the taskbar.")
-    print(">>> For a spikelet test: click  Spikelet only  then  OK.")
+    print(">>> Uncheck blocks you do not need, then OK.")
 
     root = Tk()
-    root.title("Выбор блоков анализа  /  Analysis blocks")
-    root.geometry("640x360+120+80")
+    root.title("Analysis blocks")
+    root.geometry("620x340+120+80")
     try:
         root.attributes("-topmost", True)
         root.lift()
@@ -315,7 +315,7 @@ def ask_analysis_blocks(initial=None):
 
     Label(
         root,
-        text="Что считать в этом запуске?",
+        text="Select analysis blocks for this run",
         font=("Segoe UI", 14, "bold"),
         pady=8,
         padx=12,
@@ -323,9 +323,9 @@ def ask_analysis_blocks(initial=None):
     Label(
         root,
         text=(
-            "Снимите галочки, чтобы ускорить.  Spikelet only = только spike / spikelet.\n"
-            "Начало спайка для spikelet считается внутри этого блока (inflection),\n"
-            "полный Cell properties для этого не нужен."
+            "Uncheck a block to skip it (faster).\n"
+            "Spike/spikelet AP start uses inflections (peaks + d²V) inside that block.\n"
+            "The Cell properties block is not required for spikelets."
         ),
         justify="left",
         padx=12,
@@ -333,10 +333,10 @@ def ask_analysis_blocks(initial=None):
 
     vars_ = {}
     labels = (
-        ("cc", "CC / Gj / Rin   (графики CC, CC vs Vm)"),
-        ("cell_props", "Cell properties   (V_rest, firing, QC AP / I–V)"),
+        ("cc", "CC / Gj / Rin   (CC QC plots, CC vs Vm)"),
+        ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
         ("tau_cm", "Tau / Cm"),
-        ("spikelets", "Spike / spikelet   (QC + over time + vs Vm)"),
+        ("spikelets", "Spike / spikelet   (QC + amplitude/delays vs time and vs Vm)"),
     )
     for key, text in labels:
         var = BooleanVar(value=chosen[key])
@@ -361,18 +361,9 @@ def ask_analysis_blocks(initial=None):
         for var in vars_.values():
             var.set(True)
 
-    def _spikelet_only():
-        vars_["cc"].set(False)
-        vars_["cell_props"].set(False)
-        vars_["tau_cm"].set(False)
-        vars_["spikelets"].set(True)
-
     btns = Frame(root)
     btns.pack(pady=14)
-    Button(btns, text="Spikelet only", command=_spikelet_only, width=16, height=2).pack(
-        side="left", padx=6
-    )
-    Button(btns, text="All blocks", command=_all, width=12, height=2).pack(side="left", padx=6)
+    Button(btns, text="Select all", command=_all, width=14, height=2).pack(side="left", padx=6)
     Button(btns, text="OK", command=_finish, width=10, height=2).pack(side="left", padx=6)
     root.protocol("WM_DELETE_WINDOW", _finish)
     try:
@@ -386,20 +377,25 @@ def ask_analysis_blocks(initial=None):
 
 
 def _ask_analysis_blocks_console():
-    """Fallback if the Tk window cannot open (type 1 / 2)."""
-    print("Tk window did not open. Type a number and press Enter:")
-    print("  1 = all blocks")
-    print("  2 = spikelet only")
+    """Fallback if the Tk window cannot open."""
+    print("Tk window did not open. Press Enter for all blocks,")
+    print("or type a subset: cc, cell_props, tau_cm, spikelets")
     try:
-        raw = input("Choice [2]: ").strip()
+        raw = input("Blocks: ").strip().lower()
     except Exception:
-        raw = "2"
-    if raw == "1":
+        raw = ""
+    if not raw:
         return resolve_analysis_blocks({
             "cc": True, "cell_props": True, "tau_cm": True, "spikelets": True,
         })
+    wanted = {p.strip().replace("-", "_") for p in raw.replace(";", ",").split(",") if p.strip()}
+    aliases = {"spikelet": "spikelets", "spikelets": "spikelets", "cell": "cell_props"}
+    wanted = {aliases.get(x, x) for x in wanted}
     return resolve_analysis_blocks({
-        "cc": False, "cell_props": False, "tau_cm": False, "spikelets": True,
+        "cc": "cc" in wanted,
+        "cell_props": "cell_props" in wanted,
+        "tau_cm": "tau_cm" in wanted,
+        "spikelets": "spikelets" in wanted,
     })
 
 
@@ -1372,8 +1368,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     """
     Spikelet metrics on every sweep with >=2 APs (from the first such sweep on).
 
-    File-level means are the mean of per-sweep means. QC plot uses the first
-    >=4 AP sweep (else 3, else 2), same as before.
+    File-level means are the mean of all detected spikelets in the file
+    (QC plot still uses the first >=4 AP sweep, else 3, else 2).
 
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
     Peak search = [t_start, t_start+SPIKELET_PEAK_MS].
@@ -1680,7 +1676,7 @@ def _analyze_spikelets_sweep(
 
 
 def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
-    """File-level spikelet fields from the primary QC sweep (>=4 APs, else 3, else 2)."""
+    """File-level spikelet fields: mean of all sweeps; QC sweep number kept as primary."""
     out = _empty_spikelet_metrics(None)
     n_all = len(sweep_metrics)
     out["n_sweeps"] = n_all
@@ -1696,14 +1692,49 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
     if primary is None:
         primary = sweep_metrics[0]
         out["sweep"] = primary.get("sweep")
-    for key, val in primary.items():
-        if key != "n_sweeps":
-            out[key] = val
-    out["n_sweeps"] = n_all
-    if out.get("metric_source") is None and (
-        out.get("mean_amp_ratio") is not None or (out.get("n_spikelet_detected") or 0) > 0
+    # QC metadata from the primary sweep
+    for key in ("sweep_tier", "n_AP_active", "rms_noise_mV"):
+        out[key] = primary.get(key)
+
+    def _mean_field(key):
+        vals = []
+        for m in sweep_metrics:
+            v = m.get(key)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(fv):
+                vals.append(fv)
+        return _round_or_none(statistics.mean(vals), 4) if vals else None
+
+    for key in (
+        "mean_amp_active_mV",
+        "mean_amp_spikelet_mV",
+        "mean_amp_ratio",
+        "mean_delay_ms",
+        "mean_delay_10_ms",
+        "mean_vm_begin_mV",
+        "avg_amp_active_mV",
+        "avg_amp_spikelet_mV",
+        "avg_amp_ratio",
+        "avg_delay_ms",
+        "avg_delay_10_ms",
     ):
-        out["metric_source"] = "primary_sweep"
+        out[key] = _mean_field(key)
+    out["n_AP_used"] = int(sum(m.get("n_AP_used") or 0 for m in sweep_metrics))
+    out["n_spikelet_detected"] = int(
+        sum(m.get("n_spikelet_detected") or 0 for m in sweep_metrics)
+    )
+    if out.get("mean_amp_ratio") is not None or out["n_spikelet_detected"] > 0:
+        out["metric_source"] = "file_mean"
+        out["skip_reason"] = None
+    else:
+        out["metric_source"] = None
+        reasons = [m.get("skip_reason") for m in sweep_metrics if m.get("skip_reason")]
+        out["skip_reason"] = reasons[0] if reasons else "no spikelet detections in file"
     return out
 
 
@@ -2880,17 +2911,57 @@ def _vm_for_channel(row, ch_tag):
 
 
 def _spikelet_file_metric(row, tag, metric):
-    """File-level spikelet value: mean of APs on the analyzed sweep, else avg waveform."""
-    src = row.get(f"spikelet_metric_source_{tag}")
-    if src == "average":
-        keys = (f"spikelet_avg_{metric}_{tag}", f"spikelet_mean_{metric}_{tag}")
-    else:
-        keys = (f"spikelet_mean_{metric}_{tag}", f"spikelet_avg_{metric}_{tag}")
+    """File-level spikelet value: mean across sweeps / APs in that file."""
+    keys = (
+        f"spikelet_mean_{metric}_{tag}",
+        f"spikelet_avg_{metric}_{tag}",
+    )
     for key in keys:
         val = row.get(key)
         if val is not None:
             return val
     return None
+
+
+def _mean_numeric(items, key):
+    vals = []
+    for item in items or []:
+        v = item.get(key)
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fv):
+            vals.append(fv)
+    return statistics.mean(vals) if vals else None
+
+
+def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric):
+    """Mean of all detected spikelets in one file and direction."""
+    names = {fname, os.path.basename(str(fname))}
+    vals = []
+    for r in ap_rows or []:
+        if not r.get("detected"):
+            continue
+        if r.get("direction") != direction:
+            continue
+        rf = r.get("file") or ""
+        if os.path.basename(str(rf)) not in names and str(rf) not in names:
+            continue
+        v = r.get(metric)
+        if v is None and metric == "delay_ms":
+            v = r.get("delay_peak_ms")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fv):
+            vals.append(fv)
+    return statistics.mean(vals) if vals else None
 
 
 def _spikelet_means_from_ap_rows(spikelet_rows):
@@ -3064,10 +3135,10 @@ def save_folder_spikelet_over_time_plot(
     summary_rows, out_path, title=None, spikelet_rows=None, spikelet_sweep_rows=None,
 ):
     """
-    Spikelet/spike vs recording time.
+    Spikelet/spike vs recording time: one point per file.
 
-    Temporarily one point per file from the primary sweep only
-    (first >=4 APs, else 3, else 2) — not the all-sweep mean used for vs-Vm.
+    Y = mean of all detected spikelets in that file (both directions plotted
+    separately). X = recording datetime of the file.
     Always writes the PNG (empty panels if no detections).
     """
     pairs = folder_summary_timed_rows(summary_rows)
@@ -3083,7 +3154,6 @@ def save_folder_spikelet_over_time_plot(
     if not rows:
         print("  spikelet vs time: skipped (no File_summary rows)")
         return None
-    from_ap = _spikelet_means_from_ap_rows(spikelet_rows)
     from_sw = {}
     for rec in spikelet_sweep_rows or []:
         fname = os.path.basename(str(rec.get("file") or ""))
@@ -3092,68 +3162,41 @@ def save_folder_spikelet_over_time_plot(
             continue
         from_sw.setdefault((fname, direction), []).append(rec)
     dir_12, dir_21 = "ch0->ch2", "ch2->ch0"
-
-    def _mean_key(items, metric):
-        vals = []
-        for item in items or []:
-            v = item.get(metric)
-            if v is None:
-                continue
-            try:
-                fv = float(v)
-            except (TypeError, ValueError):
-                continue
-            if np.isfinite(fv):
-                vals.append(fv)
-        return statistics.mean(vals) if vals else None
+    sw_key = {
+        "amp_ratio": "mean_amp_ratio",
+        "amp_active_mV": "mean_amp_active_mV",
+        "amp_spikelet_mV": "mean_amp_spikelet_mV",
+        "delay_ms": "mean_delay_ms",
+        "delay_10_ms": "mean_delay_10_ms",
+    }
 
     def _val(row, tag, direction, metric):
-        v = _spikelet_file_metric(row, tag, metric)
+        fname = os.path.basename(str(row.get("file") or ""))
+        # 1) mean of every detected spikelet (AP2+) in the file
+        v = _spikelet_file_mean_from_aps(spikelet_rows, fname, direction, metric)
         if v is not None:
             return v
-        fname = os.path.basename(str(row.get("file") or ""))
-        primary_sn = row.get(f"spikelet_sweep_{tag}")
-        try:
-            primary_sn = int(primary_sn) if primary_sn is not None else None
-        except (TypeError, ValueError):
-            pass
+        v = _spikelet_file_mean_from_aps(
+            spikelet_rows, str(row.get("file") or ""), direction, metric
+        )
+        if v is not None:
+            return v
+        # 2) mean of per-sweep means
         sw = from_sw.get((fname, direction)) or from_sw.get((str(row.get("file") or ""), direction))
-        sw_key = {
-            "amp_ratio": "mean_amp_ratio",
-            "amp_active_mV": "mean_amp_active_mV",
-            "amp_spikelet_mV": "mean_amp_spikelet_mV",
-            "delay_ms": "mean_delay_ms",
-            "delay_10_ms": "mean_delay_10_ms",
-        }.get(metric, metric)
-
-        def _sweep_num(item):
-            sn = item.get("sweep")
-            try:
-                return int(sn)
-            except (TypeError, ValueError):
-                return sn
-
-        if sw:
-            if primary_sn is not None:
-                sw_use = [s for s in sw if _sweep_num(s) == primary_sn]
-            else:
-                sw_use = [s for s in sw if s.get("is_primary")]
-            v = _mean_key(sw_use, sw_key)
-            if v is not None:
-                return v
-            v = _mean_key(sw, sw_key)
-            if v is not None:
-                return v
-        ap = from_ap.get((fname, direction, primary_sn))
-        if ap is None:
-            ap = from_ap.get((str(row.get("file") or ""), direction, primary_sn))
-        if ap and ap.get(metric) is not None:
-            return ap[metric]
-        for (fn, direc, _sn), rec in from_ap.items():
-            if direc == direction and fn in (fname, str(row.get("file") or "")):
-                if rec.get(metric) is not None:
-                    return rec[metric]
-        return None
+        v = _mean_numeric(sw, sw_key.get(metric, metric))
+        if v is None:
+            avg_map = {
+                "amp_ratio": "avg_amp_ratio",
+                "amp_active_mV": "avg_amp_active_mV",
+                "amp_spikelet_mV": "avg_amp_spikelet_mV",
+                "delay_ms": "avg_delay_ms",
+                "delay_10_ms": "avg_delay_10_ms",
+            }
+            v = _mean_numeric(sw, avg_map.get(metric))
+        if v is not None:
+            return v
+        # 3) File_summary (already a file mean)
+        return _spikelet_file_metric(row, tag, metric)
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
     ratio21 = [_val(r, "21", dir_21, "amp_ratio") for r in rows]
@@ -3167,17 +3210,16 @@ def save_folder_spikelet_over_time_plot(
     d1021 = [_val(r, "21", dir_21, "delay_10_ms") for r in rows]
     n_ratio = sum(v is not None for v in ratio12 + ratio21)
     n_amp = sum(v is not None for v in amp_p12 + amp_p21 + amp_a12 + amp_a21)
+    n_del = sum(v is not None for v in dpk12 + dpk21 + d1012 + d1021)
     print(
-        f"  spikelet vs time points: amp_ratio={n_ratio}, "
-        f"amplitudes={n_amp}, delay_peak="
-        f"{sum(v is not None for v in dpk12 + dpk21)}"
-        f"  (will save even if 0)"
+        f"  spikelet vs time (file mean vs recording time): "
+        f"files={len(rows)}, amp_ratio={n_ratio}, amplitudes={n_amp}, delays={n_del}"
     )
 
     plt = _get_agg_plt()
     fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
     if title:
-        fig.suptitle(f"{title}  —  spikelet / spike vs time", fontsize=12)
+        fig.suptitle(f"{title}  —  file-mean spikelet / spike vs recording time", fontsize=12)
 
     panels = (
         (axes[0], "Amplitude (mV)", "amp (mV)",
