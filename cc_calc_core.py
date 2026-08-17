@@ -4401,12 +4401,15 @@ def analyze_abf_file(
         }))
 
     want_qc = bsel["cell_props"] or bsel["cc"] or bsel["tau_cm"]
-    if plots_dir and SAVE_QC_PLOTS and want_qc:
+    if SAVE_QC_PLOTS and want_qc:
+        qc_dir = plots_dir
+        if not qc_dir:
+            qc_dir = cell_props_plots_dir(os.path.dirname(os.path.abspath(filepath)))
         try:
             qc_paths = save_qc_plots(
                 abf,
                 filepath,
-                plots_dir,
+                qc_dir,
                 b,
                 rin_ch0,
                 r2_ch0,
