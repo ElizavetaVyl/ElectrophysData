@@ -1474,7 +1474,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     Sweep means: AP1 excluded; mean over AP2+ that pass one sweep-level
     noise gate. Noise = MAD of all local baseline windows (10 ms before
     each spikelet t=0) pooled together; threshold = max(1.5×that, 0.15 mV).
-    QC files include the sweep number; threshold lines are not drawn.
+    QC PNG is the primary sweep only: ``{stem}_12_spikelets.png`` and
+    ``{stem}_21_spikelets.png`` in the Spikelet_plots folder.
 
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
     Peak search = [t_start, t_start+SPIKELET_PEAK_MS].
@@ -1485,7 +1486,7 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     """
     epochs = channel_epochs(abf, active_ch)
     if epochs is None:
-        return [], _empty_spikelet_metrics("no stimulus detected in sweepC"), None, [], []
+        return [], _empty_spikelet_metrics("no stimulus detected in sweepC"), None, []
 
     sr = int(abf.dataRate)
     stim_start, stim_stop = epochs["start"], epochs["stop"]
@@ -1497,13 +1498,12 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     if not sweep_nums:
         return [], _empty_spikelet_metrics(
             f"no sweep with >={SPIKELET_MIN_APS} APs in stim window"
-        ), None, [], []
+        ), None, []
 
     primary_sn, _, _ = select_spikelet_sweep(abf, active_ch, stim_start, stim_stop)
     all_ap_rows = []
     sweep_metrics = []
     qc_meta = None
-    all_metas = []
     for sn in sweep_nums:
         ap_rows, metrics, meta = _analyze_spikelets_sweep(
             abf, sn, active_ch, passive_ch, direction,
@@ -1511,16 +1511,14 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
         )
         all_ap_rows.extend(ap_rows)
         sweep_metrics.append(metrics)
-        if meta is not None:
-            all_metas.append(meta)
-            if qc_meta is None or sn == primary_sn:
-                if sn == primary_sn:
-                    qc_meta = meta
-                elif qc_meta is None:
-                    qc_meta = meta
+        if meta is not None and (qc_meta is None or sn == primary_sn):
+            if sn == primary_sn:
+                qc_meta = meta
+            elif qc_meta is None:
+                qc_meta = meta
 
     file_metrics = _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn)
-    return all_ap_rows, file_metrics, qc_meta, sweep_metrics, all_metas
+    return all_ap_rows, file_metrics, qc_meta, sweep_metrics
 
 
 def _analyze_spikelets_sweep(
@@ -2077,12 +2075,15 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     )
     ax_avg.grid(True, alpha=0.3)
 
-    fig.tight_layout()
+    try:
+        fig.tight_layout()
+    except Exception:
+        pass
     tag = direction.replace(">", "")
-    path = os.path.join(plots_dir, f"{stem}_{tag}_sw{sweep}_spikelets.png")
+    path = os.path.join(plots_dir, f"{stem}_{tag}_spikelets.png")
     _savefig_white(fig, path)
     plt.close(fig)
-    print(f"  saved {path}")
+    print(f"  saved spikelet QC (primary sweep {sweep}): {path}")
     return path
 
 
@@ -2145,6 +2146,10 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
     sweep_rows = []
     plot_paths = []
     stem = stem or _abf_stem(name)
+    if plots_dir and SAVE_SPIKELET_PLOTS:
+        print(f"  Spikelet QC folder: {os.path.abspath(plots_dir)}")
+    elif SAVE_SPIKELET_PLOTS:
+        print("  Spikelet QC: plots_dir is empty, PNG will not be written")
 
     for direction, active, passive, tag in (
         ("ch0->ch2", 0, 2, "12"),
@@ -2156,10 +2161,9 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
             )
             ap_rows, metrics, meta = result[0], result[1], result[2]
             sweep_metrics = result[3] if len(result) > 3 else []
-            all_metas = result[4] if len(result) > 4 else ([meta] if meta else [])
         except Exception as exc:
             metrics = _empty_spikelet_metrics(str(exc))
-            ap_rows, meta, sweep_metrics, all_metas = [], None, [], []
+            ap_rows, meta, sweep_metrics = [], None, []
         for r in ap_rows:
             all_rows.append(_spikelet_row({
                 "file": name,
@@ -2181,33 +2185,20 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
         for key, val in metrics.items():
             summary[f"spikelet_{key}_{tag}"] = val
         if plots_dir and SAVE_SPIKELET_PLOTS:
-            to_save = []
-            seen = set()
-            extra_ok = 0
-            for pm in all_metas:
-                sw = pm.get("sweep")
-                n_amp = sum(
-                    1 for r in (pm.get("ap_rows") or [])
-                    if r.get("amp_spikelet_mV") is not None
+            if not meta:
+                print(
+                    f"  Spikelet QC skip ({direction}): no primary sweep to plot "
+                    f"(skip={metrics.get('skip_reason')})"
                 )
-                n_det = sum(1 for r in (pm.get("ap_rows") or []) if r.get("detected"))
-                is_pri = sw == metrics.get("sweep")
-                keep = is_pri or (n_amp > 0 and n_det == 0) or (
-                    n_det > 0 and extra_ok < 8
-                )
-                if not keep or sw in seen:
-                    continue
-                if n_det > 0 and not is_pri:
-                    extra_ok += 1
-                seen.add(sw)
-                to_save.append(pm)
-            for pm in to_save:
+            else:
                 try:
-                    p = save_spikelet_qc_plot(abf, pm, plots_dir, stem)
+                    p = save_spikelet_qc_plot(abf, meta, plots_dir, stem)
                     if p:
                         plot_paths.append(p)
                 except Exception as exc:
-                    print(f"  Spikelet plot skip ({direction} sweep {pm.get('sweep')}): {exc}")
+                    print(
+                        f"  Spikelet QC error ({direction} sweep {meta.get('sweep')}): {exc}"
+                    )
                     traceback.print_exc()
 
     return all_rows, summary, plot_paths, sweep_rows
