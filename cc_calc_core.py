@@ -76,6 +76,7 @@ ANALYSIS_BLOCKS = {
     "tau_cm": RUN_TAU_CM,
     "spikelets": RUN_SPIKELETS,
 }
+_SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
@@ -297,28 +298,34 @@ def ask_analysis_blocks(initial=None):
     from tkinter import BooleanVar, Button, Checkbutton, Frame, Label, Tk
 
     chosen = resolve_analysis_blocks(initial)
+    print(">>> A window should open: «Analysis blocks / Выбор блоков».")
+    print(">>> If you do not see it, check behind Jupyter or the taskbar.")
+    print(">>> For a spikelet test: click  Spikelet only  then  OK.")
+
     root = Tk()
-    root.title("Analysis blocks")
-    root.attributes("-topmost", True)
+    root.title("Выбор блоков анализа  /  Analysis blocks")
+    root.geometry("640x360+120+80")
     try:
+        root.attributes("-topmost", True)
         root.lift()
+        root.focus_force()
     except Exception:
         pass
-    root.update()
+    root.update_idletasks()
 
     Label(
         root,
-        text="What to run?  Unchecked blocks are skipped (faster).",
-        font=("Segoe UI", 11, "bold"),
+        text="Что считать в этом запуске?",
+        font=("Segoe UI", 14, "bold"),
         pady=8,
         padx=12,
     ).pack(anchor="w")
     Label(
         root,
         text=(
-            "Spike / spikelet does not need the Cell properties block.\n"
-            "AP start is still the same inflection method (peaks + d²V),\n"
-            "computed inside the spikelet analysis."
+            "Снимите галочки, чтобы ускорить.  Spikelet only = только spike / spikelet.\n"
+            "Начало спайка для spikelet считается внутри этого блока (inflection),\n"
+            "полный Cell properties для этого не нужен."
         ),
         justify="left",
         padx=12,
@@ -326,15 +333,17 @@ def ask_analysis_blocks(initial=None):
 
     vars_ = {}
     labels = (
-        ("cc", "CC / Gj / Rin   (CC QC plots, CC vs Vm, slope vs time)"),
-        ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
-        ("tau_cm", "Tau / Cm   (uses Rin; Rin is computed if CC is off)"),
+        ("cc", "CC / Gj / Rin   (графики CC, CC vs Vm)"),
+        ("cell_props", "Cell properties   (V_rest, firing, QC AP / I–V)"),
+        ("tau_cm", "Tau / Cm"),
         ("spikelets", "Spike / spikelet   (QC + over time + vs Vm)"),
     )
     for key, text in labels:
         var = BooleanVar(value=chosen[key])
         vars_[key] = var
-        Checkbutton(root, text=text, variable=var, anchor="w").pack(fill="x", padx=16)
+        Checkbutton(root, text=text, variable=var, anchor="w", font=("Segoe UI", 11)).pack(
+            fill="x", padx=16, pady=2
+        )
 
     def _read():
         return {key: bool(var.get()) for key, var in vars_.items()}
@@ -342,6 +351,10 @@ def ask_analysis_blocks(initial=None):
     def _finish():
         chosen.clear()
         chosen.update(resolve_analysis_blocks(_read()))
+        try:
+            root.grab_release()
+        except Exception:
+            pass
         root.destroy()
 
     def _all():
@@ -355,14 +368,60 @@ def ask_analysis_blocks(initial=None):
         vars_["spikelets"].set(True)
 
     btns = Frame(root)
-    btns.pack(pady=10)
-    Button(btns, text="Spikelet only", command=_spikelet_only, width=14).pack(side="left", padx=4)
-    Button(btns, text="All blocks", command=_all, width=12).pack(side="left", padx=4)
-    Button(btns, text="OK", command=_finish, width=10).pack(side="left", padx=4)
+    btns.pack(pady=14)
+    Button(btns, text="Spikelet only", command=_spikelet_only, width=16, height=2).pack(
+        side="left", padx=6
+    )
+    Button(btns, text="All blocks", command=_all, width=12, height=2).pack(side="left", padx=6)
+    Button(btns, text="OK", command=_finish, width=10, height=2).pack(side="left", padx=6)
     root.protocol("WM_DELETE_WINDOW", _finish)
+    try:
+        root.grab_set()
+    except Exception:
+        pass
     root.resizable(False, False)
     root.mainloop()
+    print(">>> Selected blocks:", chosen)
     return chosen
+
+
+def _ask_analysis_blocks_console():
+    """Fallback if the Tk window cannot open (type 1 / 2)."""
+    print("Tk window did not open. Type a number and press Enter:")
+    print("  1 = all blocks")
+    print("  2 = spikelet only")
+    try:
+        raw = input("Choice [2]: ").strip()
+    except Exception:
+        raw = "2"
+    if raw == "1":
+        return resolve_analysis_blocks({
+            "cc": True, "cell_props": True, "tau_cm": True, "spikelets": True,
+        })
+    return resolve_analysis_blocks({
+        "cc": False, "cell_props": False, "tau_cm": False, "spikelets": True,
+    })
+
+
+def ensure_analysis_blocks(blocks=None, force_ask=False):
+    """Ask once per kernel session; reuse after that."""
+    global ANALYSIS_BLOCKS, _SESSION_BLOCKS
+    if blocks is not None:
+        _SESSION_BLOCKS = resolve_analysis_blocks(blocks)
+        ANALYSIS_BLOCKS = _SESSION_BLOCKS
+        return _SESSION_BLOCKS
+    if _SESSION_BLOCKS is not None and not force_ask:
+        return _SESSION_BLOCKS
+    try:
+        chosen = ask_analysis_blocks()
+    except Exception as exc:
+        print("Analysis-block window failed:", exc)
+        chosen = _ask_analysis_blocks_console()
+    _SESSION_BLOCKS = resolve_analysis_blocks(chosen)
+    ANALYSIS_BLOCKS = _SESSION_BLOCKS
+    on = [k for k, v in _SESSION_BLOCKS.items() if v]
+    print(">>> This run will compute:", ", ".join(on) if on else "(none)")
+    return _SESSION_BLOCKS
 
 
 def mean_delta_voltage(sweep_y, pre_start, pre_end, post_start, post_end):
@@ -3758,7 +3817,9 @@ def analyze_abf_file(
     blocks=None,
 ):
     """Return (per_sweep_rows, file_summary_row, qc_plot_paths, spikelet_ap_rows, spikelet_sweep_rows)."""
-    bsel = resolve_analysis_blocks(blocks)
+    bsel = resolve_analysis_blocks(
+        blocks if blocks is not None else ensure_analysis_blocks()
+    )
     name = os.path.basename(filepath)
     abf = pyabf.ABF(filepath)
     rec_dt = recording_datetime_str(abf)
