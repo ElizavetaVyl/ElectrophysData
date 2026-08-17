@@ -81,10 +81,11 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
-SPIKELET_NOISE_K = 1.0  # pass if amp_spikelet > 1 × pooled local noise
+SPIKELET_USE_NOISE_GATE = False  # temporary: any true local max counts
+SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
 SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sweep
-SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps still need 0.15 mV
+SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
 SAVE_SPIKELET_PLOTS = True
@@ -1256,21 +1257,26 @@ def _frac_rise_time_ms(y, i0, i_peak, v_base, amp, sr, frac=None):
 
 
 def _spikelet_local_peak_index(seg):
-    """Index of max after AP start.
+    """Index of a true interior local max, or None.
 
-    Relaxed vs v1 (which required a strict interior local max):
-    - first sample -> not a spikelet (no rise after start)
-    - last sample OK if still rising (peak may sit at window edge)
-    - otherwise argmax in the window
+    A spikelet must *bend*: sample i is a peak only if
+    ``y[i] > y[i-1]`` and ``y[i] >= y[i+1]`` (rise, then flat or fall).
+    First and last samples of the 15 ms window are never peaks.
+
+    Window argmax is not used. A monotonic rise (no inflection) returns
+    None — that is not a spikelet, even if the last sample is the highest.
+    If several local maxima exist, the highest one is taken.
     """
-    if seg is None or len(seg) < 2:
+    y = np.asarray(seg, dtype=float).ravel()
+    if y.size < 3:
         return None
-    i = int(np.argmax(seg))
-    if i <= 0:
-        return None
-    if i >= len(seg) - 1:
-        return i if float(seg[-1]) > float(seg[-2]) else None
-    return i
+    best_i = None
+    best_v = -np.inf
+    for i in range(1, y.size - 1):
+        if y[i] > y[i - 1] and y[i] >= y[i + 1] and y[i] > best_v:
+            best_v = float(y[i])
+            best_i = int(i)
+    return best_i
 
 
 def _segment_rms_mad(y, i0, i1):
@@ -1447,7 +1453,7 @@ def _rows_with_spikelet_amp(ap_rows):
 def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     """
     Sweep means for folder plots: AP1 excluded; average every AP2+ with a
-    measured spikelet peak. The noise gate (k=1) only sets ``detected`` for QC.
+    true local-max peak. Noise gate is off (``SPIKELET_USE_NOISE_GATE``).
     """
     measured = _rows_with_spikelet_amp(ap_rows)
     passed = [r for r in measured if r.get("detected")]
@@ -1475,8 +1481,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     Spikelet metrics on every sweep with >=2 APs (from the first such sweep on).
 
     Sweep means: AP1 excluded; mean over AP2+ with a measured peak
-    (gate is QC-only). Noise = MAD of all local baseline windows (10 ms
-    before each spikelet t=0) pooled together; threshold = max(1×that, 0.15 mV).
+    (gate is off). Noise is still measured for the QC title but does not
+    reject peaks. Peak = true interior local max in 15 ms (not window argmax).
     QC PNG is the primary sweep only: ``{stem}_12_spikelets.png`` and
     ``{stem}_21_spikelets.png`` in the Spikelet_plots folder.
 
@@ -1671,7 +1677,10 @@ def _analyze_spikelets_sweep(
         row["noise_thr_mV"] = thr_u
         amp = row.get("amp_spikelet_mV")
         if amp is not None:
-            ok, why = spikelet_amp_passes(amp, rms_unified)
+            if SPIKELET_USE_NOISE_GATE:
+                ok, why = spikelet_amp_passes(amp, rms_unified)
+            else:
+                ok, why = True, None
             if ok:
                 row["detected"] = True
                 if row.get("skip_reason") in (None, "isi_too_short"):
@@ -1745,7 +1754,10 @@ def _analyze_spikelets_sweep(
                 t10_p - _samples_to_ms(n_pre, sr), 4
             )
             rms_avg = rms_unified
-            ok, _ = spikelet_amp_passes(amp_p_avg, rms_avg)
+            if SPIKELET_USE_NOISE_GATE:
+                ok, _ = spikelet_amp_passes(amp_p_avg, rms_avg)
+            else:
+                ok = True
             avg_detected = ok
         if not has_means:
             if avg_detected:
@@ -1873,7 +1885,6 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     if not plot_meta:
         return None
     import os
-    import shutil
 
     os.makedirs(plots_dir, exist_ok=True)
     plt = _get_agg_plt()
@@ -1989,9 +2000,9 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     ax_ov.set_ylabel("Vm (mV)")
     ax_ov.set_title(
         f"{stem} — {direction}  sweep {sweep} ({plot_meta.get('tier')}, "
-        f"n_AP={plot_meta.get('n_ap')}, pass={n_pass}/{n_meas}  "
-        f"thr={_round_or_none(thr_u, 3)} mV  "
-        f"(pooled local {SPIKELET_NOISE_LOCAL_MS:g} ms ×{SPIKELET_NOISE_K:g})  source={src})"
+        f"n_AP={plot_meta.get('n_ap')}, local_max={n_pass}/{n_meas}  "
+        f"{'noise gate OFF' if not SPIKELET_USE_NOISE_GATE else f'thr={_round_or_none(thr_u, 3)} mV'}  "
+        f"source={src})"
     )
     ax_ov.legend(loc="upper right", fontsize=7)
     ax_ov.set_xlim(t[i_left], t[i_right])
@@ -2074,8 +2085,9 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     h2, l2 = ax_avg2.get_legend_handles_labels()
     ax_avg.legend(handles + h2, labels + l2, loc="upper left", fontsize=7)
     ax_avg.set_title(
-        f"Aligned AP2+ (not AP1): pass={n_pass}/{n_meas}; "
-        f"thick=mean of {len(pass_p)} pass; thr={_round_or_none(thr_u, 3)} mV"
+        f"Aligned AP2+ (not AP1): local_max={n_pass}/{n_meas}; "
+        f"thick=mean of {len(pass_p)}; noise gate "
+        f"{'OFF' if not SPIKELET_USE_NOISE_GATE else 'ON'}"
     )
     ax_avg.grid(True, alpha=0.3)
 
@@ -2089,14 +2101,6 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     _savefig_white(fig, path)
     plt.close(fig)
     print(f"  saved spikelet QC (primary sweep {sweep}): {path}")
-    parent = os.path.dirname(os.path.abspath(plots_dir))
-    extra = os.path.join(parent, fname)
-    if os.path.abspath(extra) != os.path.abspath(path) and os.path.isdir(parent):
-        try:
-            shutil.copy2(path, extra)
-            print(f"  also copied spikelet QC next to ABFs: {extra}")
-        except OSError as exc:
-            print(f"  spikelet QC copy skipped: {exc}")
     return path
 
 
@@ -2112,8 +2116,8 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
         f"primary_sweep={metrics.get('sweep')}  n_sweeps={metrics.get('n_sweeps')}  "
         f"n_AP2+={metrics.get('n_AP_used')}  n_with_amp={metrics.get('n_with_amp')}  "
         f"n_pass={metrics.get('n_spikelet_detected')}  "
-        f"local_thr={metrics.get('noise_thr_mV')} (one value/sweep, "
-        f"pooled {SPIKELET_NOISE_LOCAL_MS:g} ms ×{SPIKELET_NOISE_K})"
+        f"noise_gate={'ON' if SPIKELET_USE_NOISE_GATE else 'OFF'}  "
+        f"local_thr={metrics.get('noise_thr_mV')}"
     )
     print(
         f"    PRIMARY mean: spike={metrics.get('mean_amp_active_mV')}  "
