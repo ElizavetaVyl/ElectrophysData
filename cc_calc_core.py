@@ -3468,6 +3468,29 @@ def save_folder_cc_vm_slope_over_time_plot(
     return out_path
 
 
+def format_excel_header_wrap(workbook, header_row=1, min_width=12, max_width=18):
+    """Wrap header text to the column width and raise row 1 so names are fully visible."""
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+
+    wrap = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    for ws in workbook.worksheets:
+        max_lines = 1
+        for col in range(1, ws.max_column + 1):
+            cell = ws.cell(header_row, col)
+            cell.alignment = wrap
+            text = "" if cell.value is None else str(cell.value)
+            letter = get_column_letter(col)
+            width = min(max_width, max(min_width, len(text) + 1))
+            ws.column_dimensions[letter].width = width
+            chars_per_line = max(8, int(width))
+            n_lines = text.count("\n") + 1
+            if "\n" not in text:
+                n_lines = max(1, (len(text) + chars_per_line - 1) // chars_per_line)
+            max_lines = max(max_lines, n_lines)
+        ws.row_dimensions[header_row].height = max(30, 15 * max_lines + 8)
+
+
 def build_file_summary_row(
     name,
     rec_dt,
