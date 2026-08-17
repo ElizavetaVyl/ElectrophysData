@@ -3252,8 +3252,9 @@ def save_folder_spikelet_over_time_plot(
     """
     Spikelet/spike vs recording time: one point per file.
 
-    Y = mean of AP2+ spikelets on the primary QC sweep of that file
-    (first sweep with >=4 APs, else 3, else 2). X = recording datetime.
+    Y = primary-sweep mean ratio and delays (AP2+ with a measured peak).
+    Primary = first sweep with >=4 APs, else 3, else 2.
+    X = recording datetime. Amplitude vs time is not plotted.
     Always writes the PNG (empty panels if no values).
     """
     pairs = folder_summary_timed_rows(summary_rows)
@@ -3294,16 +3295,11 @@ def save_folder_spikelet_over_time_plot(
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
     ratio21 = [_val(r, "21", dir_21, "amp_ratio") for r in rows]
-    amp_a12 = [_val(r, "12", dir_12, "amp_active_mV") for r in rows]
-    amp_a21 = [_val(r, "21", dir_21, "amp_active_mV") for r in rows]
-    amp_p12 = [_val(r, "12", dir_12, "amp_spikelet_mV") for r in rows]
-    amp_p21 = [_val(r, "21", dir_21, "amp_spikelet_mV") for r in rows]
     dpk12 = [_val(r, "12", dir_12, "delay_ms") for r in rows]
     dpk21 = [_val(r, "21", dir_21, "delay_ms") for r in rows]
     d1012 = [_val(r, "12", dir_12, "delay_10_ms") for r in rows]
     d1021 = [_val(r, "21", dir_21, "delay_10_ms") for r in rows]
     n_ratio = sum(v is not None for v in ratio12 + ratio21)
-    n_amp = sum(v is not None for v in amp_p12 + amp_p21 + amp_a12 + amp_a21)
     n_del = sum(v is not None for v in dpk12 + dpk21 + d1012 + d1021)
     n_primary = 0
     for r in rows:
@@ -3315,7 +3311,7 @@ def save_folder_spikelet_over_time_plot(
     print(
         f"  spikelet vs time (PRIMARY sweep mean vs recording time): "
         f"files={len(rows)}, files_with_primary_sweep={n_primary}, "
-        f"amp_ratio={n_ratio}, amplitudes={n_amp}, delays={n_del}"
+        f"amp_ratio={n_ratio}, delays={n_del}"
     )
     if n_ratio == 0 and n_del == 0:
         print(
@@ -3324,26 +3320,21 @@ def save_folder_spikelet_over_time_plot(
         )
 
     plt = _get_agg_plt()
-    fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
     if title:
         fig.suptitle(
-            f"{title}  —  primary-sweep spikelet / spike vs recording time",
+            f"{title}  —  primary-sweep ratio and delays vs recording time",
             fontsize=12,
         )
 
     panels = (
-        (axes[0], "Amplitude (mV)", "amp (mV)",
-         ((amp_a12, "o-", "C0", "12 spike (ch0)"),
-          (amp_p12, "s--", "C0", "12 spikelet (ch2)"),
-          (amp_a21, "o-", "C1", "21 spike (ch2)"),
-          (amp_p21, "s--", "C1", "21 spikelet (ch0)"))),
-        (axes[1], "Amplitude ratio (spikelet / spike)", "ratio",
+        (axes[0], "Amplitude ratio (spikelet / spike)", "ratio",
          ((ratio12, "o-", "C0", "12 (ch0→ch2)"),
           (ratio21, "s-", "C1", "21 (ch2→ch0)"))),
-        (axes[2], "Delay peak (ms)", "delay peak (ms)",
+        (axes[1], "Delay peak (ms)", "delay peak (ms)",
          ((dpk12, "o-", "C0", "12 peak"),
           (dpk21, "s-", "C1", "21 peak"))),
-        (axes[3], "Delay 10% (ms)", "delay 10% (ms)",
+        (axes[2], "Delay 10% (ms)", "delay 10% (ms)",
          ((d1012, "o-", "C0", "12 10%"),
           (d1021, "s-", "C1", "21 10%"))),
     )
