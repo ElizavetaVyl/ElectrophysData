@@ -1215,6 +1215,7 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
         "ap_rows": ap_rows,
         "mean_a": mean_a,
         "mean_p": mean_p,
+        "snips_a": snips_a,
         "snips_p": snips_p,
         "tier": tier,
         "n_ap": n_ap,
@@ -1229,7 +1230,7 @@ def _spikelet_row(row_dict):
 
 
 def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
-    """Active / passive on separate y-scales; snippets panel with twin axis."""
+    """Sweep overlay (active+passive, one axis) + aligned AP2+ mean (twin scales)."""
     if not plot_meta:
         return None
     import os
@@ -1251,42 +1252,41 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     y_p = np.asarray(abf.sweepY, dtype=float)
 
     fig, axes = plt.subplots(
-        3, 1, figsize=(12, 10), sharex=False,
-        gridspec_kw={"height_ratios": [1.1, 1.1, 1.0]},
+        2, 1, figsize=(12, 8), sharex=False,
+        gridspec_kw={"height_ratios": [1.35, 1.0]},
     )
-    ax_a, ax_p, ax_avg = axes
+    ax_ov, ax_avg = axes
 
     ss = int(plot_meta["stim_start"])
     se = int(plot_meta["stim_stop"])
     i_left = max(int(plot_meta["pre_start"]), 0)
     i_right = min(se + int(0.05 * sr), len(t) - 1)
 
-    ax_a.plot(t, y_a, color="C0", lw=1.0, label=f"active ch{active_ch}")
-    ax_p.plot(t, y_p, color="C1", lw=1.0, label=f"passive ch{passive_ch}")
-    for ax in (ax_a, ax_p):
-        ax.axvline(t[min(ss, len(t) - 1)], color="0.4", ls="--", lw=0.8)
-        ax.axvline(t[min(se, len(t) - 1)], color="0.4", ls="--", lw=0.8)
+    ax_ov.plot(t, y_a, color="C0", lw=1.0, label=f"active ch{active_ch}")
+    ax_ov.plot(t, y_p, color="C1", lw=1.0, label=f"passive ch{passive_ch}")
+    ax_ov.axvline(t[min(ss, len(t) - 1)], color="0.4", ls="--", lw=0.8)
+    ax_ov.axvline(t[min(se, len(t) - 1)], color="0.4", ls="--", lw=0.8)
 
     starts = plot_meta["ap_starts"]
     peaks = plot_meta["ind_peaks"]
     for i, ip in enumerate(peaks):
         ip = int(ip)
         if 0 <= ip < len(t):
-            ax_a.scatter(
+            ax_ov.scatter(
                 t[ip], y_a[ip], c="C3", s=28, zorder=5, marker="o",
                 label="AP peak" if i == 0 else None,
             )
         if i < len(starts) and np.isfinite(starts[i]):
             i0 = int(starts[i])
             if 0 <= i0 < len(t):
-                ax_a.scatter(
+                ax_ov.scatter(
                     t[i0], y_a[i0], c="limegreen", s=28, zorder=5, marker="v",
                     label="AP start" if i == 0 else None,
                 )
             if i >= 1 and 0 <= i0 < len(t):
                 t0 = t[i0]
-                ax_p.axvspan(t0 - SPIKELET_BASELINE_MS / 1000.0, t0, color="0.7", alpha=0.25)
-                ax_p.axvspan(t0, t0 + SPIKELET_PEAK_MS / 1000.0, color="C4", alpha=0.12)
+                ax_ov.axvspan(t0 - SPIKELET_BASELINE_MS / 1000.0, t0, color="0.7", alpha=0.25)
+                ax_ov.axvspan(t0, t0 + SPIKELET_PEAK_MS / 1000.0, color="C4", alpha=0.12)
 
     labeled_sp = False
     for r in plot_meta["ap_rows"]:
@@ -1294,32 +1294,34 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
             continue
         tp = r["t_peak_passive_ms"] / 1000.0
         idx = min(max(int(round(tp * sr)), 0), len(y_p) - 1)
-        ax_p.scatter(
+        ax_ov.scatter(
             t[idx], y_p[idx], c="darkorange", s=40, zorder=6, marker="x",
             label="spikelet peak" if not labeled_sp else None,
         )
         labeled_sp = True
 
     src = (plot_meta.get("metrics") or {}).get("metric_source")
-    ax_a.set_ylabel("Active Vm (mV)")
-    ax_p.set_ylabel("Passive Vm (mV)")
-    ax_a.set_title(
+    ax_ov.set_ylabel("Vm (mV)")
+    ax_ov.set_title(
         f"{stem} — {direction}  sweep {sweep} ({plot_meta.get('tier')}, "
         f"n_AP={plot_meta.get('n_ap')}, source={src})"
     )
-    ax_a.legend(loc="upper right", fontsize=7)
-    ax_p.legend(loc="upper right", fontsize=7)
-    ax_a.set_xlim(t[i_left], t[i_right])
-    ax_p.set_xlim(t[i_left], t[i_right])
-    ax_a.grid(True, alpha=0.25)
-    ax_p.grid(True, alpha=0.25)
+    ax_ov.legend(loc="upper right", fontsize=7)
+    ax_ov.set_xlim(t[i_left], t[i_right])
+    ax_ov.grid(True, alpha=0.25)
 
     t_snip = (np.arange(-n_pre, n_post) / float(sr)) * 1000.0
-    for sn in plot_meta.get("snips_p") or []:
+    snips_p = plot_meta.get("snips_p") or []
+    snips_a = plot_meta.get("snips_a") or []
+    n_avg = sum(1 for sn in snips_p if len(sn) == len(t_snip))
+    for sn in snips_p:
         if len(sn) == len(t_snip):
             ax_avg.plot(t_snip, sn, color="C1", lw=0.7, alpha=0.35)
     if plot_meta.get("mean_p") is not None and len(plot_meta["mean_p"]) == len(t_snip):
-        ax_avg.plot(t_snip, plot_meta["mean_p"], color="C1", lw=2.2, label="mean spikelet")
+        ax_avg.plot(
+            t_snip, plot_meta["mean_p"], color="C1", lw=2.2,
+            label=f"mean spikelet (n={n_avg})",
+        )
     ax_avg.axvline(0, color="limegreen", ls="--", lw=1.0)
     ax_avg.axvspan(-SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax_avg.axvspan(0, SPIKELET_PEAK_MS, color="C4", alpha=0.12)
@@ -1327,14 +1329,25 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     ax_avg.set_ylabel("Passive Vm (mV)", color="C1")
     ax_avg.tick_params(axis="y", labelcolor="C1")
 
+    ax_avg2 = ax_avg.twinx()
+    for sn in snips_a:
+        if len(sn) == len(t_snip):
+            ax_avg2.plot(t_snip, sn, color="C0", lw=0.6, alpha=0.25)
     if plot_meta.get("mean_a") is not None and len(plot_meta["mean_a"]) == len(t_snip):
-        ax_avg2 = ax_avg.twinx()
-        ax_avg2.plot(t_snip, plot_meta["mean_a"], color="C0", lw=1.4, alpha=0.8, label="mean AP")
-        ax_avg2.set_ylabel("Active Vm (mV)", color="C0")
-        ax_avg2.tick_params(axis="y", labelcolor="C0")
+        ax_avg2.plot(
+            t_snip, plot_meta["mean_a"], color="C0", lw=1.6, alpha=0.9,
+            label=f"mean AP (n={n_avg})",
+        )
+    ax_avg2.set_ylabel("Active Vm (mV)", color="C0")
+    ax_avg2.tick_params(axis="y", labelcolor="C0")
 
-    ax_avg.set_title("AP2+ aligned to active AP start (passive scale left, AP scale right)")
-    ax_avg.legend(loc="upper left", fontsize=7)
+    handles, labels = ax_avg.get_legend_handles_labels()
+    h2, l2 = ax_avg2.get_legend_handles_labels()
+    ax_avg.legend(handles + h2, labels + l2, loc="upper left", fontsize=7)
+    ax_avg.set_title(
+        f"Aligned AP2+ (not AP1): thin=each spike, thick=mean of {n_avg} "
+        "(passive left, AP right)"
+    )
     ax_avg.grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -1342,6 +1355,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     path = os.path.join(plots_dir, f"{stem}_{tag}_spikelets.png")
     _savefig_white(fig, path)
     plt.close(fig)
+    print(f"  saved {path}")
     return path
 
 
