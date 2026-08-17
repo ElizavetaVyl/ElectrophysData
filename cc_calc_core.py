@@ -51,6 +51,7 @@ SAVE_CC_VPOST_PLOTS = True  # *_CC_vs_Vpost.png per file
 CC_PLOTS_SUBDIR = "CC_plots"  # subfolder for coupling-coefficient figures
 PLOT_DPI = 100  # PNG resolution (lower = faster writes; was 150)
 CC_VM_FIT_LINEAR = True  # solid line on folder CC_norm vs Vm
+CC_VM_LINEAR_MIN_POINTS = 3  # no line if the file has fewer CC_norm points
 CC_VM_CMAP = "viridis"  # file color = first→last by file number in the name
 
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
@@ -2559,6 +2560,11 @@ def _poly_cc_vs_vm(vm, cc, degree, n_grid=80):
 
 def _linear_cc_vs_vm(vm, cc, n_grid=80):
     """Return (x_fit, y_fit, slope, intercept, r2) or Nones if a line is not defined."""
+    vm = np.asarray(vm, dtype=float)
+    cc = np.asarray(cc, dtype=float)
+    ok = np.isfinite(vm) & np.isfinite(cc)
+    if int(np.sum(ok)) < CC_VM_LINEAR_MIN_POINTS:
+        return None, None, None, None, None
     x, y, coeffs, r2 = _poly_cc_vs_vm(vm, cc, 1, n_grid=n_grid)
     if x is None:
         return None, None, None, None, None
