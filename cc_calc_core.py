@@ -49,6 +49,9 @@ SAVE_CC_TRACE_PLOTS = True  # *_CC_traces.png (sweep QC for CC/Gj)
 SAVE_CC_VPOST_PLOTS = True  # *_CC_vs_Vpost.png per file
 CC_PLOTS_SUBDIR = "CC_plots"  # subfolder for coupling-coefficient figures
 PLOT_DPI = 100  # PNG resolution (lower = faster writes; was 150)
+CC_VM_FIT_LINEAR = True  # solid line on folder CC_norm vs Vm
+CC_VM_FIT_QUADRATIC = True  # dashed 2nd-order poly (needs ≥3 points)
+CC_VM_CMAP = "viridis"  # file color = recording order (first → last)
 
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
@@ -2414,34 +2417,83 @@ def file_cc_norm_curves(all_rows, direction):
     return curves
 
 
-def _linear_cc_vs_vm(vm, cc, n_grid=80):
-    """Return (x_fit, y_fit, slope, intercept, r2) or Nones if a line is not defined."""
+def _cc_vm_file_color_map(all_rows):
+    """
+    Color 0..1 by recording time (same file → same color on both panels).
+
+    Returns (fname -> pos, first_label, last_label).
+    """
+    seen = {}
+    for row in all_rows:
+        fname = row.get("file") or "?"
+        if fname not in seen:
+            seen[fname] = _parse_recording_datetime(row.get("recording_datetime"))
+    items = sorted(
+        seen.items(),
+        key=lambda it: (it[1] is None, it[1] or datetime.min, it[0]),
+    )
+    n = max(len(items) - 1, 1)
+    pos = {fname: (i / n) for i, (fname, _dt) in enumerate(items)}
+
+    def _lbl(fname, dt):
+        stem = os.path.splitext(str(fname))[0]
+        if dt is None:
+            return stem
+        return f"{stem}  {dt.strftime('%H:%M')}"
+
+    first_lbl = _lbl(*items[0]) if items else ""
+    last_lbl = _lbl(*items[-1]) if items else ""
+    return pos, first_lbl, last_lbl
+
+
+def _poly_cc_vs_vm(vm, cc, degree, n_grid=80):
+    """Return (x_fit, y_fit, coeffs, r2) or Nones if the poly is not defined."""
     vm = np.asarray(vm, dtype=float)
     cc = np.asarray(cc, dtype=float)
     ok = np.isfinite(vm) & np.isfinite(cc)
     vm, cc = vm[ok], cc[ok]
-    if len(vm) < 2 or float(np.ptp(vm)) < 1e-9:
-        return None, None, None, None, None
-    slope, intercept = np.polyfit(vm, cc, 1)
-    yhat = slope * vm + intercept
-    ss_res = float(np.sum((cc - yhat) ** 2))
+    if len(vm) < degree + 1 or float(np.ptp(vm)) < 1e-9:
+        return None, None, None, None
+    if len(np.unique(np.round(vm, 6))) < degree + 1:
+        return None, None, None, None
+    coeffs = np.polyfit(vm, cc, degree)
+    pred = np.polyval(coeffs, vm)
+    ss_res = float(np.sum((cc - pred) ** 2))
     ss_tot = float(np.sum((cc - np.mean(cc)) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
     x = np.linspace(float(vm.min()), float(vm.max()), n_grid)
-    y = slope * x + intercept
-    return x, y, float(slope), float(intercept), float(r2)
+    y = np.polyval(coeffs, x)
+    return x, y, coeffs, float(r2)
+
+
+def _linear_cc_vs_vm(vm, cc, n_grid=80):
+    """Return (x_fit, y_fit, slope, intercept, r2) or Nones if a line is not defined."""
+    x, y, coeffs, r2 = _poly_cc_vs_vm(vm, cc, 1, n_grid=n_grid)
+    if x is None:
+        return None, None, None, None, None
+    return x, y, float(coeffs[0]), float(coeffs[1]), r2
 
 
 def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
     """
-    Folder overview: CC_norm vs Vm — scatter + linear fit, one color per file.
+    Folder overview: CC_norm vs Vm, color = recording order (colorbar).
 
+    Solid = linear fit; dashed = 2nd-order polynomial (if ≥3 Vm points).
     Two panels: CC12 (ch0→ch2) and CC21 (ch2→ch0).
     """
+    from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+
     plt = _get_agg_plt()
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True, layout="constrained")
     if title:
         fig.suptitle(title, fontsize=12)
+
+    file_pos, first_lbl, last_lbl = _cc_vm_file_color_map(all_rows)
+    try:
+        cmap = plt.colormaps.get_cmap(CC_VM_CMAP)
+    except Exception:
+        cmap = plt.cm.get_cmap(CC_VM_CMAP)
 
     panels = (
         ("ch0->ch2", "CC12 (ch0→ch2)"),
@@ -2455,43 +2507,45 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
             ax.grid(True, alpha=0.3)
             continue
         any_data = True
-        try:
-            import matplotlib.colormaps as cmaps
-            cmap = cmaps["tab10"] if len(curves) <= 10 else cmaps["viridis"]
-        except ImportError:
-            cmap = plt.cm.get_cmap("tab10" if len(curves) <= 10 else "viridis")
 
-        for i, (fname, _dt, vms, norms) in enumerate(curves):
-            color = cmap(i / max(len(curves) - 1, 1))
-            label = os.path.splitext(str(fname))[0]
+        for fname, _dt, vms, norms in curves:
+            color = cmap(file_pos.get(fname, 0.5))
             ax.scatter(vms, norms, color=color, s=28, zorder=3, alpha=0.9)
-            xfit, yfit, slope, _b, r2 = _linear_cc_vs_vm(vms, norms)
-            if xfit is not None:
-                ax.plot(
-                    xfit,
-                    yfit,
-                    "-",
-                    color=color,
-                    lw=1.4,
-                    alpha=0.85,
-                    label=f"{label}  s={slope:.3f}  R²={r2:.2f}",
-                )
-            else:
-                ax.plot([], [], "-", color=color, label=label)
+            if CC_VM_FIT_LINEAR:
+                x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, norms)
+                if x1 is not None:
+                    ax.plot(x1, y1, "-", color=color, lw=1.3, alpha=0.85)
+            if CC_VM_FIT_QUADRATIC:
+                x2, y2, _c, _r2 = _poly_cc_vs_vm(vms, norms, 2)
+                if x2 is not None:
+                    ax.plot(x2, y2, "--", color=color, lw=1.5, alpha=0.9)
 
-        ax.axhline(1.0, color="0.45", ls="--", lw=0.8, alpha=0.7)
+        ax.axhline(1.0, color="0.45", ls=":", lw=0.8, alpha=0.7)
         ax.set_xlabel("Vm active during stim (mV)")
-        ax.set_title(f"{panel_title} — {len(curves)} file(s), linear fit")
+        ax.set_title(f"{panel_title} — {len(curves)} file(s)")
         ax.grid(True, alpha=0.3)
-        if len(curves) <= 12:
-            ax.legend(loc="best", fontsize=6, ncol=2 if len(curves) > 6 else 1)
+        style_handles = []
+        if CC_VM_FIT_LINEAR:
+            style_handles.append(Line2D([0], [0], color="0.25", ls="-", lw=1.4, label="linear"))
+        if CC_VM_FIT_QUADRATIC:
+            style_handles.append(
+                Line2D([0], [0], color="0.25", ls="--", lw=1.5, label="quadratic")
+            )
+        if style_handles:
+            ax.legend(handles=style_handles, loc="best", fontsize=8)
 
     if not any_data:
         plt.close(fig)
         return None
 
     axes[0].set_ylabel("CC_norm (CC / file mean)")
-    fig.tight_layout()
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, fraction=0.035, pad=0.02)
+    cbar.set_label("recording order (first → last)")
+    cbar.set_ticks([0, 1])
+    cbar.set_ticklabels([first_lbl, last_lbl])
+    cbar.ax.tick_params(labelsize=7)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     _savefig_white(fig, out_path)
     plt.close(fig)
