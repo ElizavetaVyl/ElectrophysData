@@ -131,6 +131,8 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "mean_amp_ratio",
     "mean_delay_ms",
     "mean_delay_10_ms",
+    "n_delay_negative",
+    "n_delay_10_negative",
     "avg_amp_active_mV",
     "avg_amp_spikelet_mV",
     "avg_amp_ratio",
@@ -164,6 +166,8 @@ SPIKELET_AP_KEYS = (
     "delay_ms",
     "delay_peak_ms",
     "delay_10_ms",
+    "delay_negative",
+    "delay_10_negative",
     "rms_local_mV",
     "noise_thr_mV",
     "detected",
@@ -187,6 +191,8 @@ SPIKELET_SWEEP_KEYS = (
     "mean_amp_spikelet_mV",
     "mean_delay_ms",
     "mean_delay_10_ms",
+    "n_delay_negative",
+    "n_delay_10_negative",
     "mean_vm_begin_mV",
     "mean_baseline_passive_mV",
     "noise_thr_mV",
@@ -1407,6 +1413,8 @@ def _empty_spikelet_metrics(skip_reason):
         "mean_amp_ratio": None,
         "mean_delay_ms": None,
         "mean_delay_10_ms": None,
+        "n_delay_negative": 0,
+        "n_delay_10_negative": 0,
         "avg_amp_active_mV": None,
         "avg_amp_spikelet_mV": None,
         "avg_amp_ratio": None,
@@ -1431,6 +1439,104 @@ def _round_or_none(val, nd=4):
     except TypeError:
         return None
     return round(float(val), nd)
+
+
+def _mark_delay_sign(row):
+    """delay = t_spikelet − t_spike. Negative is unphysical; keep value and flag it."""
+    d = _finite_number(row.get("delay_ms"))
+    d10 = _finite_number(row.get("delay_10_ms"))
+    row["delay_negative"] = bool(d is not None and d < 0)
+    row["delay_10_negative"] = bool(d10 is not None and d10 < 0)
+    notes = []
+    if row["delay_negative"]:
+        notes.append(f"delay_peak<0 ({d} ms): spikelet peak before AP peak")
+    if row["delay_10_negative"]:
+        notes.append(f"delay_10<0 ({d10} ms): spikelet 10% before AP 10%")
+    if notes:
+        extra = "; ".join(notes)
+        prev = row.get("skip_reason")
+        row["skip_reason"] = f"{prev}; {extra}" if prev else extra
+    return row
+
+
+def _best_effort_spikelet_sweep(abf, voltage_ch, start, stop):
+    """Sweep with the most APs in the stim window (may be 0 or 1)."""
+    best_sn, best_n = None, -1
+    for sn in abf.sweepList:
+        abf.setSweep(sweepNumber=sn, channel=voltage_ch)
+        peaks, _ = find_peaks(
+            abf.sweepY[start:stop], height=CP_SPIKE_HEIGHT, distance=CP_SPIKE_DISTANCE
+        )
+        n = int(len(peaks))
+        if n > best_n:
+            best_n, best_sn = n, int(sn)
+    if best_sn is None and len(abf.sweepList):
+        best_sn, best_n = int(abf.sweepList[0]), 0
+    return best_sn, best_n
+
+
+def _fallback_spikelet_qc_meta(abf, active_ch, passive_ch, direction, reason, sweep=None):
+    """QC overlay even when spikelet analysis cannot finish."""
+    sr = int(abf.dataRate)
+    n_pre = _ms_to_samples(SPIKELET_BASELINE_MS, sr)
+    n_post = _ms_to_samples(SPIKELET_PEAK_MS, sr)
+    epochs = channel_epochs(abf, active_ch)
+    if epochs is None:
+        stim_start, stim_stop, pre_start = 0, 1, 0
+        n_ap = 0
+        ind_peaks = np.array([], dtype=int)
+        ap_starts = np.array([], dtype=float)
+        if sweep is None:
+            sweep = int(abf.sweepList[0]) if len(abf.sweepList) else 0
+    else:
+        stim_start, stim_stop = epochs["start"], epochs["stop"]
+        pre_start = epochs["pre_start"]
+        if sweep is None:
+            sweep, n_ap = _best_effort_spikelet_sweep(
+                abf, active_ch, stim_start, stim_stop
+            )
+        else:
+            abf.setSweep(sweepNumber=sweep, channel=active_ch)
+            peaks, _ = find_peaks(
+                abf.sweepY[stim_start:stim_stop],
+                height=CP_SPIKE_HEIGHT, distance=CP_SPIKE_DISTANCE,
+            )
+            n_ap = int(len(peaks))
+        ind_infls = cp_infl_points(abf, sweep, active_ch, stim_start, stim_stop)
+        ind_peaks = cp_peak_indices(abf, sweep, active_ch, stim_start, stim_stop)
+        ap_starts, _ = cp_spike_begin(ind_peaks, ind_infls)
+        n_ap = int(len(ind_peaks))
+    metrics = _empty_spikelet_metrics(reason)
+    metrics["sweep"] = sweep
+    metrics["n_AP_active"] = n_ap
+    return {
+        "direction": direction,
+        "sweep": sweep if sweep is not None else 0,
+        "active_ch": active_ch,
+        "passive_ch": passive_ch,
+        "stim_start": stim_start,
+        "stim_stop": stim_stop,
+        "pre_start": pre_start,
+        "sr": sr,
+        "n_pre": n_pre,
+        "n_post": n_post,
+        "ind_peaks": ind_peaks,
+        "ap_starts": ap_starts,
+        "ap_rows": [],
+        "mean_a": None,
+        "mean_p": None,
+        "snips_a": [],
+        "snips_p": [],
+        "snips_ok": [],
+        "tier": None,
+        "n_ap": n_ap,
+        "rms": None,
+        "noise_thr_mV": None,
+        "metrics": metrics,
+        "t10_a_rel_ms": None,
+        "t10_p_rel_ms": None,
+        "error": reason,
+    }
 
 
 def _finite_number(val):
@@ -1489,6 +1595,8 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     )
     metrics["metric_source"] = "ap2_noise_gate" if passed else "ap2_with_amp"
     metrics["skip_reason"] = None
+    metrics["n_delay_negative"] = sum(1 for r in used if r.get("delay_negative"))
+    metrics["n_delay_10_negative"] = sum(1 for r in used if r.get("delay_10_negative"))
     return True
 
 
@@ -1511,20 +1619,31 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     before t=0) over those same AP2+.
     """
     epochs = channel_epochs(abf, active_ch)
-    if epochs is None:
-        return [], _empty_spikelet_metrics("no stimulus detected in sweepC"), None, []
-
     sr = int(abf.dataRate)
-    stim_start, stim_stop = epochs["start"], epochs["stop"]
-    pre_start = epochs["pre_start"]
     n_pre = _ms_to_samples(SPIKELET_BASELINE_MS, sr)
     n_post = _ms_to_samples(SPIKELET_PEAK_MS, sr)
+    if epochs is None:
+        reason = "no stimulus detected in sweepC"
+        meta = _fallback_spikelet_qc_meta(abf, active_ch, passive_ch, direction, reason)
+        return [], _empty_spikelet_metrics(reason), meta, []
+
+    stim_start, stim_stop = epochs["start"], epochs["stop"]
+    pre_start = epochs["pre_start"]
 
     sweep_nums = list_spikelet_sweeps(abf, active_ch, stim_start, stim_stop)
     if not sweep_nums:
-        return [], _empty_spikelet_metrics(
-            f"no sweep with >={SPIKELET_MIN_APS} APs in stim window"
-        ), None, []
+        sn, n_found = _best_effort_spikelet_sweep(abf, active_ch, stim_start, stim_stop)
+        reason = (
+            f"no sweep with >={SPIKELET_MIN_APS} APs in stim window "
+            f"(best sweep {sn} has {n_found} AP)"
+        )
+        meta = _fallback_spikelet_qc_meta(
+            abf, active_ch, passive_ch, direction, reason, sweep=sn,
+        )
+        metrics = _empty_spikelet_metrics(reason)
+        metrics["sweep"] = sn
+        metrics["n_AP_active"] = n_found
+        return [], metrics, meta, []
 
     primary_sn, _, _ = select_spikelet_sweep(abf, active_ch, stim_start, stim_stop)
     all_ap_rows = []
@@ -1557,9 +1676,39 @@ def _analyze_spikelets_sweep(
     ap_starts, _ap_ends = cp_spike_begin(ind_peaks, ind_infls)
     n_ap = int(len(ind_peaks))
     if n_ap < SPIKELET_MIN_APS:
-        return [], _empty_spikelet_metrics(
-            f"sweep {sweep} has {n_ap} peaks (< {SPIKELET_MIN_APS})"
-        ), None
+        reason = f"sweep {sweep} has {n_ap} peaks (< {SPIKELET_MIN_APS})"
+        metrics = _empty_spikelet_metrics(reason)
+        metrics["sweep"] = sweep
+        metrics["n_AP_active"] = n_ap
+        plot_meta = {
+            "direction": direction,
+            "sweep": sweep,
+            "active_ch": active_ch,
+            "passive_ch": passive_ch,
+            "stim_start": stim_start,
+            "stim_stop": stim_stop,
+            "pre_start": pre_start,
+            "sr": sr,
+            "n_pre": n_pre,
+            "n_post": n_post,
+            "ind_peaks": ind_peaks,
+            "ap_starts": ap_starts,
+            "ap_rows": [],
+            "mean_a": None,
+            "mean_p": None,
+            "snips_a": [],
+            "snips_p": [],
+            "snips_ok": [],
+            "tier": None,
+            "n_ap": n_ap,
+            "rms": None,
+            "noise_thr_mV": None,
+            "metrics": metrics,
+            "t10_a_rel_ms": None,
+            "t10_p_rel_ms": None,
+            "error": reason,
+        }
+        return [], metrics, plot_meta
     tier = ">=4" if n_ap >= 4 else str(n_ap)
 
     rms_pre = _passive_rms_prestim(abf, sweep, passive_ch, pre_start, stim_start)
@@ -1595,6 +1744,8 @@ def _analyze_spikelets_sweep(
             "delay_ms": None,
             "delay_peak_ms": None,
             "delay_10_ms": None,
+            "delay_negative": False,
+            "delay_10_negative": False,
             "rms_local_mV": None,
             "noise_thr_mV": None,
             "i_peak_passive": None,
@@ -1665,6 +1816,7 @@ def _analyze_spikelets_sweep(
                 )
             if amp_a != 0:
                 row["amp_ratio"] = _round_or_none(amp_p / amp_a, 4)
+            _mark_delay_sign(row)
 
         if isi_ok:
             snips_a.append(y_a[i_start - n_pre:i_start + n_post])
@@ -1836,6 +1988,7 @@ def _analyze_spikelets_sweep(
         "metrics": metrics,
         "t10_a_rel_ms": plot_t10_a_rel,
         "t10_p_rel_ms": plot_t10_p_rel,
+        "error": metrics.get("skip_reason"),
     }
     return ap_rows, metrics, plot_meta
 
@@ -1878,6 +2031,8 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
         "skip_reason",
         "n_with_amp",
         "n_AP_used",
+        "n_delay_negative",
+        "n_delay_10_negative",
     ):
         out[key] = primary.get(key)
     out["n_spikelet_detected"] = int(
@@ -1932,11 +2087,24 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
 
     ax_ov.plot(t, y_a, color="C0", lw=1.0, label=f"active ch{active_ch}")
     ax_ov.plot(t, y_p, color="C1", lw=1.0, label=f"passive ch{passive_ch}")
-    ax_ov.axvline(t[min(ss, len(t) - 1)], color="0.4", ls="--", lw=0.8)
-    ax_ov.axvline(t[min(se, len(t) - 1)], color="0.4", ls="--", lw=0.8)
+    if len(t) == 0:
+        ax_ov.text(0.5, 0.5, "empty sweep", transform=ax_ov.transAxes, ha="center")
+        err = plot_meta.get("error") or "empty sweep"
+        ax_ov.set_title(f"{stem} — {direction}  {err}")
+        tag = dir_tag or SPIKELET_DIR_TAG.get(direction) or "na"
+        fname = f"{stem}_{tag}_spikelets.png"
+        path = os.path.join(plots_dir, fname)
+        _savefig_white(fig, path)
+        plt.close(fig)
+        print(f"  saved spikelet QC (empty sweep): {path}")
+        return path
+    ax_ov.axvline(
+        t[min(ss, len(t) - 1)], color="0.35", ls="--", lw=1.0, label="stim start / end",
+    )
+    ax_ov.axvline(t[min(se, len(t) - 1)], color="0.35", ls="--", lw=1.0)
 
-    starts = plot_meta["ap_starts"]
-    peaks = plot_meta["ind_peaks"]
+    starts = plot_meta.get("ap_starts") if plot_meta.get("ap_starts") is not None else []
+    peaks = plot_meta.get("ind_peaks") if plot_meta.get("ind_peaks") is not None else []
     for i, ip in enumerate(peaks):
         ip = int(ip)
         if 0 <= ip < len(t):
@@ -1963,7 +2131,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     thr_u = plot_meta.get("noise_thr_mV")
     if thr_u is None:
         thr_u = spikelet_amp_threshold(plot_meta.get("rms"))
-    for r in plot_meta["ap_rows"]:
+    for r in plot_meta.get("ap_rows") or []:
         thr_loc = r.get("noise_thr_mV")
         if thr_loc is None:
             thr_loc = thr_u
@@ -1986,14 +2154,28 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
                     label="spikelet below noise" if not labeled_fail else None,
                 )
                 labeled_fail = True
-            if amp is not None and thr_loc is not None:
-                tag_txt = "PASS" if r.get("detected") else "FAIL"
+            if amp is not None:
+                tag_txt = "local max" if r.get("detected") else "no peak"
+                extra = ""
+                if r.get("delay_negative"):
+                    extra = f"  delay {r.get('delay_ms')} ms < 0"
                 ax_ov.annotate(
-                    f"AP{r.get('ap_index')} {amp:.2f}/{float(thr_loc):.2f} {tag_txt}",
+                    f"AP{r.get('ap_index')} {amp:.2f} mV {tag_txt}{extra}",
                     (t[idx], y_p[idx]),
                     textcoords="offset points", xytext=(4, 6),
-                    fontsize=7, color="0.15", zorder=8,
+                    fontsize=7,
+                    color="C3" if r.get("delay_negative") else "0.15",
+                    zorder=8,
                 )
+            elif r.get("skip_reason"):
+                i0 = r.get("t_start_ms")
+                if i0 is not None:
+                    ax_ov.annotate(
+                        f"AP{r.get('ap_index')} {r.get('skip_reason')}",
+                        (float(i0) / 1000.0, ax_ov.get_ylim()[1]),
+                        textcoords="offset points", xytext=(4, -12),
+                        fontsize=7, color="C3", zorder=8,
+                    )
         if r.get("t_10_active_ms") is not None:
             t10a = r["t_10_active_ms"] / 1000.0
             idx = min(max(int(round(t10a * sr)), 0), len(y_a) - 1)
@@ -2011,9 +2193,10 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
             )
             labeled_10p = True
 
-    n_meas = sum(1 for r in plot_meta["ap_rows"] if r.get("amp_spikelet_mV") is not None)
-    n_pass = sum(1 for r in plot_meta["ap_rows"] if r.get("detected"))
+    n_meas = sum(1 for r in (plot_meta.get("ap_rows") or []) if r.get("amp_spikelet_mV") is not None)
+    n_pass = sum(1 for r in (plot_meta.get("ap_rows") or []) if r.get("detected"))
     src = (plot_meta.get("metrics") or {}).get("metric_source")
+    err = plot_meta.get("error") or (plot_meta.get("metrics") or {}).get("skip_reason")
     ax_ov.set_ylabel("Vm (mV)")
     ax_ov.set_title(
         f"{stem} — {direction}  sweep {sweep} ({plot_meta.get('tier')}, "
@@ -2021,9 +2204,18 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
         f"{'noise gate OFF' if not SPIKELET_USE_NOISE_GATE else f'thr={_round_or_none(thr_u, 3)} mV'}  "
         f"source={src})"
     )
+    if err:
+        ax_ov.text(
+            0.01, 0.99,
+            f"note: {err}",
+            transform=ax_ov.transAxes, va="top", ha="left",
+            fontsize=9, color="C3", wrap=True,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="C3", alpha=0.9),
+            zorder=10,
+        )
     ax_ov.legend(loc="upper right", fontsize=7)
     ax_ov.set_xlim(t[i_left], t[i_right])
-    ax_ov.grid(True, alpha=0.25)
+    ax_ov.grid(True, axis="y", alpha=0.25)
 
     t_snip = (np.arange(-n_pre, n_post) / float(sr)) * 1000.0
     snips_p = plot_meta.get("snips_p") or []
@@ -2118,6 +2310,28 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     _savefig_white(fig, path)
     plt.close(fig)
     print(f"  saved spikelet QC (primary sweep {sweep}): {path}")
+    return path
+
+
+def _save_spikelet_error_png(plots_dir, stem, dir_tag, direction, message):
+    """Always write a 12/21 PNG so a failed direction is visible."""
+    import os
+
+    os.makedirs(plots_dir, exist_ok=True)
+    plt = _get_agg_plt()
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.axis("off")
+    ax.set_title(f"{stem} — {direction}  (QC could not be drawn)")
+    ax.text(
+        0.5, 0.5, str(message),
+        ha="center", va="center", color="C3", fontsize=11, wrap=True,
+        transform=ax.transAxes,
+    )
+    tag = dir_tag or SPIKELET_DIR_TAG.get(direction) or "na"
+    path = os.path.join(plots_dir, f"{stem}_{tag}_spikelets.png")
+    _savefig_white(fig, path)
+    plt.close(fig)
+    print(f"  saved spikelet QC (error page): {path}")
     return path
 
 
@@ -2222,11 +2436,16 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
             summary[f"spikelet_{key}_{tag}"] = val
         if plots_dir and SAVE_SPIKELET_PLOTS:
             if not meta:
-                print(
-                    f"  Spikelet QC skip ({direction}): no primary sweep to plot "
-                    f"(skip={metrics.get('skip_reason')})"
-                )
-            else:
+                try:
+                    meta = _fallback_spikelet_qc_meta(
+                        abf, active, passive, direction,
+                        metrics.get("skip_reason") or "no QC meta",
+                    )
+                except Exception as exc:
+                    print(f"  Spikelet QC fallback failed ({direction}): {exc}")
+                    traceback.print_exc()
+                    meta = None
+            if meta:
                 try:
                     p = save_spikelet_qc_plot(
                         abf, meta, plots_dir, stem, dir_tag=tag,
@@ -2237,6 +2456,24 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
                     print(
                         f"  Spikelet QC error ({direction} sweep {meta.get('sweep')}): {exc}"
                     )
+                    traceback.print_exc()
+                    try:
+                        p = _save_spikelet_error_png(
+                            plots_dir, stem, tag, direction, str(exc),
+                        )
+                        if p:
+                            plot_paths.append(p)
+                    except Exception:
+                        traceback.print_exc()
+            else:
+                try:
+                    p = _save_spikelet_error_png(
+                        plots_dir, stem, tag, direction,
+                        metrics.get("skip_reason") or "could not build QC figure",
+                    )
+                    if p:
+                        plot_paths.append(p)
+                except Exception:
                     traceback.print_exc()
 
     return all_rows, summary, plot_paths, sweep_rows
@@ -3192,6 +3429,22 @@ def _plot_timed(ax, times, values, *args, **kwargs):
     return len(xs)
 
 
+def _mark_negative_delay_points(ax, xs, ys, already_labeled=False):
+    """Red X on delay < 0 (spikelet event before the AP event)."""
+    nx, ny = [], []
+    for x, y in zip(xs or [], ys or []):
+        fy = _finite_number(y)
+        if fy is not None and fy < 0:
+            nx.append(x)
+            ny.append(fy)
+    if nx:
+        ax.scatter(
+            nx, ny, marker="x", c="C3", s=52, zorder=6,
+            label="delay < 0" if not already_labeled else None,
+        )
+    return len(nx)
+
+
 def _vm_for_channel(row, ch_tag):
     """V_rest from staged linear I–V intercept; hold_V if no fit passed checks."""
     v = row.get(f"V_rest_mV_{ch_tag}")
@@ -3549,10 +3802,16 @@ def save_folder_spikelet_over_time_plot(
           (d1021, "s-", "C1", "21 10%"))),
     )
     n_total = 0
+    labeled_neg = False
     for ax, panel_title, ylabel, series in panels:
         n = 0
+        is_delay = "delay" in ylabel.lower()
         for vals, style, color, label in series:
             n += _plot_timed(ax, times, vals, style, color=color, label=label)
+            if is_delay:
+                xs, ys = _finite_xy(times, vals)
+                if _mark_negative_delay_points(ax, xs, ys, already_labeled=labeled_neg):
+                    labeled_neg = True
         n_total += n
         ax.set_title(panel_title)
         ax.set_ylabel(ylabel)
@@ -3693,11 +3952,15 @@ def save_folder_spikelet_vs_vm_plot(
                 continue
             any_data = True
             all_vm, all_y = [], []
+            labeled_neg = False
             for fname, _dt, vms, ys in curves:
                 color = cmap(float(file_pos.get(
                     fname, file_pos.get(os.path.basename(str(fname)), 0.5)
                 )))
                 ax.scatter(vms, ys, color=[color], s=28, zorder=3, alpha=0.9)
+                if "delay" in y_key:
+                    if _mark_negative_delay_points(ax, vms, ys, already_labeled=labeled_neg):
+                        labeled_neg = True
                 if CC_VM_FIT_LINEAR:
                     x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, ys)
                     if x1 is not None:
