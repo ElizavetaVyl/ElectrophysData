@@ -82,7 +82,9 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
-SPIKELET_USE_NOISE_GATE = False  # temporary: any true local max counts
+SPIKELET_MIN_PROMINENCE_MV = 0.15  # peak must drop this much after the top; else no spikelet
+SPIKELET_PEAK_EDGE_MS = 1.0  # ignore maxima in the last 1 ms of the 15 ms window
+SPIKELET_USE_NOISE_GATE = False  # amplitude vs noise; peak shape is separate (prominence)
 SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
 SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sweep
@@ -1277,30 +1279,46 @@ def _spikelet_smooth_for_peak(y, sr):
     return gaussian_filter1d(y, sigma=sigma, mode="nearest")
 
 
+def _spikelet_peak_edge_samples(n, sr):
+    """How many trailing samples of the 15 ms window cannot host a spikelet."""
+    n_edge = 1
+    if sr is not None and SPIKELET_PEAK_EDGE_MS > 0:
+        n_edge = max(1, int(round(float(SPIKELET_PEAK_EDGE_MS) * float(sr) / 1000.0)))
+    return min(int(n_edge), max(1, int(n) // 5))
+
+
 def _spikelet_local_peak_index(seg, sr=None):
-    """Index of a true interior local max on a lightly smoothed trace, or None.
+    """Index of a peaked spikelet in the 15 ms window, or None.
 
-    Digitizer jitter makes raw y[i] jump up and down, so a 1-sample "peak"
-    is not a spikelet. The 15 ms window is Gaussian-smoothed
-    (σ = SPIKELET_PEAK_SMOOTH_MS) and the peak is taken on that curve.
+    Not ``argmax``. Digitizer jitter is first smoothed
+    (σ = SPIKELET_PEAK_SMOOTH_MS). A candidate must then be a real peak:
+    the smoothed trace falls after the top by at least
+    ``SPIKELET_MIN_PROMINENCE_MV`` (scipy prominence). A monotonic rise,
+    a slow coupling envelope that only crests at the window end, or a
+    1-sample wiggle therefore returns None.
 
-    A spikelet must still *bend* on the smoothed trace:
-    ``y[i] > y[i-1]`` and ``y[i] >= y[i+1]``. First and last samples are
-    never peaks. A monotonic rise (no inflection) returns None.
-    If several local maxima exist, the highest smoothed one is taken.
-
+    Maxima in the last ``SPIKELET_PEAK_EDGE_MS`` of the window are ignored.
+    If several valid peaks exist, the highest smoothed one is taken.
     Amplitude is still measured on the raw trace at this index.
     """
     y_raw = np.asarray(seg, dtype=float).ravel()
-    if y_raw.size < 3:
+    if y_raw.size < 5:
         return None
     y = _spikelet_smooth_for_peak(y_raw, sr)
+    n_edge = _spikelet_peak_edge_samples(y.size, sr)
+    peaks, _props = find_peaks(y, prominence=float(SPIKELET_MIN_PROMINENCE_MV))
+    if peaks.size == 0:
+        return None
     best_i = None
     best_v = -np.inf
-    for i in range(1, y.size - 1):
-        if y[i] > y[i - 1] and y[i] >= y[i + 1] and y[i] > best_v:
-            best_v = float(y[i])
-            best_i = int(i)
+    for i in peaks:
+        i = int(i)
+        if i < 1 or i >= y.size - n_edge:
+            continue
+        v = float(y[i])
+        if v > best_v:
+            best_v = v
+            best_i = i
     return best_i
 
 
@@ -1629,13 +1647,15 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
 
     Sweep means: AP1 excluded; mean over AP2+ with a measured peak
     (gate is off). Noise is still measured for the QC title but does not
-    reject peaks. Peak = true interior local max in 15 ms (not window argmax).
+    reject peaks. Peak = interior local max with prominence in 15 ms
+    (not window argmax: no peak → no spikelet).
     QC PNG is the primary sweep only: ``{stem}_12_spikelets.png`` and
     ``{stem}_21_spikelets.png`` in the Spikelet_plots folder.
 
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
-    Peak search = local max of a Gaussian-smoothed 15 ms window
-    (σ = SPIKELET_PEAK_SMOOTH_MS); amplitude still from the raw trace.
+    Peak search = Gaussian-smoothed 15 ms window
+    (σ = SPIKELET_PEAK_SMOOTH_MS) then ``find_peaks`` with prominence
+    ``SPIKELET_MIN_PROMINENCE_MV``; amplitude still from the raw trace.
     delay_ms / delay_peak_ms = t_peak_passive - t_peak_active.
     delay_10_ms = t_10_spikelet - t_10_active (10% of each event's own amplitude).
     Vm per sweep for vs-Vm plots = mean spikelet baseline (passive, 1 ms
