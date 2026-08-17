@@ -90,7 +90,6 @@ SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sw
 SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_MIN_APS = 2  # prefer AP2+; fall back to 1-AP sweeps if none exist
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
-SPIKELET_TIME_VM_TARGET_MV = -67.0  # extra vs-time plot: sweep with baseline closest to this
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 SPIKELET_DIR_TAG = {"ch0->ch2": "12", "ch2->ch0": "21"}
@@ -3583,6 +3582,52 @@ def _primary_sweep_row(sweep_rows, fname, direction):
         if rec.get("is_primary"):
             return rec
     return matched[0]
+
+
+def _collect_spikelet_baselines(sweep_rows, ap_rows=None):
+    """All sweep-mean spikelet baselines in the folder (both directions)."""
+    vals = []
+    for rec in sweep_rows or []:
+        vm = _sweep_row_metric(rec, "baseline_mV")
+        if vm is not None:
+            vals.append(float(vm))
+    if vals:
+        return vals
+    for rec in ap_rows or []:
+        vm = _finite_number(rec.get("baseline_passive_mV"))
+        if vm is not None:
+            vals.append(float(vm))
+    return vals
+
+
+def spikelet_baseline_mode_vm(sweep_rows, ap_rows=None, n_grid=512):
+    """
+    Vm where the density of spikelet baselines in the folder is highest.
+
+    Uses a Gaussian KDE of sweep-mean baselines (passive, 1 ms before t=0).
+    """
+    vals = _collect_spikelet_baselines(sweep_rows, ap_rows)
+    if not vals:
+        return None
+    arr = np.asarray(vals, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    if arr.size == 1 or float(np.ptp(arr)) < 1e-6:
+        return _round_or_none(float(np.median(arr)), 3)
+    try:
+        from scipy.stats import gaussian_kde
+        kde = gaussian_kde(arr)
+        lo, hi = float(np.min(arr)), float(np.max(arr))
+        pad = 0.05 * (hi - lo)
+        grid = np.linspace(lo - pad, hi + pad, int(n_grid))
+        dens = kde(grid)
+        return _round_or_none(float(grid[int(np.argmax(dens))]), 3)
+    except Exception:
+        n_bins = max(8, min(40, int(np.sqrt(arr.size) * 2)))
+        counts, edges = np.histogram(arr, bins=n_bins)
+        i = int(np.argmax(counts))
+        return _round_or_none(0.5 * (float(edges[i]) + float(edges[i + 1])), 3)
 
 
 def _sweep_closest_to_vm(sweep_rows, fname, direction, target_mv, ap_rows=None):
