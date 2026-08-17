@@ -4012,6 +4012,7 @@ def save_folder_spikelet_vs_vm_plot(
     """
     Folder overview like CC vs Vm: sweep-mean spikelet/spike ratio and delays vs
     mean spikelet baseline (passive, 1 ms before t=0). Color = first→last file.
+    Colored lines = per-file linear fit; black = mean slope of those file lines.
     Always writes the PNG (empty panels if no detections).
     """
     from matplotlib.colors import Normalize
@@ -4055,7 +4056,7 @@ def save_folder_spikelet_vs_vm_plot(
                         ha="center", va="center", color="0.5", fontsize=9)
                 continue
             any_data = True
-            all_vm, all_y = [], []
+            file_xy = []
             labeled_neg = False
             for fname, _dt, vms, ys in curves:
                 color = cmap(float(file_pos.get(
@@ -4069,9 +4070,8 @@ def save_folder_spikelet_vs_vm_plot(
                     x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, ys)
                     if x1 is not None:
                         ax.plot(x1, y1, "-", color=color, lw=1.3, alpha=0.85)
-                all_vm.extend(vms)
-                all_y.extend(ys)
-            _plot_all_files_cc_vm_mean(ax, all_vm, all_y)
+                file_xy.append((vms, ys))
+            _plot_mean_of_file_lines(ax, file_xy)
             ax.grid(True, alpha=0.3)
             if row_i == 0:
                 ax.set_title(f"{dir_title} — {len(curves)} file(s)")
@@ -4230,6 +4230,55 @@ def _binned_mean_xy(vm, cc, n_bins=8):
     if len(xs) < 2:
         return None, None
     return xs, ys
+
+
+def _mean_line_from_file_fits(file_curves, n_grid=80):
+    """
+    One line whose slope is the mean of per-file linear slopes.
+
+    Each file with a valid fit counts once (not weighted by how many
+    sweeps it has). The line is placed through the mean of those files'
+    (Vm, y) centroids so it shows the typical angle of the colored lines.
+    """
+    slopes = []
+    cx, cy = [], []
+    xmin, xmax = np.inf, -np.inf
+    for vms, ys in file_curves or []:
+        _x, _y, slope, _b, _r2 = _linear_cc_vs_vm(vms, ys)
+        if slope is None:
+            continue
+        vm = np.asarray(vms, dtype=float)
+        yy = np.asarray(ys, dtype=float)
+        ok = np.isfinite(vm) & np.isfinite(yy)
+        if not np.any(ok):
+            continue
+        slopes.append(float(slope))
+        cx.append(float(np.mean(vm[ok])))
+        cy.append(float(np.mean(yy[ok])))
+        xmin = min(xmin, float(np.min(vm[ok])))
+        xmax = max(xmax, float(np.max(vm[ok])))
+    if not slopes or not np.isfinite(xmin) or xmax <= xmin:
+        return None, None, None, None
+    slope = float(np.mean(slopes))
+    x0 = float(np.mean(cx))
+    y0 = float(np.mean(cy))
+    intercept = y0 - slope * x0
+    x = np.linspace(xmin, xmax, int(n_grid))
+    y = slope * x + intercept
+    return x, y, slope, intercept
+
+
+def _plot_mean_of_file_lines(ax, file_curves):
+    """Black line = mean slope of the per-file linear fits."""
+    x1, y1, slope, intercept = _mean_line_from_file_fits(file_curves)
+    if x1 is None:
+        return None, None
+    ax.plot(
+        x1, y1, "-", color="black", lw=2.5, zorder=5, alpha=0.95,
+        label="mean of file lines",
+    )
+    ax.legend(loc="best", fontsize=8)
+    return slope, intercept
 
 
 def _plot_all_files_cc_vm_mean(ax, vms, norms):
