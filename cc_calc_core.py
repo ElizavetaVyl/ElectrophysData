@@ -3294,6 +3294,121 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
     return out_path
 
 
+def cc_vm_fits_for_direction(all_rows, direction):
+    """Per-file linear CC_norm vs Vm: slope (1/mV), intercept, R². Needs >=3 points."""
+    out = []
+    for fname, dt, vms, norms in file_cc_norm_curves(all_rows, direction):
+        _x, _y, slope, intercept, r2 = _linear_cc_vs_vm(vms, norms)
+        out.append({
+            "file": fname,
+            "recording_datetime": dt,
+            "direction": direction,
+            "n": len(vms),
+            "slope": None if slope is None else round(float(slope), 6),
+            "intercept": None if intercept is None else round(float(intercept), 6),
+            "r2": None if r2 is None else round(float(r2), 4),
+        })
+    return out
+
+
+def attach_cc_vm_slopes(summary_rows, all_rows):
+    """Add CC12/CC21 vs Vm slope, intercept, R² to File_summary rows."""
+    by_file = {}
+    for direction, tag in (("ch0->ch2", "12"), ("ch2->ch0", "21")):
+        for rec in cc_vm_fits_for_direction(all_rows, direction):
+            key = os.path.basename(str(rec["file"]))
+            by_file.setdefault(key, {})[tag] = rec
+    for row in summary_rows:
+        key = os.path.basename(str(row.get("file") or ""))
+        fits = by_file.get(key, {})
+        for tag in ("12", "21"):
+            rec = fits.get(tag) or {}
+            row[f"CC{tag}_vs_Vm_slope"] = rec.get("slope")
+            row[f"CC{tag}_vs_Vm_intercept"] = rec.get("intercept")
+            row[f"CC{tag}_vs_Vm_R2"] = rec.get("r2")
+            row[f"n_CC_vs_Vm_{tag}"] = rec.get("n")
+    return summary_rows
+
+
+def save_folder_cc_vm_slope_over_time_plot(
+    all_rows, out_path, title=None, summary_rows=None,
+):
+    """
+    Slope of per-file CC_norm vs Vm linear fit, vs recording time.
+
+    Same fit as the colored lines on CC_norm vs Vm (>=3 points).
+    """
+    dt_by_file = {}
+    for row in summary_rows or []:
+        fname = row.get("file")
+        if not fname:
+            continue
+        dt = _parse_recording_datetime(row.get("recording_datetime"))
+        dt_by_file[os.path.basename(str(fname))] = dt
+        dt_by_file[str(fname)] = dt
+
+    plt = _get_agg_plt()
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7.5), sharex=True)
+    if title:
+        fig.suptitle(f"{title}  —  CC vs Vm slope over files", fontsize=12)
+
+    panels = (
+        ("ch0->ch2", "CC12 vs Vm slope (ch0→ch2)"),
+        ("ch2->ch0", "CC21 vs Vm slope (ch2→ch0)"),
+    )
+    n_total = 0
+    for ax, (direction, panel_title) in zip(axes, panels):
+        times, slopes, r2s = [], [], []
+        for rec in cc_vm_fits_for_direction(all_rows, direction):
+            if rec.get("slope") is None:
+                continue
+            dt = rec.get("recording_datetime")
+            if dt is None:
+                dt = dt_by_file.get(os.path.basename(str(rec["file"])))
+                if dt is None:
+                    dt = dt_by_file.get(str(rec["file"]))
+            if dt is None:
+                continue
+            times.append(dt)
+            slopes.append(rec["slope"])
+            r2s.append(rec.get("r2"))
+        n = _plot_timed(ax, times, slopes, "o-", color="C0", label="slope")
+        n_total += n
+        ax.axhline(0.0, color="0.45", ls=":", lw=0.8)
+        ax.set_title(panel_title if n else f"{panel_title} — no data")
+        ax.set_ylabel("slope (CC_norm / mV)")
+        ax.grid(True, alpha=0.3)
+        if n == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", color="0.5", fontsize=9)
+        else:
+            ax2 = ax.twinx()
+            _plot_timed(ax2, times, r2s, "s--", color="0.4", label="R²")
+            ax2.set_ylabel("R²", color="0.4")
+            ax2.tick_params(axis="y", labelcolor="0.4")
+            ax2.set_ylim(-0.05, 1.05)
+            lines = ax.get_lines() + ax2.get_lines()
+            ax.legend(lines, [ln.get_label() for ln in lines], loc="best", fontsize=8)
+    axes[-1].set_xlabel("Recording time")
+
+    if n_total == 0:
+        plt.close(fig)
+        print("  CC vs Vm slope over time: no file with >=3 CC_norm points")
+        return None
+
+    _format_time_axes(axes[-1])
+    fig.autofmt_xdate()
+    try:
+        fig.tight_layout()
+    except Exception:
+        pass
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    _savefig_white(fig, out_path)
+    plt.close(fig)
+    print(f"  saved {out_path}  (slope points: {n_total})")
+    return out_path
+
+
 def build_file_summary_row(
     name,
     rec_dt,
