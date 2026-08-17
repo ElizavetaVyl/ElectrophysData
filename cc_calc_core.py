@@ -2424,7 +2424,7 @@ def _plot_timed(ax, times, values, *args, **kwargs):
 
 
 def _vm_for_channel(row, ch_tag):
-    """Resting Vm from I–V intercept; hold Vm if rest is missing."""
+    """V_rest = I–V intercept at I=0; hold_V if rest is missing."""
     v = row.get(f"V_rest_mV_{ch_tag}")
     if v is not None:
         return v
@@ -2432,7 +2432,7 @@ def _vm_for_channel(row, ch_tag):
 
 
 def _spikelet_file_metric(row, tag, metric):
-    """File-level spikelet value for plots (mean of APs, else average waveform)."""
+    """File-level spikelet value: mean of APs on the analyzed sweep, else avg waveform."""
     src = row.get(f"spikelet_metric_source_{tag}")
     if src == "average":
         keys = (f"spikelet_avg_{metric}_{tag}", f"spikelet_mean_{metric}_{tag}")
@@ -2445,52 +2445,80 @@ def _spikelet_file_metric(row, tag, metric):
     return None
 
 
+def _spikelet_means_from_ap_rows(spikelet_rows):
+    """
+    One mean per file and direction from the sweep that was analyzed.
+
+    Uses detected spikelets on that sweep (amp_ratio, delay_ms, delay_10_ms).
+    """
+    by = {}
+    for r in spikelet_rows or []:
+        if not r.get("detected"):
+            continue
+        fname = os.path.basename(str(r.get("file") or ""))
+        direction = r.get("direction")
+        if not fname or not direction:
+            continue
+        by.setdefault((fname, direction), []).append(r)
+
+    out = {}
+    for key, items in by.items():
+        rec = {}
+        for metric in ("amp_ratio", "delay_ms", "delay_10_ms"):
+            vals = []
+            for item in items:
+                v = item.get(metric)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(fv):
+                    vals.append(fv)
+            rec[metric] = statistics.mean(vals) if vals else None
+        out[key] = rec
+    return out
+
+
 def _format_time_axes(axes_flat):
     from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 
-    for ax in axes_flat:
+    for ax in np.atleast_1d(axes_flat).ravel():
         locator = AutoDateLocator()
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(ConciseDateFormatter(locator))
 
 
-FOLDER_TIME_DIRECTIONS = (
-    {
-        "tag": "12",
-        "title": "ch0→ch2",
-        "cc_key": "CC12",
-        "gj_key": "Gj12_nS",
-        "rin_active_key": "Rin1_MOhm",
-        "rin_passive_key": "Rin2_MOhm",
-        "vm_active_ch": "ch0",
-        "vm_passive_ch": "ch2",
-        "rin_active_lbl": "Rin active (ch0)",
-        "rin_passive_lbl": "Rin passive (ch2)",
-        "vm_active_lbl": "Vm active (ch0)",
-        "vm_passive_lbl": "Vm passive (ch2)",
-    },
-    {
-        "tag": "21",
-        "title": "ch2→ch0",
-        "cc_key": "CC21",
-        "gj_key": "Gj21_nS",
-        "rin_active_key": "Rin2_MOhm",
-        "rin_passive_key": "Rin1_MOhm",
-        "vm_active_ch": "ch2",
-        "vm_passive_ch": "ch0",
-        "rin_active_lbl": "Rin active (ch2)",
-        "rin_passive_lbl": "Rin passive (ch0)",
-        "vm_active_lbl": "Vm active (ch2)",
-        "vm_passive_lbl": "Vm passive (ch0)",
-    },
-)
+def _cc_gj_twin_panel(ax, times, cc_vals, gj_vals, cc_label, gj_label, panel_title):
+    n_cc = _plot_timed(ax, times, cc_vals, "o-", color="C0", label=cc_label)
+    ax.set_ylabel("CC", color="C0")
+    ax.tick_params(axis="y", labelcolor="C0")
+    ax2 = ax.twinx()
+    n_gj = _plot_timed(ax2, times, gj_vals, "s--", color="C3", label=gj_label)
+    ax2.set_ylabel("Gj (nS)", color="C3")
+    ax2.tick_params(axis="y", labelcolor="C3")
+    ax.set_title(panel_title)
+    ax.grid(True, alpha=0.3)
+    n = n_cc + n_gj
+    if n == 0:
+        ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                ha="center", va="center", color="0.5", fontsize=9)
+    else:
+        lines = ax.get_lines() + ax2.get_lines()
+        labels = [ln.get_label() for ln in lines]
+        ax.legend(lines, labels, loc="best", fontsize=8)
+    return n
 
 
 def save_folder_summary_plot(summary_rows, out_path, title=None):
     """
-    Folder overview vs recording time: CC, Gj, Rin, Vm for each direction.
+    Folder time course, 4 stacked subplots (file-mean CC/Gj per direction):
 
-    One figure, 4 rows × 2 columns (ch0→ch2 | ch2→ch0). Missing values are skipped.
+    1) CC12 + Gj12 (twin axis)
+    2) CC21 + Gj21 (twin axis)
+    3) Rin1 (ch0) and Rin2 (ch2)
+    4) Vm1 (ch0) and Vm2 (ch2) — V_rest from I–V intercept
     """
     pairs = folder_summary_timed_rows(summary_rows)
     if not pairs:
@@ -2499,60 +2527,62 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
     times = [dt for dt, _ in pairs]
     rows = [r for _, r in pairs]
     plt = _get_agg_plt()
-    fig, axes = plt.subplots(4, 2, figsize=(14, 11), sharex="col")
+    fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
     if title:
         fig.suptitle(f"{title}  —  CC / Gj / Rin / Vm vs time", fontsize=12)
 
-    any_points = False
-    metric_ylabels = ("CC", "Gj (nS)", "Rin (MΩ)", "Vm (mV)")
-    for col, spec in enumerate(FOLDER_TIME_DIRECTIONS):
-        cc_vals = [r.get(spec["cc_key"]) for r in rows]
-        gj_vals = [r.get(spec["gj_key"]) for r in rows]
-        rin_a = [r.get(spec["rin_active_key"]) for r in rows]
-        rin_p = [r.get(spec["rin_passive_key"]) for r in rows]
-        vm_a = [_vm_for_channel(r, spec["vm_active_ch"]) for r in rows]
-        vm_p = [_vm_for_channel(r, spec["vm_passive_ch"]) for r in rows]
+    n = 0
+    n += _cc_gj_twin_panel(
+        axes[0], times,
+        [r.get("CC12") for r in rows],
+        [r.get("Gj12_nS") for r in rows],
+        "CC12", "Gj12", "CC12 / Gj12 (ch0→ch2)",
+    )
+    n += _cc_gj_twin_panel(
+        axes[1], times,
+        [r.get("CC21") for r in rows],
+        [r.get("Gj21_nS") for r in rows],
+        "CC21", "Gj21", "CC21 / Gj21 (ch2→ch0)",
+    )
 
-        series = (
-            ((cc_vals,), ("o-",), ("C0",), (spec["cc_key"],)),
-            ((gj_vals,), ("s--",), ("C3",), (spec["gj_key"].replace("_nS", ""),)),
-            (
-                (rin_a, rin_p),
-                ("o-", "s-"),
-                ("C0", "C1"),
-                (spec["rin_active_lbl"], spec["rin_passive_lbl"]),
-            ),
-            (
-                (vm_a, vm_p),
-                ("o-", "s-"),
-                ("C0", "C1"),
-                (spec["vm_active_lbl"], spec["vm_passive_lbl"]),
-            ),
-        )
-        for row_i, (vals_list, styles, colors, labels) in enumerate(series):
-            ax = axes[row_i, col]
-            n = 0
-            for vals, style, color, label in zip(vals_list, styles, colors, labels):
-                n += _plot_timed(ax, times, vals, style, color=color, label=label)
-            any_points = any_points or n > 0
-            ax.grid(True, alpha=0.3)
-            if n == 0:
-                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
-                        ha="center", va="center", color="0.5", fontsize=9)
-            else:
-                ax.legend(loc="best", fontsize=7)
-            if row_i == 0:
-                ax.set_title(spec["title"])
-            if col == 0:
-                ax.set_ylabel(metric_ylabels[row_i])
-            if row_i == 3:
-                ax.set_xlabel("Recording time")
+    ax_r = axes[2]
+    n_r = 0
+    n_r += _plot_timed(ax_r, times, [r.get("Rin1_MOhm") for r in rows],
+                       "o-", color="C0", label="Rin1 (ch0)")
+    n_r += _plot_timed(ax_r, times, [r.get("Rin2_MOhm") for r in rows],
+                       "s-", color="C1", label="Rin2 (ch2)")
+    n += n_r
+    ax_r.set_ylabel("Rin (MΩ)")
+    ax_r.set_title("Rin1 / Rin2")
+    ax_r.grid(True, alpha=0.3)
+    if n_r == 0:
+        ax_r.text(0.5, 0.5, "no data", transform=ax_r.transAxes,
+                  ha="center", va="center", color="0.5", fontsize=9)
+    else:
+        ax_r.legend(loc="best", fontsize=8)
 
-    if not any_points:
+    ax_v = axes[3]
+    n_v = 0
+    n_v += _plot_timed(ax_v, times, [_vm_for_channel(r, "ch0") for r in rows],
+                       "o-", color="C0", label="Vm1 (ch0, V_rest)")
+    n_v += _plot_timed(ax_v, times, [_vm_for_channel(r, "ch2") for r in rows],
+                       "s-", color="C1", label="Vm2 (ch2, V_rest)")
+    n += n_v
+    ax_v.set_ylabel("Vm (mV)")
+    ax_v.set_title("Vm1 / Vm2  (V_rest = I–V intercept at I=0)")
+    ax_v.set_xlabel("Recording time")
+    ax_v.grid(True, alpha=0.3)
+    if n_v == 0:
+        ax_v.text(0.5, 0.5, "no data", transform=ax_v.transAxes,
+                  ha="center", va="center", color="0.5", fontsize=9)
+    else:
+        ax_v.legend(loc="best", fontsize=8)
+
+    if n == 0:
         plt.close(fig)
         return None
 
-    _format_time_axes(axes[-1, :])
+    _format_time_axes(axes[-1])
     fig.autofmt_xdate()
     try:
         fig.tight_layout()
@@ -2565,73 +2595,74 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
     return out_path
 
 
-def save_folder_spikelet_over_time_plot(summary_rows, out_path, title=None):
+def save_folder_spikelet_over_time_plot(
+    summary_rows, out_path, title=None, spikelet_rows=None,
+):
     """
-    Folder overview vs recording time: spikelet/spike amp ratio and both delays.
+    Spikelet/spike vs recording time. One point per file = mean over APs on the
+    analyzed sweep, both directions (12 = ch0→ch2, 21 = ch2→ch0).
 
-    One figure, 2 rows × 2 columns (ch0→ch2 | ch2→ch0).
-    delay_peak = spikelet peak − AP peak; delay_10 = 10% spikelet − 10% AP.
+    Always writes the PNG (empty panels if no detections).
     """
     pairs = folder_summary_timed_rows(summary_rows)
     if not pairs:
+        print("  spikelet vs time: skipped (no recording datetime)")
         return None
 
     times = [dt for dt, _ in pairs]
     rows = [r for _, r in pairs]
+    from_ap = _spikelet_means_from_ap_rows(spikelet_rows)
+    dir_12, dir_21 = "ch0->ch2", "ch2->ch0"
+
+    def _val(row, tag, direction, metric):
+        fname = os.path.basename(str(row.get("file") or ""))
+        ap = from_ap.get((fname, direction))
+        if ap is None:
+            ap = from_ap.get((str(row.get("file") or ""), direction))
+        if ap and ap.get(metric) is not None:
+            return ap[metric]
+        return _spikelet_file_metric(row, tag, metric)
+
+    ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
+    ratio21 = [_val(r, "21", dir_21, "amp_ratio") for r in rows]
+    dpk12 = [_val(r, "12", dir_12, "delay_ms") for r in rows]
+    dpk21 = [_val(r, "21", dir_21, "delay_ms") for r in rows]
+    d1012 = [_val(r, "12", dir_12, "delay_10_ms") for r in rows]
+    d1021 = [_val(r, "21", dir_21, "delay_10_ms") for r in rows]
+
     plt = _get_agg_plt()
-    fig, axes = plt.subplots(2, 2, figsize=(14, 7.5), sharex="col")
+    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
     if title:
         fig.suptitle(f"{title}  —  spikelet / spike vs time", fontsize=12)
 
-    any_points = False
-    for col, spec in enumerate(FOLDER_TIME_DIRECTIONS):
-        tag = spec["tag"]
-        ratio = [_spikelet_file_metric(r, tag, "amp_ratio") for r in rows]
-        delay_pk = [_spikelet_file_metric(r, tag, "delay_ms") for r in rows]
-        delay_10 = [_spikelet_file_metric(r, tag, "delay_10_ms") for r in rows]
-
-        ax_r = axes[0, col]
-        n_r = _plot_timed(
-            ax_r, times, ratio, "o-", color="C2",
-            label="amp spikelet / amp spike",
-        )
-        any_points = any_points or n_r > 0
-        ax_r.set_title(spec["title"])
-        ax_r.grid(True, alpha=0.3)
-        if col == 0:
-            ax_r.set_ylabel("Amplitude ratio")
-        if n_r == 0:
-            ax_r.text(0.5, 0.5, "no data", transform=ax_r.transAxes,
-                      ha="center", va="center", color="0.5", fontsize=9)
+    panels = (
+        (axes[0], "Amplitude ratio (spikelet / spike)", "ratio",
+         ((ratio12, "o-", "C0", "12 (ch0→ch2)"),
+          (ratio21, "s-", "C1", "21 (ch2→ch0)"))),
+        (axes[1], "Delay peak (ms)", "delay peak (ms)",
+         ((dpk12, "o-", "C0", "12 peak"),
+          (dpk21, "s-", "C1", "21 peak"))),
+        (axes[2], "Delay 10% (ms)", "delay 10% (ms)",
+         ((d1012, "o-", "C0", "12 10%"),
+          (d1021, "s-", "C1", "21 10%"))),
+    )
+    n_total = 0
+    for ax, panel_title, ylabel, series in panels:
+        n = 0
+        for vals, style, color, label in series:
+            n += _plot_timed(ax, times, vals, style, color=color, label=label)
+        n_total += n
+        ax.set_title(panel_title)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        if n == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", color="0.5", fontsize=9)
         else:
-            ax_r.legend(loc="best", fontsize=7)
+            ax.legend(loc="best", fontsize=8)
+    axes[-1].set_xlabel("Recording time")
 
-        ax_d = axes[1, col]
-        n_d = 0
-        n_d += _plot_timed(
-            ax_d, times, delay_pk, "o-", color="C0",
-            label="delay peak (spikelet − AP)",
-        )
-        n_d += _plot_timed(
-            ax_d, times, delay_10, "s--", color="C4",
-            label="delay 10% (spikelet − AP)",
-        )
-        any_points = any_points or n_d > 0
-        ax_d.grid(True, alpha=0.3)
-        ax_d.set_xlabel("Recording time")
-        if col == 0:
-            ax_d.set_ylabel("Delay (ms)")
-        if n_d == 0:
-            ax_d.text(0.5, 0.5, "no data", transform=ax_d.transAxes,
-                      ha="center", va="center", color="0.5", fontsize=9)
-        else:
-            ax_d.legend(loc="best", fontsize=7)
-
-    if not any_points:
-        plt.close(fig)
-        return None
-
-    _format_time_axes(axes[-1, :])
+    _format_time_axes(axes[-1])
     fig.autofmt_xdate()
     try:
         fig.tight_layout()
@@ -2640,7 +2671,7 @@ def save_folder_spikelet_over_time_plot(summary_rows, out_path, title=None):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     _savefig_white(fig, out_path)
     plt.close(fig)
-    print(f"  saved {out_path}")
+    print(f"  saved {out_path}  (spikelet points: {n_total})")
     return out_path
 
 
@@ -2748,6 +2779,51 @@ def _linear_cc_vs_vm(vm, cc, n_grid=80):
     return x, y, float(coeffs[0]), float(coeffs[1]), r2
 
 
+def _binned_mean_xy(vm, cc, n_bins=8):
+    """Mean CC vs mean Vm in equal-width Vm bins (line through all files)."""
+    vm = np.asarray(vm, dtype=float)
+    cc = np.asarray(cc, dtype=float)
+    ok = np.isfinite(vm) & np.isfinite(cc)
+    vm, cc = vm[ok], cc[ok]
+    if len(vm) < 2:
+        return None, None
+    vmin, vmax = float(np.min(vm)), float(np.max(vm))
+    if vmax - vmin < 1e-9:
+        return [vmin], [float(np.mean(cc))]
+    n_bins = int(max(3, min(n_bins, max(3, len(vm) // 3))))
+    edges = np.linspace(vmin, vmax, n_bins + 1)
+    xs, ys = [], []
+    for i in range(n_bins):
+        left, right = edges[i], edges[i + 1]
+        mask = (vm >= left) & (vm <= right) if i == n_bins - 1 else (vm >= left) & (vm < right)
+        if np.any(mask):
+            xs.append(float(np.mean(vm[mask])))
+            ys.append(float(np.mean(cc[mask])))
+    if len(xs) < 2:
+        return None, None
+    return xs, ys
+
+
+def _plot_all_files_cc_vm_mean(ax, vms, norms):
+    """Black linear mean across every file's CC_norm vs Vm points."""
+    x1, y1, slope, intercept, r2 = _linear_cc_vs_vm(vms, norms)
+    if x1 is not None:
+        ax.plot(
+            x1, y1, "-", color="black", lw=2.5, zorder=5, alpha=0.95,
+            label="mean (all files)",
+        )
+        ax.legend(loc="best", fontsize=8)
+        return slope, intercept, r2
+    xb, yb = _binned_mean_xy(vms, norms)
+    if xb is not None:
+        ax.plot(
+            xb, yb, "D-", color="black", lw=2.0, ms=5, zorder=5,
+            label="mean (all files)",
+        )
+        ax.legend(loc="best", fontsize=8)
+    return None, None, None
+
+
 def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=None):
     """
     Folder overview: CC_norm vs Vm, color = first→last ABF file number.
@@ -2784,6 +2860,7 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
             continue
         any_data = True
 
+        all_vm, all_cc = [], []
         for fname, _dt, vms, norms in curves:
             color = cmap(float(file_pos.get(fname, file_pos.get(os.path.basename(str(fname)), 0.5))))
             ax.scatter(vms, norms, color=[color], s=28, zorder=3, alpha=0.9)
@@ -2791,6 +2868,9 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
                 x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, norms)
                 if x1 is not None:
                     ax.plot(x1, y1, "-", color=color, lw=1.3, alpha=0.85)
+            all_vm.extend(vms)
+            all_cc.extend(norms)
+        _plot_all_files_cc_vm_mean(ax, all_vm, all_cc)
 
         ax.axhline(1.0, color="0.45", ls=":", lw=0.8, alpha=0.7)
         ax.set_xlabel("Vm active during stim (mV)")
