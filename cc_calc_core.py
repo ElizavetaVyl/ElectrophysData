@@ -81,7 +81,8 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
-SPIKELET_NOISE_K = 1.5  # detect if amp_spikelet > k × robust noise (MAD)
+SPIKELET_NOISE_K = 1.5  # pass if amp_spikelet > k × robust noise (MAD→σ)
+SPIKELET_NOISE_K_REF = 3.0  # old gate, drawn on QC for comparison only
 SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps still need 0.15 mV
 SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
@@ -133,6 +134,7 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "avg_delay_10_ms",
     "metric_source",
     "rms_noise_mV",
+    "noise_thr_mV",
     "skip_reason",
     "n_sweeps",
     "mean_vm_begin_mV",
@@ -181,6 +183,7 @@ SPIKELET_SWEEP_KEYS = (
     "mean_delay_10_ms",
     "mean_vm_begin_mV",
     "mean_baseline_passive_mV",
+    "noise_thr_mV",
     "avg_amp_ratio",
     "avg_amp_active_mV",
     "avg_amp_spikelet_mV",
@@ -1281,15 +1284,30 @@ def _passive_rms_prestim(abf, sweep, passive_ch, pre_start, stim_start):
     return float(np.std(pre - np.mean(pre)))
 
 
-def spikelet_amp_passes(amp, rms):
-    """True if spikelet amplitude clears the relaxed noise gate."""
+def spikelet_amp_threshold(rms, k=None):
+    """Amplitude bar: max(k × robust noise, SPIKELET_MIN_AMP_MV)."""
+    if k is None:
+        k = SPIKELET_NOISE_K
+    if rms is None:
+        return float(SPIKELET_MIN_AMP_MV)
+    try:
+        noise = float(rms)
+    except (TypeError, ValueError):
+        return float(SPIKELET_MIN_AMP_MV)
+    if not np.isfinite(noise) or noise < 0:
+        return float(SPIKELET_MIN_AMP_MV)
+    return max(float(k) * noise, float(SPIKELET_MIN_AMP_MV))
+
+
+def spikelet_amp_passes(amp, rms, k=None):
+    """True if spikelet amplitude clears the noise gate."""
     if amp is None or amp <= 0:
         return False, "amp_spikelet_le_0"
-    noise_bar = (SPIKELET_NOISE_K * rms) if rms is not None else SPIKELET_MIN_AMP_MV
-    need = max(noise_bar, SPIKELET_MIN_AMP_MV)
+    k = SPIKELET_NOISE_K if k is None else k
+    need = spikelet_amp_threshold(rms, k=k)
     if amp < need:
         return False, (
-            f"below_noise (amp={amp:.4f} < max({SPIKELET_NOISE_K}*noise, "
+            f"below_noise (amp={amp:.4f} < max({k}*noise, "
             f"{SPIKELET_MIN_AMP_MV})={need:.4f})"
         )
     return True, None
@@ -1352,6 +1370,7 @@ def _empty_spikelet_metrics(skip_reason):
         "avg_delay_10_ms": None,
         "metric_source": None,
         "rms_noise_mV": None,
+        "noise_thr_mV": None,
         "skip_reason": skip_reason,
         "n_sweeps": 0,
         "mean_vm_begin_mV": None,
@@ -1405,26 +1424,27 @@ def _rows_with_spikelet_amp(ap_rows):
 
 def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     """
-    Sweep means: average over available spikelets except AP1.
+    Sweep means: AP1 excluded; average AP2+ that pass the noise gate (k=1.5).
 
-    Available = AP2+ with a measured spikelet amplitude. Ratio and delays
-    are averaged over the subset that has that value.
+    n_with_amp still counts every measured peak. Folder-plot means use only
+    detected (above max(k×noise, 0.15 mV)).
     """
     measured = _rows_with_spikelet_amp(ap_rows)
+    passed = [r for r in measured if r.get("detected")]
     metrics["n_AP_used"] = len(ap_rows or [])
     metrics["n_with_amp"] = len(measured)
-    if not measured:
+    if not passed:
         return False
-    metrics["mean_amp_active_mV"] = _mean_row_field(measured, "amp_active_mV")
-    metrics["mean_amp_spikelet_mV"] = _mean_row_field(measured, "amp_spikelet_mV")
-    metrics["mean_amp_ratio"] = _mean_row_field(measured, "amp_ratio")
-    metrics["mean_delay_ms"] = _mean_row_field(measured, "delay_ms", "delay_peak_ms")
-    metrics["mean_delay_10_ms"] = _mean_row_field(measured, "delay_10_ms")
-    metrics["mean_vm_begin_mV"] = _mean_row_field(measured, "vm_begin_active_mV")
+    metrics["mean_amp_active_mV"] = _mean_row_field(passed, "amp_active_mV")
+    metrics["mean_amp_spikelet_mV"] = _mean_row_field(passed, "amp_spikelet_mV")
+    metrics["mean_amp_ratio"] = _mean_row_field(passed, "amp_ratio")
+    metrics["mean_delay_ms"] = _mean_row_field(passed, "delay_ms", "delay_peak_ms")
+    metrics["mean_delay_10_ms"] = _mean_row_field(passed, "delay_10_ms")
+    metrics["mean_vm_begin_mV"] = _mean_row_field(passed, "vm_begin_active_mV")
     metrics["mean_baseline_passive_mV"] = _mean_row_field(
-        measured, "baseline_passive_mV"
+        passed, "baseline_passive_mV"
     )
-    metrics["metric_source"] = "ap2_with_amp"
+    metrics["metric_source"] = "ap2_noise_gate"
     metrics["skip_reason"] = None
     return True
 
@@ -1433,8 +1453,9 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     """
     Spikelet metrics on every sweep with >=2 APs (from the first such sweep on).
 
-    Sweep means: AP1 excluded; mean over AP2+ that have a measured spikelet
-    amplitude (noise gate is QC-only, it does not drop points from means).
+    Sweep means: AP1 excluded; mean over AP2+ that pass the noise gate
+    (amp > max(1.5×noise, 0.15 mV)). QC marks all found peaks and draws
+    the 1.5× and old 3× threshold lines.
     File-level File_summary values come from the primary QC sweep
     (first >=4 AP, else 3, else 2).
 
@@ -1506,7 +1527,7 @@ def _analyze_spikelets_sweep(
     n_y = len(y_a)
 
     ap_rows = []
-    snips_a, snips_p = [], []
+    snips_a, snips_p, snips_ok = [], [], []
     amps_a_for_avg = []
 
     for i in range(1, n_ap):  # skip AP1 (index 0)
@@ -1601,6 +1622,7 @@ def _analyze_spikelets_sweep(
         if isi_ok:
             snips_a.append(y_a[i_start - n_pre:i_start + n_post])
             snips_p.append(y_p[i_start - n_pre:i_start + n_post])
+            snips_ok.append(bool(row["detected"]))
             amps_a_for_avg.append(amp_a)
             row["used_in_average"] = True
         else:
@@ -1623,6 +1645,7 @@ def _analyze_spikelets_sweep(
         "n_spikelet_detected": len(detected),
         "n_with_amp": 0,
         "rms_noise_mV": _round_or_none(rms, 4),
+        "noise_thr_mV": _round_or_none(spikelet_amp_threshold(rms), 4),
     })
     has_means = _fill_sweep_means_from_ap_rows(metrics, ap_rows)
 
@@ -1726,6 +1749,7 @@ def _analyze_spikelets_sweep(
         "mean_p": mean_p,
         "snips_a": snips_a,
         "snips_p": snips_p,
+        "snips_ok": snips_ok,
         "tier": tier,
         "n_ap": n_ap,
         "rms": rms,
@@ -1764,6 +1788,7 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
         "mean_delay_10_ms",
         "mean_vm_begin_mV",
         "mean_baseline_passive_mV",
+        "noise_thr_mV",
         "avg_amp_active_mV",
         "avg_amp_spikelet_mV",
         "avg_amp_ratio",
@@ -1851,18 +1876,47 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
                 ax_ov.axvspan(t0 - SPIKELET_BASELINE_MS / 1000.0, t0, color="0.7", alpha=0.25)
                 ax_ov.axvspan(t0, t0 + SPIKELET_PEAK_MS / 1000.0, color="C4", alpha=0.12)
 
-    labeled_sp = False
+    labeled_pass = False
+    labeled_fail = False
+    labeled_thr = False
     labeled_10a = False
     labeled_10p = False
+    rms = plot_meta.get("rms")
+    thr_now = spikelet_amp_threshold(rms, k=SPIKELET_NOISE_K)
+    thr_old = spikelet_amp_threshold(rms, k=SPIKELET_NOISE_K_REF)
     for r in plot_meta["ap_rows"]:
+        bsl = r.get("baseline_passive_mV")
+        t0_ms = r.get("t_start_ms")
+        if bsl is not None and t0_ms is not None:
+            t0s = t0_ms / 1000.0
+            t1s = t0s + SPIKELET_PEAK_MS / 1000.0
+            ax_ov.plot(
+                [t0s, t1s], [bsl + thr_now, bsl + thr_now],
+                color="black", ls="--", lw=1.0, zorder=4,
+                label=f"thr {SPIKELET_NOISE_K:g}×noise ({thr_now:.3f} mV)" if not labeled_thr else None,
+            )
+            ax_ov.plot(
+                [t0s, t1s], [bsl + thr_old, bsl + thr_old],
+                color="0.45", ls=":", lw=1.0, zorder=4,
+                label=f"old {SPIKELET_NOISE_K_REF:g}×noise ({thr_old:.3f} mV)" if not labeled_thr else None,
+            )
+            labeled_thr = True
         if r.get("t_peak_passive_ms") is not None:
             tp = r["t_peak_passive_ms"] / 1000.0
             idx = min(max(int(round(tp * sr)), 0), len(y_p) - 1)
-            ax_ov.scatter(
-                t[idx], y_p[idx], c="darkorange", s=40, zorder=6, marker="x",
-                label="spikelet peak" if not labeled_sp else None,
-            )
-            labeled_sp = True
+            if r.get("detected"):
+                ax_ov.scatter(
+                    t[idx], y_p[idx], c="darkorange", s=48, zorder=6, marker="o",
+                    edgecolors="k", linewidths=0.4,
+                    label="spikelet pass (k=1.5)" if not labeled_pass else None,
+                )
+                labeled_pass = True
+            else:
+                ax_ov.scatter(
+                    t[idx], y_p[idx], c="0.45", s=42, zorder=6, marker="x",
+                    label="spikelet below noise" if not labeled_fail else None,
+                )
+                labeled_fail = True
         if r.get("t_10_active_ms") is not None:
             t10a = r["t_10_active_ms"] / 1000.0
             idx = min(max(int(round(t10a * sr)), 0), len(y_a) - 1)
@@ -1871,7 +1925,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
                 label="AP 10%" if not labeled_10a else None,
             )
             labeled_10a = True
-        if r.get("t_10_spikelet_ms") is not None:
+        if r.get("detected") and r.get("t_10_spikelet_ms") is not None:
             t10p = r["t_10_spikelet_ms"] / 1000.0
             idx = min(max(int(round(t10p * sr)), 0), len(y_p) - 1)
             ax_ov.scatter(
@@ -1880,11 +1934,15 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
             )
             labeled_10p = True
 
+    n_meas = sum(1 for r in plot_meta["ap_rows"] if r.get("amp_spikelet_mV") is not None)
+    n_pass = sum(1 for r in plot_meta["ap_rows"] if r.get("detected"))
     src = (plot_meta.get("metrics") or {}).get("metric_source")
     ax_ov.set_ylabel("Vm (mV)")
     ax_ov.set_title(
         f"{stem} — {direction}  sweep {sweep} ({plot_meta.get('tier')}, "
-        f"n_AP={plot_meta.get('n_ap')}, source={src})"
+        f"n_AP={plot_meta.get('n_ap')}, pass={n_pass}/{n_meas}  "
+        f"noise={_round_or_none(rms, 3)} mV  "
+        f"thr1.5={thr_now:.3f}  thr3={thr_old:.3f}  source={src})"
     )
     ax_ov.legend(loc="upper right", fontsize=7)
     ax_ov.set_xlim(t[i_left], t[i_right])
@@ -1893,14 +1951,54 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     t_snip = (np.arange(-n_pre, n_post) / float(sr)) * 1000.0
     snips_p = plot_meta.get("snips_p") or []
     snips_a = plot_meta.get("snips_a") or []
-    n_avg = sum(1 for sn in snips_p if len(sn) == len(t_snip))
-    for sn in snips_p:
-        if len(sn) == len(t_snip):
-            ax_avg.plot(t_snip, sn, color="C1", lw=0.7, alpha=0.35)
-    if plot_meta.get("mean_p") is not None and len(plot_meta["mean_p"]) == len(t_snip):
+    snips_ok = plot_meta.get("snips_ok")
+    if snips_ok is None or len(snips_ok) != len(snips_p):
+        snips_ok = [True] * len(snips_p)
+    labeled_pass_tr = False
+    labeled_fail_tr = False
+    pass_p, pass_a = [], []
+    for sn, sna, ok in zip(snips_p, snips_a, snips_ok):
+        if len(sn) != len(t_snip):
+            continue
+        if ok:
+            ax_avg.plot(
+                t_snip, sn, color="C1", lw=0.8, alpha=0.45,
+                label="pass traces" if not labeled_pass_tr else None,
+            )
+            labeled_pass_tr = True
+            pass_p.append(sn)
+            if len(sna) == len(t_snip):
+                pass_a.append(sna)
+        else:
+            ax_avg.plot(
+                t_snip, sn, color="0.55", lw=0.7, alpha=0.35,
+                label="below-noise traces" if not labeled_fail_tr else None,
+            )
+            labeled_fail_tr = True
+    mean_p_plot = None
+    mean_p_label = None
+    if pass_p:
+        mean_p_plot = np.mean(np.vstack(pass_p), axis=0)
+        mean_p_label = f"mean of pass (n={len(pass_p)})"
+    elif plot_meta.get("mean_p") is not None:
+        mean_p_plot = plot_meta.get("mean_p")
+        mean_p_label = "mean of aligned (none passed gate)"
+    if mean_p_plot is not None and len(mean_p_plot) == len(t_snip):
         ax_avg.plot(
-            t_snip, plot_meta["mean_p"], color="C1", lw=2.2,
-            label=f"mean spikelet (n={n_avg})",
+            t_snip, mean_p_plot, color="C1", lw=2.2,
+            label=mean_p_label,
+        )
+        base_avg = float(np.mean(mean_p_plot[:n_pre])) if n_pre > 0 else float(mean_p_plot[0])
+        ax_avg.axhline(
+            base_avg, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline",
+        )
+        ax_avg.axhline(
+            base_avg + thr_now, color="black", ls="--", lw=1.1,
+            label=f"thr {SPIKELET_NOISE_K:g}×noise",
+        )
+        ax_avg.axhline(
+            base_avg + thr_old, color="0.45", ls=":", lw=1.1,
+            label=f"old {SPIKELET_NOISE_K_REF:g}×noise",
         )
     ax_avg.axvline(0, color="limegreen", ls="--", lw=1.2, label="t=0 AP start (inflection)")
     t10a = plot_meta.get("t10_a_rel_ms")
@@ -1919,13 +2017,14 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     ax_avg.tick_params(axis="y", labelcolor="C1")
 
     ax_avg2 = ax_avg.twinx()
-    for sn in snips_a:
-        if len(sn) == len(t_snip):
-            ax_avg2.plot(t_snip, sn, color="C0", lw=0.6, alpha=0.25)
-    if plot_meta.get("mean_a") is not None and len(plot_meta["mean_a"]) == len(t_snip):
+    for sna, ok in zip(snips_a, snips_ok):
+        if len(sna) == len(t_snip) and ok:
+            ax_avg2.plot(t_snip, sna, color="C0", lw=0.6, alpha=0.25)
+    mean_a_plot = np.mean(np.vstack(pass_a), axis=0) if pass_a else plot_meta.get("mean_a")
+    if mean_a_plot is not None and len(mean_a_plot) == len(t_snip):
         ax_avg2.plot(
-            t_snip, plot_meta["mean_a"], color="C0", lw=1.6, alpha=0.9,
-            label=f"mean AP (n={n_avg})",
+            t_snip, mean_a_plot, color="C0", lw=1.6, alpha=0.9,
+            label=f"mean AP pass (n={len(pass_a)})",
         )
     ax_avg2.set_ylabel("Active Vm (mV)", color="C0")
     ax_avg2.tick_params(axis="y", labelcolor="C0")
@@ -1934,8 +2033,8 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
     h2, l2 = ax_avg2.get_legend_handles_labels()
     ax_avg.legend(handles + h2, labels + l2, loc="upper left", fontsize=7)
     ax_avg.set_title(
-        f"Aligned AP2+ (not AP1): thin=each spike, thick=mean of {n_avg} "
-        "(passive left, AP right)"
+        f"Aligned AP2+ (not AP1): orange=pass k={SPIKELET_NOISE_K:g}, gray=below noise; "
+        f"thick=mean of {len(pass_p)} pass"
     )
     ax_avg.grid(True, alpha=0.3)
 
@@ -1959,7 +2058,8 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics):
         f"  [spikelet] {fname} {direction}  "
         f"primary_sweep={metrics.get('sweep')}  n_sweeps={metrics.get('n_sweeps')}  "
         f"n_AP2+={metrics.get('n_AP_used')}  n_with_amp={metrics.get('n_with_amp')}  "
-        f"n_detected={metrics.get('n_spikelet_detected')}"
+        f"n_pass={metrics.get('n_spikelet_detected')}  "
+        f"thr={metrics.get('noise_thr_mV')} (k={SPIKELET_NOISE_K})"
     )
     print(
         f"    PRIMARY mean: spike={metrics.get('mean_amp_active_mV')}  "
@@ -3058,7 +3158,7 @@ def _sweep_row_metric(row, metric):
 
 
 def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_sweep=None):
-    """Mean of AP2+ with measured spikelet amp (optionally one sweep only)."""
+    """Mean of AP2+ that pass the noise gate (optionally one sweep only)."""
     vals = []
     for r in ap_rows or []:
         if r.get("direction") != direction:
@@ -3066,6 +3166,8 @@ def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_swee
         if not _spikelet_file_names_match(r.get("file"), fname):
             continue
         if primary_sweep is not None and r.get("sweep") != primary_sweep:
+            continue
+        if not r.get("detected"):
             continue
         if _finite_number(r.get("amp_spikelet_mV")) is None:
             continue
@@ -3079,9 +3181,11 @@ def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_swee
 
 
 def _spikelet_means_from_ap_rows(spikelet_rows):
-    """One mean per file, direction, and sweep from AP2+ with measured amp."""
+    """One mean per file, direction, and sweep from AP2+ that pass the noise gate."""
     by = {}
     for r in spikelet_rows or []:
+        if not r.get("detected"):
+            continue
         if _finite_number(r.get("amp_spikelet_mV")) is None:
             continue
         fname = os.path.basename(str(r.get("file") or ""))
