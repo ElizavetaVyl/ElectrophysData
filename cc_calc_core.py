@@ -5,6 +5,7 @@ Batch loop and Excel writers live in the notebook, not here.
 """
 
 import os
+import re
 import statistics
 import traceback
 from datetime import datetime
@@ -50,8 +51,7 @@ SAVE_CC_VPOST_PLOTS = True  # *_CC_vs_Vpost.png per file
 CC_PLOTS_SUBDIR = "CC_plots"  # subfolder for coupling-coefficient figures
 PLOT_DPI = 100  # PNG resolution (lower = faster writes; was 150)
 CC_VM_FIT_LINEAR = True  # solid line on folder CC_norm vs Vm
-CC_VM_FIT_QUADRATIC = True  # dashed 2nd-order poly (needs ≥3 points)
-CC_VM_CMAP = "viridis"  # file color = recording order (first → last)
+CC_VM_CMAP = "viridis"  # file color = first→last by file number in the name
 
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
@@ -2496,33 +2496,45 @@ def file_cc_norm_curves(all_rows, direction):
     return curves
 
 
-def _cc_vm_file_color_map(all_rows):
-    """
-    Color 0..1 by recording time (same file → same color on both panels).
+def _abf_file_number(fname):
+    """Last integer in the ABF stem (Clampex run number), or -1."""
+    stem = os.path.splitext(os.path.basename(str(fname)))[0]
+    nums = re.findall(r"\d+", stem)
+    return int(nums[-1]) if nums else -1
 
-    Returns (fname -> pos, first_label, last_label).
+
+def _cc_vm_file_color_map(all_rows, summary_rows=None):
+    """
+    Color 0..1 by Clampex file number (same file → same color on both panels).
+
+    Uses every file in All_data and File_summary, not only those with CC_norm.
+    Returns (fname -> pos, first_label, last_label, n_files).
     """
     seen = {}
-    for row in all_rows:
-        fname = row.get("file") or "?"
-        if fname not in seen:
-            seen[fname] = _parse_recording_datetime(row.get("recording_datetime"))
-    items = sorted(
-        seen.items(),
-        key=lambda it: (it[1] is None, it[1] or datetime.min, it[0]),
-    )
+    for src in (all_rows, summary_rows or []):
+        for row in src:
+            fname = row.get("file")
+            if not fname:
+                continue
+            key = os.path.basename(str(fname))
+            if key not in seen:
+                seen[key] = _parse_recording_datetime(row.get("recording_datetime"))
+    items = sorted(seen.items(), key=lambda it: (_abf_file_number(it[0]), it[0]))
     n = max(len(items) - 1, 1)
     pos = {fname: (i / n) for i, (fname, _dt) in enumerate(items)}
+    # also map full paths if some rows stored them
+    for row_src in (all_rows, summary_rows or []):
+        for row in row_src:
+            fname = row.get("file")
+            if fname:
+                pos[str(fname)] = pos.get(os.path.basename(str(fname)), 0.5)
 
-    def _lbl(fname, dt):
-        stem = os.path.splitext(str(fname))[0]
-        if dt is None:
-            return stem
-        return f"{stem}  {dt.strftime('%H:%M')}"
+    def _lbl(fname):
+        return os.path.splitext(os.path.basename(str(fname)))[0]
 
-    first_lbl = _lbl(*items[0]) if items else ""
-    last_lbl = _lbl(*items[-1]) if items else ""
-    return pos, first_lbl, last_lbl
+    first_lbl = _lbl(items[0][0]) if items else ""
+    last_lbl = _lbl(items[-1][0]) if items else ""
+    return pos, first_lbl, last_lbl, len(items)
 
 
 def _poly_cc_vs_vm(vm, cc, degree, n_grid=80):
@@ -2553,23 +2565,24 @@ def _linear_cc_vs_vm(vm, cc, n_grid=80):
     return x, y, float(coeffs[0]), float(coeffs[1]), r2
 
 
-def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
+def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=None):
     """
-    Folder overview: CC_norm vs Vm, color = recording order (colorbar).
+    Folder overview: CC_norm vs Vm, color = first→last ABF file number.
 
-    Solid = linear fit; dashed = 2nd-order polynomial (if ≥3 Vm points).
-    Two panels: CC12 (ch0→ch2) and CC21 (ch2→ch0).
+    Linear fit only. Two panels: CC12 (ch0→ch2) and CC21 (ch2→ch0).
     """
     import matplotlib.cm as mplcm
     from matplotlib.colors import Normalize
-    from matplotlib.lines import Line2D
 
     plt = _get_agg_plt()
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True)
     if title:
         fig.suptitle(title, fontsize=12)
 
-    file_pos, first_lbl, last_lbl = _cc_vm_file_color_map(all_rows)
+    file_pos, first_lbl, last_lbl, n_files = _cc_vm_file_color_map(
+        all_rows, summary_rows=summary_rows
+    )
+    print(f"  CC_norm vs Vm color: first={first_lbl}  →  last={last_lbl}  ({n_files} files)")
     try:
         cmap = mplcm.get_cmap(CC_VM_CMAP)
     except Exception:
@@ -2589,30 +2602,17 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
         any_data = True
 
         for fname, _dt, vms, norms in curves:
-            color = cmap(float(file_pos.get(fname, 0.5)))
+            color = cmap(float(file_pos.get(fname, file_pos.get(os.path.basename(str(fname)), 0.5))))
             ax.scatter(vms, norms, color=[color], s=28, zorder=3, alpha=0.9)
             if CC_VM_FIT_LINEAR:
                 x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, norms)
                 if x1 is not None:
                     ax.plot(x1, y1, "-", color=color, lw=1.3, alpha=0.85)
-            if CC_VM_FIT_QUADRATIC:
-                x2, y2, _c, _r2 = _poly_cc_vs_vm(vms, norms, 2)
-                if x2 is not None:
-                    ax.plot(x2, y2, "--", color=color, lw=1.5, alpha=0.9)
 
         ax.axhline(1.0, color="0.45", ls=":", lw=0.8, alpha=0.7)
         ax.set_xlabel("Vm active during stim (mV)")
-        ax.set_title(f"{panel_title} — {len(curves)} file(s)")
+        ax.set_title(f"{panel_title} — {len(curves)} file(s) with CC_norm")
         ax.grid(True, alpha=0.3)
-        style_handles = []
-        if CC_VM_FIT_LINEAR:
-            style_handles.append(Line2D([0], [0], color="0.25", ls="-", lw=1.4, label="linear"))
-        if CC_VM_FIT_QUADRATIC:
-            style_handles.append(
-                Line2D([0], [0], color="0.25", ls="--", lw=1.5, label="quadratic")
-            )
-        if style_handles:
-            ax.legend(handles=style_handles, loc="best", fontsize=8)
 
     if not any_data:
         plt.close(fig)
@@ -2623,14 +2623,14 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
     try:
         sm = mplcm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
         sm.set_array([])
-        cbar = fig.colorbar(sm, ax=list(axes), fraction=0.035, pad=0.02)
-        cbar.set_label("recording order (first → last)")
+        cbar = fig.colorbar(sm, ax=list(axes), fraction=0.046, pad=0.03)
+        cbar.set_label("first file  →  last file")
         try:
-            cbar.set_ticks([0.0, 1.0], labels=[first_lbl, last_lbl])
+            cbar.set_ticks([0.0, 1.0], labels=[f"first\n{first_lbl}", f"last\n{last_lbl}"])
         except TypeError:
             cbar.set_ticks([0.0, 1.0])
-            cbar.ax.set_yticklabels([first_lbl, last_lbl])
-        cbar.ax.tick_params(labelsize=7)
+            cbar.ax.set_yticklabels([f"first  {first_lbl}", f"last  {last_lbl}"])
+        cbar.ax.tick_params(labelsize=8)
     except Exception as exc:
         print(f"  CC_norm vs Vm colorbar skipped: {exc}")
 
