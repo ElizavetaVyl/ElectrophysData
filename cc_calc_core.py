@@ -2525,7 +2525,10 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
     except Exception as exc:
         print(f"  CC_norm vs Vm colorbar skipped: {exc}")
 
-    fig.tight_layout()
+    try:
+        fig.tight_layout()
+    except Exception:
+        pass
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     _savefig_white(fig, out_path)
     plt.close(fig)
