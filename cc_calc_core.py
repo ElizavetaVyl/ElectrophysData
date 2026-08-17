@@ -59,6 +59,7 @@ SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_NOISE_K = 1.5  # detect if amp_spikelet > k × robust noise (MAD)
 SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps still need 0.15 mV
 SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
+SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 
@@ -95,10 +96,12 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "mean_amp_spikelet_mV",
     "mean_amp_ratio",
     "mean_delay_ms",
+    "mean_delay_10_ms",
     "avg_amp_active_mV",
     "avg_amp_spikelet_mV",
     "avg_amp_ratio",
     "avg_delay_ms",
+    "avg_delay_10_ms",
     "metric_source",
     "rms_noise_mV",
     "skip_reason",
@@ -113,11 +116,15 @@ SPIKELET_AP_KEYS = (
     "t_start_ms",
     "t_peak_active_ms",
     "t_peak_passive_ms",
+    "t_10_active_ms",
+    "t_10_spikelet_ms",
     "amp_active_mV",
     "baseline_passive_mV",
     "amp_spikelet_mV",
     "amp_ratio",
     "delay_ms",
+    "delay_peak_ms",
+    "delay_10_ms",
     "detected",
     "used_in_average",
     "skip_reason",
@@ -910,6 +917,38 @@ def _samples_to_ms(n_samples, sr):
     return (float(n_samples) / float(sr)) * 1000.0
 
 
+def _frac_crossing_time_ms(y, i0, i1, level, sr):
+    """First upward crossing of `level` in [i0, i1], linearly interpolated, ms from sample 0."""
+    if y is None or sr in (None, 0):
+        return None
+    i0 = int(i0)
+    i1 = int(i1)
+    n = len(y)
+    if i0 < 0 or i1 <= i0 + 1 or i0 >= n - 1:
+        return None
+    i1 = min(i1, n - 1)
+    y = np.asarray(y, dtype=float)
+    for i in range(i0, i1):
+        y0, y1v = float(y[i]), float(y[i + 1])
+        if y0 < level <= y1v:
+            if y1v == y0:
+                idx = float(i)
+            else:
+                idx = i + (level - y0) / (y1v - y0)
+            return _samples_to_ms(idx, sr)
+    return None
+
+
+def _frac_rise_time_ms(y, i0, i_peak, v_base, amp, sr, frac=None):
+    """Time of frac * amp above v_base on the rising phase [i0, i_peak]."""
+    if frac is None:
+        frac = SPIKELET_DELAY_FRAC
+    if amp is None or amp <= 0 or v_base is None:
+        return None
+    level = float(v_base) + float(frac) * float(amp)
+    return _frac_crossing_time_ms(y, i0, i_peak, level, sr)
+
+
 def _spikelet_local_peak_index(seg):
     """Index of max after AP start.
 
@@ -984,10 +1023,12 @@ def _empty_spikelet_metrics(skip_reason):
         "mean_amp_spikelet_mV": None,
         "mean_amp_ratio": None,
         "mean_delay_ms": None,
+        "mean_delay_10_ms": None,
         "avg_amp_active_mV": None,
         "avg_amp_spikelet_mV": None,
         "avg_amp_ratio": None,
         "avg_delay_ms": None,
+        "avg_delay_10_ms": None,
         "metric_source": None,
         "rms_noise_mV": None,
         "skip_reason": skip_reason,
@@ -1010,7 +1051,10 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     Spikelet metrics on one direction (active -> passive).
 
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
-    Peak search = [t_start, t_start+SPIKELET_PEAK_MS]. Delay = (peak_p - peak_a) / SR * 1000.
+    Peak search = [t_start, t_start+SPIKELET_PEAK_MS].
+    delay_ms / delay_peak_ms = t_peak_passive - t_peak_active.
+    delay_10_ms = t_10_spikelet - t_10_active (10% of each event's own amplitude).
+    t=0 (alignment) is still the 2nd-last d2V inflection, not the 10% point.
     Detected if a peak after AP start, amp > 0, and amp clears MAD noise gate.
 
     t=0 is the 2nd-last d2V inflection before the active peak (same as FWHM).
@@ -1062,11 +1106,15 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
             "t_start_ms": None,
             "t_peak_active_ms": _round_or_none(_samples_to_ms(i_peak_a, sr), 4),
             "t_peak_passive_ms": None,
+            "t_10_active_ms": None,
+            "t_10_spikelet_ms": None,
             "amp_active_mV": None,
             "baseline_passive_mV": None,
             "amp_spikelet_mV": None,
             "amp_ratio": None,
             "delay_ms": None,
+            "delay_peak_ms": None,
+            "delay_10_ms": None,
             "detected": False,
             "used_in_average": False,
             "skip_reason": None,
@@ -1102,6 +1150,9 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
             row["skip_reason"] = "amp_active_le_0"
             ap_rows.append(row)
             continue
+        row["t_10_active_ms"] = _round_or_none(
+            _frac_rise_time_ms(y_a, i_start, i_peak_a, v_base_a, amp_a, sr), 4
+        )
 
         baseline = float(np.mean(y_p[i_start - n_pre:i_start]))
         row["baseline_passive_mV"] = _round_or_none(baseline, 4)
@@ -1114,7 +1165,16 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
             amp_p = float(y_p[i_peak_p]) - baseline
             row["t_peak_passive_ms"] = _round_or_none(_samples_to_ms(i_peak_p, sr), 4)
             row["amp_spikelet_mV"] = _round_or_none(amp_p, 4)
-            row["delay_ms"] = _round_or_none(_samples_to_ms(i_peak_p - i_peak_a, sr), 4)
+            d_peak = _round_or_none(_samples_to_ms(i_peak_p - i_peak_a, sr), 4)
+            row["delay_ms"] = d_peak
+            row["delay_peak_ms"] = d_peak
+            row["t_10_spikelet_ms"] = _round_or_none(
+                _frac_rise_time_ms(y_p, i_start, i_peak_p, baseline, amp_p, sr), 4
+            )
+            if row["t_10_active_ms"] is not None and row["t_10_spikelet_ms"] is not None:
+                row["delay_10_ms"] = _round_or_none(
+                    row["t_10_spikelet_ms"] - row["t_10_active_ms"], 4
+                )
             if amp_a != 0:
                 row["amp_ratio"] = _round_or_none(amp_p / amp_a, 4)
             ok, why = spikelet_amp_passes(amp_p, rms)
@@ -1162,10 +1222,14 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
         metrics["mean_delay_ms"] = _round_or_none(
             statistics.mean([r["delay_ms"] for r in detected if r["delay_ms"] is not None]), 4
         )
+        d10 = [r["delay_10_ms"] for r in detected if r.get("delay_10_ms") is not None]
+        metrics["mean_delay_10_ms"] = _round_or_none(statistics.mean(d10), 4) if d10 else None
         metrics["metric_source"] = "individual"
 
     mean_a = mean_p = None
     avg_detected = False
+    plot_t10_a_rel = None
+    plot_t10_p_rel = None
     if snips_p:
         arr_p = np.vstack(snips_p)
         arr_a = np.vstack(snips_a)
@@ -1188,6 +1252,26 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
                 metrics["avg_delay_ms"] = _round_or_none(
                     _samples_to_ms(i_rel_p - i_rel_a, sr), 4
                 )
+            i_peak_a_avg = n_pre + int(i_rel_a) if i_rel_a is not None else None
+            i_peak_p_avg = n_pre + int(i_rel_p)
+            v_base_a_avg = float(mean_a[n_pre]) if mean_a is not None else None
+            amp_a_wave = None
+            if i_peak_a_avg is not None and v_base_a_avg is not None:
+                amp_a_wave = float(mean_a[i_peak_a_avg]) - v_base_a_avg
+            t10_a = _frac_rise_time_ms(
+                mean_a, n_pre, i_peak_a_avg, v_base_a_avg, amp_a_wave, sr
+            ) if i_peak_a_avg is not None else None
+            t10_p = _frac_rise_time_ms(
+                mean_p, n_pre, i_peak_p_avg, base_avg, amp_p_avg, sr
+            )
+            if t10_a is not None and t10_p is not None:
+                metrics["avg_delay_10_ms"] = _round_or_none(t10_p - t10_a, 4)
+            plot_t10_a_rel = None if t10_a is None else _round_or_none(
+                t10_a - _samples_to_ms(n_pre, sr), 4
+            )
+            plot_t10_p_rel = None if t10_p is None else _round_or_none(
+                t10_p - _samples_to_ms(n_pre, sr), 4
+            )
             ok, _ = spikelet_amp_passes(amp_p_avg, rms)
             avg_detected = ok
         if not detected:
@@ -1227,6 +1311,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
         "n_ap": n_ap,
         "rms": rms,
         "metrics": metrics,
+        "t10_a_rel_ms": plot_t10_a_rel,
+        "t10_p_rel_ms": plot_t10_p_rel,
     }
     return ap_rows, metrics, plot_meta
 
@@ -1295,16 +1381,33 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
                 ax_ov.axvspan(t0, t0 + SPIKELET_PEAK_MS / 1000.0, color="C4", alpha=0.12)
 
     labeled_sp = False
+    labeled_10a = False
+    labeled_10p = False
     for r in plot_meta["ap_rows"]:
-        if r.get("t_peak_passive_ms") is None:
-            continue
-        tp = r["t_peak_passive_ms"] / 1000.0
-        idx = min(max(int(round(tp * sr)), 0), len(y_p) - 1)
-        ax_ov.scatter(
-            t[idx], y_p[idx], c="darkorange", s=40, zorder=6, marker="x",
-            label="spikelet peak" if not labeled_sp else None,
-        )
-        labeled_sp = True
+        if r.get("t_peak_passive_ms") is not None:
+            tp = r["t_peak_passive_ms"] / 1000.0
+            idx = min(max(int(round(tp * sr)), 0), len(y_p) - 1)
+            ax_ov.scatter(
+                t[idx], y_p[idx], c="darkorange", s=40, zorder=6, marker="x",
+                label="spikelet peak" if not labeled_sp else None,
+            )
+            labeled_sp = True
+        if r.get("t_10_active_ms") is not None:
+            t10a = r["t_10_active_ms"] / 1000.0
+            idx = min(max(int(round(t10a * sr)), 0), len(y_a) - 1)
+            ax_ov.scatter(
+                t[idx], y_a[idx], c="cyan", s=28, zorder=7, marker="D",
+                label="AP 10%" if not labeled_10a else None,
+            )
+            labeled_10a = True
+        if r.get("t_10_spikelet_ms") is not None:
+            t10p = r["t_10_spikelet_ms"] / 1000.0
+            idx = min(max(int(round(t10p * sr)), 0), len(y_p) - 1)
+            ax_ov.scatter(
+                t[idx], y_p[idx], c="magenta", s=28, zorder=7, marker="D",
+                label="spikelet 10%" if not labeled_10p else None,
+            )
+            labeled_10p = True
 
     src = (plot_meta.get("metrics") or {}).get("metric_source")
     ax_ov.set_ylabel("Vm (mV)")
@@ -1329,6 +1432,12 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
             label=f"mean spikelet (n={n_avg})",
         )
     ax_avg.axvline(0, color="limegreen", ls="--", lw=1.2, label="t=0 AP start (inflection)")
+    t10a = plot_meta.get("t10_a_rel_ms")
+    t10p = plot_meta.get("t10_p_rel_ms")
+    if t10a is not None:
+        ax_avg.axvline(t10a, color="cyan", ls=":", lw=1.2, label="mean AP 10%")
+    if t10p is not None:
+        ax_avg.axvline(t10p, color="magenta", ls=":", lw=1.2, label="mean spikelet 10%")
     ax_avg.axvspan(
         -SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25,
         label="passive baseline 1 ms (not t=0)",
