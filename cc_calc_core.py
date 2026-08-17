@@ -38,11 +38,20 @@ RIN_MIN_POINTS = 2  # minimum sweeps for V(I) linear fit
 CP_SPIKE_HEIGHT = -10  # mV
 CP_SPIKE_DISTANCE = 10  # samples
 CP_MIN_APS = 4  # sweep must have >= this many APs in stim window
-CP_RIN_VMIN = -85  # mV; linear I–V window for Rin_abs / Rin_rel / V_rest
+CP_RIN_VMIN = -85  # mV; V_rest / Rin_abs stage 1
 CP_RIN_VMAX = -50  # mV
-CP_RIN_VMIN_FALLBACK = -95  # mV; wider window if too few points for V_rest
-CP_RIN_VMAX_FALLBACK = -40  # mV; later files often sit above -50 mV
+CP_RIN_VMIN_FALLBACK = -95  # mV; stage 2 (same idea as CC Rin abs fallback)
+CP_RIN_VMAX_FALLBACK = -50  # mV
+CP_RIN_VMIN_WIDE = -95  # mV; stage 3 if still <2 points (later depolarized files)
+CP_RIN_VMAX_WIDE = -40  # mV
+CP_RIN_MIN_POINTS = 2  # linear V_rest / Rin_abs needs >=2 I–V points
 CP_RIN_REL_MIN_DI_PA = 0.15  # pA; skip per-sweep Rin_rel if |delta I| smaller
+# V_rest = intercept at I=0, so only linear stages (not Rin relative dV/dI)
+CP_VREST_STAGES = (
+    (1, CP_RIN_VMIN, CP_RIN_VMAX, "1_primary"),
+    (2, CP_RIN_VMIN_FALLBACK, CP_RIN_VMAX_FALLBACK, "2_extended"),
+    (3, CP_RIN_VMIN_WIDE, CP_RIN_VMAX_WIDE, "3_wide"),
+)
 
 SAVE_QC_PLOTS = True  # save AP + I–V + tau/Cm PNGs (cell-properties style QC)
 CELL_PROPS_PLOTS_SUBDIR = "Cell_properties_plots"  # AP / Rin / tau figures
@@ -84,6 +93,7 @@ CELL_PROPS_FIELD_SUFFIXES = (
     "V_rest_mV",
     "V_rest_skip_reason",
     "V_rest_note",
+    "V_rest_stage",
     "hold_V_mV",
     "inj_current_pA",
     "R2_abs_Rin",
@@ -775,7 +785,14 @@ def cp_delay_1st_ap(stim_start, ap_peaks, sampling_rate):
 
 
 def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post_start, post_end):
-    """I–V points and fit for cell-properties Rin_abs / Rin_rel / V_rest."""
+    """I–V points and fit for cell-properties Rin_abs / Rin_rel / V_rest.
+
+    V_rest is the linear V vs I intercept at I=0. Stages (need >=2 points):
+    1) post Vm in -85...-50 mV
+    2) post Vm in -95...-50 mV
+    3) post Vm in -95...-40 mV
+    Relative dV/dI (CC Rin stage 3) cannot give an intercept, so it is not used.
+    """
     empty = {
         "currents": [],
         "voltages": [],
@@ -789,6 +806,7 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
         "n_subthreshold_sweeps": 0,
         "v_rest_skip": None,
         "v_rest_note": None,
+        "v_rest_stage": None,
     }
     last_sub_sweep = cp_sweep_1ap(abf, voltage_ch, pre_end, post_end)
     if last_sub_sweep is None:
@@ -823,8 +841,6 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
             if vmin <= vm <= vmax
         ]
 
-    primary_idx = _in_window(CP_RIN_VMIN, CP_RIN_VMAX)
-    fallback_idx = _in_window(CP_RIN_VMIN_FALLBACK, CP_RIN_VMAX_FALLBACK)
     vm_min = min(voltages_list) if voltages_list else None
     vm_max = max(voltages_list) if voltages_list else None
     vm_span = (
@@ -832,22 +848,14 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
         if vm_min is not None else "no subthreshold sweeps"
     )
 
-    fit_idx = primary_idx if len(primary_idx) >= 2 else fallback_idx
+    # Same idea as rin_for_channel: try narrower I–V windows first.
+    # V_rest needs a linear V(I) fit (intercept at I=0), so relative dV/dI
+    # (Rin stage 3) cannot provide V_rest.
+    stages = CP_VREST_STAGES
+    stage_counts = []
+    fit_idx = []
     v_rest_note = None
-    if len(primary_idx) < 2 and len(fallback_idx) >= 2:
-        v_rest_note = (
-            f"V_rest used extended I–V window "
-            f"{CP_RIN_VMIN_FALLBACK}…{CP_RIN_VMAX_FALLBACK} mV "
-            f"({len(fallback_idx)} points; primary {CP_RIN_VMIN}…{CP_RIN_VMAX} had {len(primary_idx)})"
-        )
-
-    rin_idx = primary_idx or fallback_idx
-    if rin_idx:
-        rin_from_range = [rin_relative_list[i] for i in rin_idx]
-        rin_rel = round(float(np.nanmean(rin_from_range)) * 1000, 3)
-    else:
-        rin_rel = None
-
+    v_rest_stage = None
     rin_abs = None
     v_rest = None
     r2_abs = None
@@ -855,26 +863,55 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
     intercept = None
     v_rest_skip = None
 
-    if len(fit_idx) >= 2:
-        currents_ar = np.array(currents_list)[fit_idx]
-        voltages_ar = np.array(voltages_list)[fit_idx]
+    for n_stage, vmin, vmax, tag in stages:
+        idx = _in_window(vmin, vmax)
+        stage_counts.append(f"stage{n_stage} {vmin}…{vmax} mV: {len(idx)}")
+        if len(idx) < CP_RIN_MIN_POINTS:
+            continue
+        currents_ar = np.array(currents_list)[idx]
+        voltages_ar = np.array(voltages_list)[idx]
         try:
             fit = np.polyfit(currents_ar, voltages_ar, 1, full=True)
             slope, intercept = fit[0]
             rin_abs = round(float(slope) * 1000, 3)
             v_rest = round(float(intercept), 3)
+            if not np.isfinite(rin_abs) or not np.isfinite(v_rest):
+                v_rest_skip = f"I–V intercept not finite at stage {n_stage}; {vm_span}"
+                rin_abs = v_rest = None
+                continue
             sse = fit[1][0] if len(fit[1]) else 0.0
             sst = np.sum((voltages_ar - np.mean(voltages_ar)) ** 2)
             r2_abs = round(1 - sse / sst, 3) if sst != 0 else None
+            fit_idx = idx
+            v_rest_stage = tag
+            v_rest_note = (
+                f"V_rest stage {n_stage}/{len(stages)} ({tag}): "
+                f"linear I–V in {vmin}…{vmax} mV, {len(idx)} points; {vm_span}"
+            )
+            v_rest_skip = None
+            break
         except (IndexError, ZeroDivisionError, np.linalg.LinAlgError, TypeError, ValueError) as exc:
-            v_rest_skip = f"I–V polyfit failed ({exc}); {vm_span}"
-    else:
+            v_rest_skip = f"I–V polyfit failed at stage {n_stage} ({exc}); {vm_span}"
+            continue
+
+    if v_rest is None and v_rest_skip is None:
         v_rest_skip = (
-            f"need >=2 subthreshold I–V points for V_rest; "
-            f"primary {CP_RIN_VMIN}…{CP_RIN_VMAX} mV: {len(primary_idx)}, "
-            f"extended {CP_RIN_VMIN_FALLBACK}…{CP_RIN_VMAX_FALLBACK} mV: {len(fallback_idx)}; "
-            f"{vm_span}"
+            f"need >={CP_RIN_MIN_POINTS} subthreshold I–V points for V_rest "
+            f"(Rin relative dV/dI cannot give intercept); "
+            f"{'; '.join(stage_counts)}; {vm_span}"
         )
+
+    rin_idx = _in_window(CP_RIN_VMIN, CP_RIN_VMAX) or _in_window(
+        CP_RIN_VMIN_FALLBACK, CP_RIN_VMAX_FALLBACK
+    ) or _in_window(CP_RIN_VMIN_WIDE, CP_RIN_VMAX_WIDE)
+    if rin_idx:
+        rin_from_range = [
+            x for x in (rin_relative_list[i] for i in rin_idx)
+            if x is not None and np.isfinite(x)
+        ]
+        rin_rel = round(float(np.mean(rin_from_range)) * 1000, 3) if rin_from_range else None
+    else:
+        rin_rel = None
 
     return {
         "currents": currents_list,
@@ -889,6 +926,7 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
         "n_subthreshold_sweeps": last_sub_sweep + 1,
         "v_rest_skip": v_rest_skip,
         "v_rest_note": v_rest_note,
+        "v_rest_stage": v_rest_stage,
     }
 
 
@@ -940,6 +978,7 @@ def compute_cell_properties(abf, voltage_ch, current_ch):
         f"R2_abs_Rin_{ch_tag}": iv["r2_abs"],
         f"V_rest_skip_reason_{ch_tag}": iv.get("v_rest_skip"),
         f"V_rest_note_{ch_tag}": iv.get("v_rest_note"),
+        f"V_rest_stage_{ch_tag}": iv.get("v_rest_stage"),
     }
 
     sweep_4 = cp_sweep_4aps(abf, voltage_ch, start, stop)
@@ -2622,7 +2661,7 @@ def _plot_timed(ax, times, values, *args, **kwargs):
 
 
 def _vm_for_channel(row, ch_tag):
-    """V_rest = I–V intercept at I=0; hold_V if rest is missing."""
+    """V_rest from staged linear I–V intercept; hold_V if no fit passed checks."""
     v = row.get(f"V_rest_mV_{ch_tag}")
     if v is not None:
         return v
@@ -2713,7 +2752,7 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
     1) CC12 + Gj12 (twin axis)
     2) CC21 + Gj21 (twin axis)
     3) Rin1 (ch0) and Rin2 (ch2)
-    4) Vm1 (ch0) and Vm2 (ch2) — V_rest from I–V intercept
+    4) Vm1 (ch0) and Vm2 (ch2) — V_rest (staged I–V intercept), else hold_V
     """
     pairs = folder_summary_timed_rows(summary_rows)
     if not pairs:
@@ -2758,13 +2797,33 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
 
     ax_v = axes[3]
     n_v = 0
-    n_v += _plot_timed(ax_v, times, [_vm_for_channel(r, "ch0") for r in rows],
-                       "o-", color="C0", label="Vm1 (ch0, V_rest)")
-    n_v += _plot_timed(ax_v, times, [_vm_for_channel(r, "ch2") for r in rows],
-                       "s-", color="C1", label="Vm2 (ch2, V_rest)")
+    n_v += _plot_timed(
+        ax_v, times, [r.get("V_rest_mV_ch0") for r in rows],
+        "o-", color="C0", label="Vm1 V_rest",
+    )
+    n_v += _plot_timed(
+        ax_v, times, [
+            r.get("hold_V_mV_ch0") if r.get("V_rest_mV_ch0") is None else None
+            for r in rows
+        ],
+        "o--", color="C0", alpha=0.55, label="Vm1 hold_V (no I–V fit)",
+    )
+    n_v += _plot_timed(
+        ax_v, times, [r.get("V_rest_mV_ch2") for r in rows],
+        "s-", color="C1", label="Vm2 V_rest",
+    )
+    n_v += _plot_timed(
+        ax_v, times, [
+            r.get("hold_V_mV_ch2") if r.get("V_rest_mV_ch2") is None else None
+            for r in rows
+        ],
+        "s--", color="C1", alpha=0.55, label="Vm2 hold_V (no I–V fit)",
+    )
     n += n_v
     ax_v.set_ylabel("Vm (mV)")
-    ax_v.set_title("Vm1 / Vm2  (V_rest = I–V intercept at I=0)")
+    ax_v.set_title(
+        "Vm1 / Vm2  (V_rest = staged I–V intercept at I=0; dashed = hold_V)"
+    )
     ax_v.set_xlabel("Recording time")
     ax_v.grid(True, alpha=0.3)
     if n_v == 0:
