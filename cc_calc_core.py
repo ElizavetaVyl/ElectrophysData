@@ -78,7 +78,7 @@ ANALYSIS_BLOCKS = {
 }
 _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 
-# Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
+# Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2; else AP1 if only 1-spike sweeps)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
@@ -88,7 +88,7 @@ SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
 SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sweep
 SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
-SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
+SPIKELET_MIN_APS = 2  # prefer AP2+; fall back to 1-AP sweeps if none exist
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
@@ -141,6 +141,7 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "avg_delay_ms",
     "avg_delay_10_ms",
     "metric_source",
+    "ap1_fallback",
     "rms_noise_mV",
     "noise_thr_mV",
     "skip_reason",
@@ -206,6 +207,7 @@ SPIKELET_SWEEP_KEYS = (
     "avg_delay_ms",
     "avg_delay_10_ms",
     "metric_source",
+    "ap1_fallback",
     "skip_reason",
     "is_primary",
 )
@@ -1223,7 +1225,7 @@ def cell_properties_for_file(abf):
 
 
 # =============================================================================
-# Spikelet coupling (AP2+; first >=4 AP sweep, else 3, else 2)
+# Spikelet coupling (AP2+; first >=4, else 3, else 2; else AP1 on 1-spike sweeps)
 # =============================================================================
 
 
@@ -1366,10 +1368,11 @@ def spikelet_amp_passes(amp, rms, k=None):
 
 def select_spikelet_sweep(abf, voltage_ch, start, stop):
     """
-    Same idea as cell properties: first sweep with >=4 APs.
-    If none: first with >=3, then >=2. Returns (sweep, n_peaks, tier) or (None, 0, None).
+    First sweep with >=4 APs; else 3, else 2, else 1.
+
+    Returns (sweep, n_peaks, tier) or (None, 0, None).
     """
-    for min_aps, tier in ((4, ">=4"), (3, "3"), (SPIKELET_MIN_APS, "2")):
+    for min_aps, tier in ((4, ">=4"), (3, "3"), (SPIKELET_MIN_APS, "2"), (1, "1")):
         for sweep_num in abf.sweepList:
             abf.setSweep(sweepNumber=sweep_num, channel=voltage_ch)
             peaks, _ = find_peaks(
@@ -1382,23 +1385,39 @@ def select_spikelet_sweep(abf, voltage_ch, start, stop):
 
 def list_spikelet_sweeps(abf, voltage_ch, start, stop):
     """
-    Every sweep with >=2 APs, starting from the first such sweep onward.
+    Sweeps with >=2 APs from the first such sweep onward.
 
-    Earlier subthreshold sweeps are skipped. Later sweeps with <2 APs are skipped.
+    If the file has no multi-spike sweep, use 1-AP sweeps from the first
+    of those onward (AP1 is then measured). Later sweeps below the
+    chosen minimum are skipped.
     """
-    started = False
-    out = []
+    counted = []
     for sweep_num in abf.sweepList:
         abf.setSweep(sweepNumber=sweep_num, channel=voltage_ch)
         peaks, _ = find_peaks(
             abf.sweepY[start:stop], height=CP_SPIKE_HEIGHT, distance=CP_SPIKE_DISTANCE
         )
-        if len(peaks) >= SPIKELET_MIN_APS:
+        counted.append((int(sweep_num), int(len(peaks))))
+    min_aps = SPIKELET_MIN_APS if any(n >= SPIKELET_MIN_APS for _, n in counted) else 1
+    started = False
+    out = []
+    for sweep_num, n in counted:
+        if n >= min_aps:
             started = True
-            out.append(int(sweep_num))
+            out.append(sweep_num)
         elif started:
             continue
     return out
+
+
+def _spikelet_ap_indices(n_ap):
+    """AP indices to measure: AP2+ normally, AP1 only if the sweep has one spike."""
+    n_ap = int(n_ap or 0)
+    if n_ap < 1:
+        return range(0)
+    if n_ap == 1:
+        return range(0, 1)
+    return range(1, n_ap)
 
 
 def _empty_spikelet_metrics(skip_reason):
@@ -1423,6 +1442,7 @@ def _empty_spikelet_metrics(skip_reason):
         "avg_delay_ms": None,
         "avg_delay_10_ms": None,
         "metric_source": None,
+        "ap1_fallback": False,
         "rms_noise_mV": None,
         "noise_thr_mV": None,
         "skip_reason": skip_reason,
@@ -1625,8 +1645,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     """
     Spikelet metrics on every sweep with >=2 APs (from the first such sweep on).
 
-    Sweep means: AP1 excluded; mean over AP2+ with a measured peak
-    (gate is off). Noise is still measured for the QC title but does not
+    Sweep means: AP1 excluded except on 1-AP fallback sweeps; mean over
+    measured APs (gate is off). Noise is still measured for the QC title but does not
     reject peaks. Peak = interior local max with prominence in 15 ms
     (not window argmax: no peak → no spikelet).
     QC PNG is the primary sweep only: ``{stem}_12_spikelets.png`` and
@@ -1657,7 +1677,7 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     if not sweep_nums:
         sn, n_found = _best_effort_spikelet_sweep(abf, active_ch, stim_start, stim_stop)
         reason = (
-            f"no sweep with >={SPIKELET_MIN_APS} APs in stim window "
+            f"no sweep with APs in stim window "
             f"(best sweep {sn} has {n_found} AP)"
         )
         meta = _fallback_spikelet_qc_meta(
@@ -1693,13 +1713,14 @@ def _analyze_spikelets_sweep(
     abf, sweep, active_ch, passive_ch, direction,
     stim_start, stim_stop, pre_start, sr, n_pre, n_post,
 ):
-    """Spikelet metrics for one sweep. AP1 excluded."""
+    """Spikelet metrics for one sweep. AP1 excluded unless this sweep has only one AP."""
     ind_infls = cp_infl_points(abf, sweep, active_ch, stim_start, stim_stop)
     ind_peaks = cp_peak_indices(abf, sweep, active_ch, stim_start, stim_stop)
     ap_starts, _ap_ends = cp_spike_begin(ind_peaks, ind_infls)
     n_ap = int(len(ind_peaks))
-    if n_ap < SPIKELET_MIN_APS:
-        reason = f"sweep {sweep} has {n_ap} peaks (< {SPIKELET_MIN_APS})"
+    use_ap1 = n_ap == 1
+    if n_ap < 1:
+        reason = f"sweep {sweep} has 0 peaks"
         metrics = _empty_spikelet_metrics(reason)
         metrics["sweep"] = sweep
         metrics["n_AP_active"] = n_ap
@@ -1732,7 +1753,7 @@ def _analyze_spikelets_sweep(
             "error": reason,
         }
         return [], metrics, plot_meta
-    tier = ">=4" if n_ap >= 4 else str(n_ap)
+    tier = "1" if use_ap1 else (">=4" if n_ap >= 4 else str(n_ap))
 
     rms_pre = _passive_rms_prestim(abf, sweep, passive_ch, pre_start, stim_start)
     n_local = _ms_to_samples(SPIKELET_NOISE_LOCAL_MS, sr)
@@ -1748,7 +1769,7 @@ def _analyze_spikelets_sweep(
     amps_a_for_avg = []
     local_chunks = []
 
-    for i in range(1, n_ap):  # skip AP1 (index 0)
+    for i in _spikelet_ap_indices(n_ap):
         i_peak_a = int(ind_peaks[i])
         i_start = ap_starts[i] if i < len(ap_starts) else np.nan
         row = {
@@ -1796,7 +1817,7 @@ def _analyze_spikelets_sweep(
             next_start = ap_starts[i + 1] if i + 1 < len(ap_starts) else np.nan
             if np.isfinite(next_start) and int(next_start) < i_start + n_post:
                 isi_ok = False
-        prev_start = ap_starts[i - 1] if i - 1 < len(ap_starts) else np.nan
+        prev_start = ap_starts[i - 1] if i >= 1 and i - 1 < len(ap_starts) else np.nan
         if np.isfinite(prev_start) and (i_start - int(prev_start)) < (n_pre + n_post):
             isi_ok = False
 
@@ -1897,8 +1918,11 @@ def _analyze_spikelets_sweep(
         "n_with_amp": 0,
         "rms_noise_mV": rms_u,
         "noise_thr_mV": thr_u,
+        "ap1_fallback": use_ap1,
     })
     has_means = _fill_sweep_means_from_ap_rows(metrics, ap_rows)
+    if use_ap1 and has_means:
+        metrics["metric_source"] = "ap1_fallback"
 
     mean_a = mean_p = None
     avg_detected = False
@@ -2025,7 +2049,7 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
     out["n_sweeps"] = n_all
     out["sweep"] = primary_sn
     if not sweep_metrics:
-        out["skip_reason"] = f"no sweep with >={SPIKELET_MIN_APS} APs in stim window"
+        out["skip_reason"] = "no sweep with APs in stim window"
         return out
     primary = None
     for m in sweep_metrics:
@@ -2059,6 +2083,7 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
         "n_delay_negative",
         "n_delay_10_negative",
         "n_ratio_gt_1",
+        "ap1_fallback",
     ):
         out[key] = primary.get(key)
     out["n_spikelet_detected"] = int(
@@ -2129,6 +2154,11 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     )
     ax_ov.axvline(t[min(se, len(t) - 1)], color="0.35", ls="--", lw=1.0)
 
+    analyzed_ap = set()
+    for r in plot_meta.get("ap_rows") or []:
+        ai = r.get("ap_index")
+        if ai is not None:
+            analyzed_ap.add(int(ai) - 1)
     starts = plot_meta.get("ap_starts") if plot_meta.get("ap_starts") is not None else []
     peaks = plot_meta.get("ind_peaks") if plot_meta.get("ind_peaks") is not None else []
     for i, ip in enumerate(peaks):
@@ -2145,7 +2175,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
                     t[i0], y_a[i0], c="limegreen", s=28, zorder=5, marker="v",
                     label="AP start (t=0, 2nd inflection before peak)" if i == 0 else None,
                 )
-            if i >= 1 and 0 <= i0 < len(t):
+            if i in analyzed_ap and 0 <= i0 < len(t):
                 t0 = t[i0]
                 ax_ov.axvspan(t0 - SPIKELET_BASELINE_MS / 1000.0, t0, color="0.7", alpha=0.25)
                 ax_ov.axvspan(t0, t0 + SPIKELET_PEAK_MS / 1000.0, color="C4", alpha=0.12)
@@ -2331,8 +2361,13 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     handles, labels = ax_avg.get_legend_handles_labels()
     h2, l2 = ax_avg2.get_legend_handles_labels()
     ax_avg.legend(handles + h2, labels + l2, loc="upper left", fontsize=7)
+    ap_align = (
+        "Aligned AP1 (no multi-spike sweep)"
+        if (plot_meta.get("n_ap") or 0) == 1 or plot_meta.get("tier") == "1"
+        else "Aligned AP2+ (not AP1)"
+    )
     ax_avg.set_title(
-        f"Aligned AP2+ (not AP1): local_max={n_pass}/{n_meas}; "
+        f"{ap_align}: local_max={n_pass}/{n_meas}; "
         f"thick=mean of {len(pass_p)}; noise gate "
         f"{'OFF' if not SPIKELET_USE_NOISE_GATE else 'ON'}"
     )
@@ -2383,7 +2418,7 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
     print(
         f"  [spikelet] {fname} {direction}  "
         f"primary_sweep={metrics.get('sweep')}  n_sweeps={metrics.get('n_sweeps')}  "
-        f"n_AP2+={metrics.get('n_AP_used')}  n_with_amp={metrics.get('n_with_amp')}  "
+        f"n_AP_used={metrics.get('n_AP_used')}  n_with_amp={metrics.get('n_with_amp')}  "
         f"n_pass={metrics.get('n_spikelet_detected')}  "
         f"noise_gate={'ON' if SPIKELET_USE_NOISE_GATE else 'OFF'}  "
         f"local_thr={metrics.get('noise_thr_mV')}"
@@ -2396,6 +2431,7 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
         f"delay_pk={metrics.get('mean_delay_ms')}  "
         f"delay_10={metrics.get('mean_delay_10_ms')}  "
         f"V_base={metrics.get('mean_baseline_passive_mV')}  "
+        f"ap1_fallback={metrics.get('ap1_fallback')}  "
         f"skip={metrics.get('skip_reason')}"
     )
     by_sw = {}
@@ -3778,8 +3814,8 @@ def save_folder_spikelet_over_time_plot(
     """
     Spikelet/spike vs recording time: one point per file.
 
-    Y = primary-sweep mean ratio and delays (AP2+ with a measured peak).
-    Primary = first sweep with >=4 APs, else 3, else 2.
+    Y = primary-sweep mean ratio and delays (AP2+, or AP1 if no multi-spike sweep).
+    Primary = first sweep with >=4 APs, else 3, else 2, else 1.
     X = recording datetime. Amplitude vs time is not plotted.
     Always writes the PNG (empty panels if no values).
     """
