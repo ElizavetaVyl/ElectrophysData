@@ -4360,6 +4360,74 @@ def format_excel_header_wrap(workbook, header_row=1, min_width=12, max_width=18)
         ws.row_dimensions[header_row].height = max(30, 15 * max_lines + 8)
 
 
+def _excel_cell(val):
+    """openpyxl-safe cell: no numpy types, no inf, bool → Yes/No."""
+    if val is None:
+        return None
+    if isinstance(val, (bool, np.bool_)):
+        return "Yes" if val else "No"
+    if isinstance(val, (np.integer,)):
+        return int(val)
+    if isinstance(val, (float, np.floating)):
+        fv = float(val)
+        return fv if np.isfinite(fv) else None
+    return val
+
+
+def _excel_dataframe(rows):
+    import pandas as pd
+
+    if not rows:
+        return pd.DataFrame()
+    clean = [{k: _excel_cell(v) for k, v in dict(row).items()} for row in rows]
+    return pd.DataFrame(clean)
+
+
+def save_batch_excel(
+    path,
+    all_rows,
+    summary_rows,
+    spikelet_rows=None,
+    spikelet_sweep_rows=None,
+):
+    """Write All_data / File_summary / Spikelets / Spikelet_sweeps. Always all four sheets."""
+    import pandas as pd
+
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    sheets = (
+        ("File_summary", summary_rows or []),
+        ("All_data", all_rows or []),
+        ("Spikelets", spikelet_rows or []),
+        ("Spikelet_sweeps", spikelet_sweep_rows or []),
+    )
+
+    def _write(out_path):
+        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+            for name, rows in sheets:
+                _excel_dataframe(rows).to_excel(writer, sheet_name=name, index=False)
+            try:
+                format_excel_header_wrap(writer.book)
+            except Exception as exc:
+                print(f"  Excel header wrap skipped: {exc}")
+
+    try:
+        _write(path)
+        used = path
+    except PermissionError:
+        stem, ext = os.path.splitext(path)
+        used = f"{stem}_{datetime.now().strftime('%H%M%S')}{ext or '.xlsx'}"
+        print(f"  Excel file is open or locked; writing {used}")
+        _write(used)
+
+    size = os.path.getsize(used) if os.path.isfile(used) else 0
+    print(f"Saved Excel: {used}")
+    print(f"  size={size} bytes")
+    for name, rows in sheets:
+        print(f"  {name} rows: {len(rows)}")
+    return used
+
+
 def build_file_summary_row(
     name,
     rec_dt,
