@@ -133,6 +133,7 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "mean_delay_10_ms",
     "n_delay_negative",
     "n_delay_10_negative",
+    "n_ratio_gt_1",
     "avg_amp_active_mV",
     "avg_amp_spikelet_mV",
     "avg_amp_ratio",
@@ -168,6 +169,7 @@ SPIKELET_AP_KEYS = (
     "delay_10_ms",
     "delay_negative",
     "delay_10_negative",
+    "ratio_gt_1",
     "rms_local_mV",
     "noise_thr_mV",
     "detected",
@@ -193,6 +195,7 @@ SPIKELET_SWEEP_KEYS = (
     "mean_delay_10_ms",
     "n_delay_negative",
     "n_delay_10_negative",
+    "n_ratio_gt_1",
     "mean_vm_begin_mV",
     "mean_baseline_passive_mV",
     "noise_thr_mV",
@@ -1415,6 +1418,7 @@ def _empty_spikelet_metrics(skip_reason):
         "mean_delay_10_ms": None,
         "n_delay_negative": 0,
         "n_delay_10_negative": 0,
+        "n_ratio_gt_1": 0,
         "avg_amp_active_mV": None,
         "avg_amp_spikelet_mV": None,
         "avg_amp_ratio": None,
@@ -1441,17 +1445,26 @@ def _round_or_none(val, nd=4):
     return round(float(val), nd)
 
 
-def _mark_delay_sign(row):
-    """delay = t_spikelet − t_spike. Negative is unphysical; keep value and flag it."""
+def _ratio_gt_one(val):
+    v = _finite_number(val)
+    return bool(v is not None and v > 1.0)
+
+
+def _mark_spikelet_quality(row):
+    """Flag unphysical delay (<0) and ratio (>1). Values stay in Excel."""
     d = _finite_number(row.get("delay_ms"))
     d10 = _finite_number(row.get("delay_10_ms"))
+    ratio = _finite_number(row.get("amp_ratio"))
     row["delay_negative"] = bool(d is not None and d < 0)
     row["delay_10_negative"] = bool(d10 is not None and d10 < 0)
+    row["ratio_gt_1"] = _ratio_gt_one(ratio)
     notes = []
     if row["delay_negative"]:
         notes.append(f"delay_peak<0 ({d} ms): spikelet peak before AP peak")
     if row["delay_10_negative"]:
         notes.append(f"delay_10<0 ({d10} ms): spikelet 10% before AP 10%")
+    if row["ratio_gt_1"]:
+        notes.append(f"ratio>1 ({ratio}): spikelet amp > AP amp")
     if notes:
         extra = "; ".join(notes)
         prev = row.get("skip_reason")
@@ -1584,9 +1597,10 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     used = passed or measured
     if not used:
         return False
+    ratio_ok = [r for r in used if not r.get("ratio_gt_1")]
     metrics["mean_amp_active_mV"] = _mean_row_field(used, "amp_active_mV")
     metrics["mean_amp_spikelet_mV"] = _mean_row_field(used, "amp_spikelet_mV")
-    metrics["mean_amp_ratio"] = _mean_row_field(used, "amp_ratio")
+    metrics["mean_amp_ratio"] = _mean_row_field(ratio_ok, "amp_ratio")
     metrics["mean_delay_ms"] = _mean_row_field(used, "delay_ms", "delay_peak_ms")
     metrics["mean_delay_10_ms"] = _mean_row_field(used, "delay_10_ms")
     metrics["mean_vm_begin_mV"] = _mean_row_field(used, "vm_begin_active_mV")
@@ -1597,6 +1611,7 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     metrics["skip_reason"] = None
     metrics["n_delay_negative"] = sum(1 for r in used if r.get("delay_negative"))
     metrics["n_delay_10_negative"] = sum(1 for r in used if r.get("delay_10_negative"))
+    metrics["n_ratio_gt_1"] = sum(1 for r in used if r.get("ratio_gt_1"))
     return True
 
 
@@ -1746,6 +1761,7 @@ def _analyze_spikelets_sweep(
             "delay_10_ms": None,
             "delay_negative": False,
             "delay_10_negative": False,
+            "ratio_gt_1": False,
             "rms_local_mV": None,
             "noise_thr_mV": None,
             "i_peak_passive": None,
@@ -1816,7 +1832,7 @@ def _analyze_spikelets_sweep(
                 )
             if amp_a != 0:
                 row["amp_ratio"] = _round_or_none(amp_p / amp_a, 4)
-            _mark_delay_sign(row)
+            _mark_spikelet_quality(row)
 
         if isi_ok:
             snips_a.append(y_a[i_start - n_pre:i_start + n_post])
@@ -1936,7 +1952,8 @@ def _analyze_spikelets_sweep(
                     if r["used_in_average"]:
                         r["metric_source"] = "average"
                 if metrics.get("mean_amp_ratio") is None and metrics.get("avg_amp_ratio") is not None:
-                    metrics["mean_amp_ratio"] = metrics.get("avg_amp_ratio")
+                    if not _ratio_gt_one(metrics.get("avg_amp_ratio")):
+                        metrics["mean_amp_ratio"] = metrics.get("avg_amp_ratio")
                     if metrics.get("mean_delay_ms") is None:
                         metrics["mean_delay_ms"] = metrics.get("avg_delay_ms")
                     if metrics.get("mean_delay_10_ms") is None:
@@ -2033,6 +2050,7 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
         "n_AP_used",
         "n_delay_negative",
         "n_delay_10_negative",
+        "n_ratio_gt_1",
     ):
         out[key] = primary.get(key)
     out["n_spikelet_detected"] = int(
@@ -2157,14 +2175,16 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
             if amp is not None:
                 tag_txt = "local max" if r.get("detected") else "no peak"
                 extra = ""
+                if r.get("ratio_gt_1"):
+                    extra += f"  ratio {r.get('amp_ratio')} > 1"
                 if r.get("delay_negative"):
-                    extra = f"  delay {r.get('delay_ms')} ms < 0"
+                    extra += f"  delay {r.get('delay_ms')} ms < 0"
                 ax_ov.annotate(
                     f"AP{r.get('ap_index')} {amp:.2f} mV {tag_txt}{extra}",
                     (t[idx], y_p[idx]),
                     textcoords="offset points", xytext=(4, 6),
                     fontsize=7,
-                    color="C3" if r.get("delay_negative") else "0.15",
+                    color="C3" if (r.get("ratio_gt_1") or r.get("delay_negative")) else "0.15",
                     zorder=8,
                 )
             elif r.get("skip_reason"):
@@ -3461,8 +3481,14 @@ def _spikelet_file_metric(row, tag, metric):
     )
     for key in keys:
         val = row.get(key)
-        if val is not None:
-            return val
+        if val is None:
+            continue
+        v = _finite_number(val)
+        if v is None:
+            continue
+        if metric == "amp_ratio" and v > 1.0:
+            continue
+        return v
     return None
 
 
@@ -3515,8 +3541,11 @@ def _sweep_row_metric(row, metric):
     }
     for key in key_map.get(metric, (metric,)):
         v = _finite_number(row.get(key))
-        if v is not None:
-            return v
+        if v is None:
+            continue
+        if metric == "amp_ratio" and v > 1.0:
+            continue
+        return v
     return None
 
 
@@ -3531,6 +3560,8 @@ def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_swee
         if primary_sweep is not None and r.get("sweep") != primary_sweep:
             continue
         if _finite_number(r.get("amp_spikelet_mV")) is None:
+            continue
+        if metric == "amp_ratio" and (r.get("ratio_gt_1") or _ratio_gt_one(r.get("amp_ratio"))):
             continue
         v = r.get(metric)
         if v is None and metric == "delay_ms":
@@ -3558,14 +3589,20 @@ def _spikelet_means_from_ap_rows(spikelet_rows):
     for key, items in by.items():
         rec = {
             "sweep": key[2],
-            "mean_amp_ratio": _mean_row_field(items, "amp_ratio"),
+            "mean_amp_ratio": _mean_row_field(
+                [r for r in items if not r.get("ratio_gt_1") and not _ratio_gt_one(r.get("amp_ratio"))],
+                "amp_ratio",
+            ),
             "mean_amp_active_mV": _mean_row_field(items, "amp_active_mV"),
             "mean_amp_spikelet_mV": _mean_row_field(items, "amp_spikelet_mV"),
             "mean_delay_ms": _mean_row_field(items, "delay_ms", "delay_peak_ms"),
             "mean_delay_10_ms": _mean_row_field(items, "delay_10_ms"),
             "mean_vm_begin_mV": _mean_row_field(items, "vm_begin_active_mV"),
             "mean_baseline_passive_mV": _mean_row_field(items, "baseline_passive_mV"),
-            "amp_ratio": _mean_row_field(items, "amp_ratio"),
+            "amp_ratio": _mean_row_field(
+                [r for r in items if not r.get("ratio_gt_1") and not _ratio_gt_one(r.get("amp_ratio"))],
+                "amp_ratio",
+            ),
             "amp_active_mV": _mean_row_field(items, "amp_active_mV"),
             "amp_spikelet_mV": _mean_row_field(items, "amp_spikelet_mV"),
             "delay_ms": _mean_row_field(items, "delay_ms", "delay_peak_ms"),
@@ -3846,8 +3883,11 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None):
     def _y_of(row):
         for key in y_alts:
             v = _finite_number(row.get(key))
-            if v is not None:
-                return v
+            if v is None:
+                continue
+            if y_key == "mean_amp_ratio" and v > 1.0:
+                continue
+            return v
         return None
 
     def _vm_of(row):
