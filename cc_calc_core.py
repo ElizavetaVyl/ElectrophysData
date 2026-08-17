@@ -81,6 +81,7 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
+SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
 SPIKELET_USE_NOISE_GATE = False  # temporary: any true local max counts
 SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
@@ -1256,20 +1257,35 @@ def _frac_rise_time_ms(y, i0, i_peak, v_base, amp, sr, frac=None):
     return _frac_crossing_time_ms(y, i0, i_peak, level, sr)
 
 
-def _spikelet_local_peak_index(seg):
-    """Index of a true interior local max, or None.
+def _spikelet_smooth_for_peak(y, sr):
+    """Light Gaussian on a short window; used only to find the peak index."""
+    y = np.asarray(y, dtype=float).ravel()
+    if y.size < 5 or sr is None or SPIKELET_PEAK_SMOOTH_MS <= 0:
+        return y
+    sigma = float(SPIKELET_PEAK_SMOOTH_MS) * float(sr) / 1000.0
+    if sigma < 0.5:
+        return y
+    return gaussian_filter1d(y, sigma=sigma, mode="nearest")
 
-    A spikelet must *bend*: sample i is a peak only if
-    ``y[i] > y[i-1]`` and ``y[i] >= y[i+1]`` (rise, then flat or fall).
-    First and last samples of the 15 ms window are never peaks.
 
-    Window argmax is not used. A monotonic rise (no inflection) returns
-    None — that is not a spikelet, even if the last sample is the highest.
-    If several local maxima exist, the highest one is taken.
+def _spikelet_local_peak_index(seg, sr=None):
+    """Index of a true interior local max on a lightly smoothed trace, or None.
+
+    Digitizer jitter makes raw y[i] jump up and down, so a 1-sample "peak"
+    is not a spikelet. The 15 ms window is Gaussian-smoothed
+    (σ = SPIKELET_PEAK_SMOOTH_MS) and the peak is taken on that curve.
+
+    A spikelet must still *bend* on the smoothed trace:
+    ``y[i] > y[i-1]`` and ``y[i] >= y[i+1]``. First and last samples are
+    never peaks. A monotonic rise (no inflection) returns None.
+    If several local maxima exist, the highest smoothed one is taken.
+
+    Amplitude is still measured on the raw trace at this index.
     """
-    y = np.asarray(seg, dtype=float).ravel()
-    if y.size < 3:
+    y_raw = np.asarray(seg, dtype=float).ravel()
+    if y_raw.size < 3:
         return None
+    y = _spikelet_smooth_for_peak(y_raw, sr)
     best_i = None
     best_v = -np.inf
     for i in range(1, y.size - 1):
@@ -1487,7 +1503,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     ``{stem}_21_spikelets.png`` in the Spikelet_plots folder.
 
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
-    Peak search = [t_start, t_start+SPIKELET_PEAK_MS].
+    Peak search = local max of a Gaussian-smoothed 15 ms window
+    (σ = SPIKELET_PEAK_SMOOTH_MS); amplitude still from the raw trace.
     delay_ms / delay_peak_ms = t_peak_passive - t_peak_active.
     delay_10_ms = t_10_spikelet - t_10_active (10% of each event's own amplitude).
     Vm per sweep for vs-Vm plots = mean spikelet baseline (passive, 1 ms
@@ -1627,7 +1644,7 @@ def _analyze_spikelets_sweep(
         if len(chunk) >= 3:
             local_chunks.append(np.asarray(chunk, dtype=float))
         seg_p = y_p[i_start:i_start + n_post + 1]
-        i_rel = _spikelet_local_peak_index(seg_p)
+        i_rel = _spikelet_local_peak_index(seg_p, sr)
         if i_rel is None:
             row["skip_reason"] = "no_local_peak"
         else:
@@ -1718,8 +1735,8 @@ def _analyze_spikelets_sweep(
         mean_a = np.mean(arr_a, axis=0)
         base_avg = float(np.mean(mean_p[:n_pre]))
         seg_avg = mean_p[n_pre:]
-        i_rel_p = _spikelet_local_peak_index(seg_avg)
-        i_rel_a = _spikelet_local_peak_index(mean_a[n_pre:])
+        i_rel_p = _spikelet_local_peak_index(seg_avg, sr)
+        i_rel_a = _spikelet_local_peak_index(mean_a[n_pre:], sr)
         amp_a_avg = (
             _round_or_none(statistics.mean(amps_a_for_avg), 4) if amps_a_for_avg else None
         )
