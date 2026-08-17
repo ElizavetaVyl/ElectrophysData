@@ -83,7 +83,6 @@ SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not use
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
 SPIKELET_MIN_PROMINENCE_MV = 0.15  # peak must drop this much after the top; else no spikelet
-SPIKELET_PEAK_EDGE_MS = 1.0  # ignore maxima in the last 1 ms of the 15 ms window
 SPIKELET_USE_NOISE_GATE = False  # amplitude vs noise; peak shape is separate (prominence)
 SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
@@ -1279,25 +1278,16 @@ def _spikelet_smooth_for_peak(y, sr):
     return gaussian_filter1d(y, sigma=sigma, mode="nearest")
 
 
-def _spikelet_peak_edge_samples(n, sr):
-    """How many trailing samples of the 15 ms window cannot host a spikelet."""
-    n_edge = 1
-    if sr is not None and SPIKELET_PEAK_EDGE_MS > 0:
-        n_edge = max(1, int(round(float(SPIKELET_PEAK_EDGE_MS) * float(sr) / 1000.0)))
-    return min(int(n_edge), max(1, int(n) // 5))
-
-
 def _spikelet_local_peak_index(seg, sr=None):
     """Index of a peaked spikelet in the 15 ms window, or None.
 
-    Not ``argmax``. Digitizer jitter is first smoothed
-    (σ = SPIKELET_PEAK_SMOOTH_MS). A candidate must then be a real peak:
-    the smoothed trace falls after the top by at least
-    ``SPIKELET_MIN_PROMINENCE_MV`` (scipy prominence). A monotonic rise,
-    a slow coupling envelope that only crests at the window end, or a
+    The full ``SPIKELET_PEAK_MS`` window is searched. Not ``argmax``.
+    Digitizer jitter is first smoothed (σ = SPIKELET_PEAK_SMOOTH_MS).
+    A candidate must then be a real peak: the smoothed trace falls after
+    the top by at least ``SPIKELET_MIN_PROMINENCE_MV`` (scipy prominence).
+    A monotonic rise, a slow coupling envelope with no peaked event, or a
     1-sample wiggle therefore returns None.
 
-    Maxima in the last ``SPIKELET_PEAK_EDGE_MS`` of the window are ignored.
     If several valid peaks exist, the highest smoothed one is taken.
     Amplitude is still measured on the raw trace at this index.
     """
@@ -1305,20 +1295,10 @@ def _spikelet_local_peak_index(seg, sr=None):
     if y_raw.size < 5:
         return None
     y = _spikelet_smooth_for_peak(y_raw, sr)
-    n_edge = _spikelet_peak_edge_samples(y.size, sr)
     peaks, _props = find_peaks(y, prominence=float(SPIKELET_MIN_PROMINENCE_MV))
     if peaks.size == 0:
         return None
-    best_i = None
-    best_v = -np.inf
-    for i in peaks:
-        i = int(i)
-        if i < 1 or i >= y.size - n_edge:
-            continue
-        v = float(y[i])
-        if v > best_v:
-            best_v = v
-            best_i = i
+    best_i = int(peaks[int(np.argmax(y[peaks]))])
     return best_i
 
 
