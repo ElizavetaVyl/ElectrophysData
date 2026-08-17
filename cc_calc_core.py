@@ -51,11 +51,13 @@ CC_PLOTS_SUBDIR = "CC_plots"  # subfolder for coupling-coefficient figures
 PLOT_DPI = 100  # PNG resolution (lower = faster writes; was 150)
 
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
-SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start)
+SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_NOISE_K = 1.5  # detect if amp_spikelet > k × robust noise (MAD)
 SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps still need 0.15 mV
 SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
+SPIKELET_AP_LOOKBACK_MS = 5.0  # search active AP foot in this window before the peak
+SPIKELET_AP_START_FRAC = 0.10  # AP start = 10% of (peak − local baseline) on active cell
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 
@@ -907,6 +909,36 @@ def _samples_to_ms(n_samples, sr):
     return (float(n_samples) / float(sr)) * 1000.0
 
 
+def _spikelet_active_ap_start(y, i_peak, sr):
+    """Foot of the active AP (t=0 for spikelets).
+
+    Cell-properties start uses the 2nd-last d2V inflection before the peak,
+    which often sits ~1 ms before the visual upstroke. For spikelets, t=0 is
+    the 10% amplitude point walking back from the active peak. The 1 ms
+    *before* this index is only the passive baseline, never the alignment origin.
+    """
+    if y is None or i_peak is None:
+        return np.nan
+    i_peak = int(i_peak)
+    if i_peak <= 2 or i_peak >= len(y):
+        return np.nan
+    n_back = _ms_to_samples(SPIKELET_AP_LOOKBACK_MS, sr)
+    i_lo = max(0, i_peak - n_back)
+    n_base = max(3, _ms_to_samples(0.5, sr))
+    i_base_end = min(i_lo + n_base, i_peak)
+    if i_base_end <= i_lo:
+        return np.nan
+    v_base = float(np.median(y[i_lo:i_base_end]))
+    v_peak = float(y[i_peak])
+    if v_peak <= v_base:
+        return np.nan
+    thresh = v_base + SPIKELET_AP_START_FRAC * (v_peak - v_base)
+    for i in range(i_peak - 1, i_lo, -1):
+        if float(y[i]) <= thresh:
+            return i
+    return i_lo
+
+
 def _spikelet_local_peak_index(seg):
     """Index of max after AP start.
 
@@ -1009,6 +1041,8 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     AP1 excluded. Baseline = mean passive in 1 ms before AP start.
     Peak search = [t_start, t_start+SPIKELET_PEAK_MS]. Delay = (peak_p - peak_a) / SR * 1000.
     Detected if a peak after AP start, amp > 0, and amp clears MAD noise gate.
+
+    t=0 is the active AP foot (10% rise), not the 1 ms passive-baseline window.
     """
     epochs = channel_epochs(abf, active_ch)
     if epochs is None:
@@ -1026,9 +1060,7 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
             f"no sweep with >={SPIKELET_MIN_APS} APs in stim window"
         ), None
 
-    ind_infls = cp_infl_points(abf, sweep, active_ch, stim_start, stim_stop)
     ind_peaks = cp_peak_indices(abf, sweep, active_ch, stim_start, stim_stop)
-    ap_starts, _ap_ends = cp_spike_begin(ind_peaks, ind_infls)
     n_ap = int(len(ind_peaks))
     if n_ap < SPIKELET_MIN_APS:
         return [], _empty_spikelet_metrics(
@@ -1042,6 +1074,7 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     abf.setSweep(sweepNumber=sweep, channel=passive_ch)
     y_p = np.asarray(abf.sweepY, dtype=float)
     n_y = len(y_a)
+    ap_starts = [_spikelet_active_ap_start(y_a, int(ip), sr) for ip in ind_peaks]
 
     ap_rows = []
     snips_a, snips_p = [], []
@@ -1281,7 +1314,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
             if 0 <= i0 < len(t):
                 ax_ov.scatter(
                     t[i0], y_a[i0], c="limegreen", s=28, zorder=5, marker="v",
-                    label="AP start" if i == 0 else None,
+                    label="AP start (t=0, active 10% rise)" if i == 0 else None,
                 )
             if i >= 1 and 0 <= i0 < len(t):
                 t0 = t[i0]
@@ -1322,10 +1355,13 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
             t_snip, plot_meta["mean_p"], color="C1", lw=2.2,
             label=f"mean spikelet (n={n_avg})",
         )
-    ax_avg.axvline(0, color="limegreen", ls="--", lw=1.0)
-    ax_avg.axvspan(-SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25)
+    ax_avg.axvline(0, color="limegreen", ls="--", lw=1.2, label="t=0 active AP start")
+    ax_avg.axvspan(
+        -SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25,
+        label="passive baseline 1 ms (not t=0)",
+    )
     ax_avg.axvspan(0, SPIKELET_PEAK_MS, color="C4", alpha=0.12)
-    ax_avg.set_xlabel("Time from AP start (ms)")
+    ax_avg.set_xlabel("Time from active AP start (ms)")
     ax_avg.set_ylabel("Passive Vm (mV)", color="C1")
     ax_avg.tick_params(axis="y", labelcolor="C1")
 
