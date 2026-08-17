@@ -38,8 +38,10 @@ RIN_MIN_POINTS = 2  # minimum sweeps for V(I) linear fit
 CP_SPIKE_HEIGHT = -10  # mV
 CP_SPIKE_DISTANCE = 10  # samples
 CP_MIN_APS = 4  # sweep must have >= this many APs in stim window
-CP_RIN_VMIN = -85  # mV; linear I–V window for Rin_abs / Rin_rel
+CP_RIN_VMIN = -85  # mV; linear I–V window for Rin_abs / Rin_rel / V_rest
 CP_RIN_VMAX = -50  # mV
+CP_RIN_VMIN_FALLBACK = -95  # mV; wider window if too few points for V_rest
+CP_RIN_VMAX_FALLBACK = -40  # mV; later files often sit above -50 mV
 CP_RIN_REL_MIN_DI_PA = 0.15  # pA; skip per-sweep Rin_rel if |delta I| smaller
 
 SAVE_QC_PLOTS = True  # save AP + I–V + tau/Cm PNGs (cell-properties style QC)
@@ -80,6 +82,8 @@ CELL_PROPS_FIELD_SUFFIXES = (
     "Rin_abs_MOhm",
     "Rin_rel_MOhm",
     "V_rest_mV",
+    "V_rest_skip_reason",
+    "V_rest_note",
     "hold_V_mV",
     "inj_current_pA",
     "R2_abs_Rin",
@@ -145,6 +149,8 @@ SPIKELET_SWEEP_KEYS = (
     "n_AP_used",
     "n_spikelet_detected",
     "mean_amp_ratio",
+    "mean_amp_active_mV",
+    "mean_amp_spikelet_mV",
     "mean_delay_ms",
     "mean_delay_10_ms",
     "mean_vm_begin_mV",
@@ -613,15 +619,15 @@ def cp_sweep_4aps(abf, voltage_ch, start, stop, v_level=CP_SPIKE_HEIGHT):
 
 
 def cp_sweep_1ap(abf, voltage_ch, start, stop, v_level=CP_SPIKE_HEIGHT):
-    """Last sweep before the first sweep with >=1 AP (for subthreshold I–V / Rin_abs)."""
-    last_no_ap = 0
+    """Last sweep before the first AP. None if sweep 0 already has an AP."""
+    last_no_ap = None
     for sweep_num in abf.sweepList:
         abf.setSweep(sweepNumber=sweep_num, channel=voltage_ch)
         peaks, _ = find_peaks(
             abf.sweepY[start:stop], height=v_level, distance=CP_SPIKE_DISTANCE
         )
         if len(peaks) >= 1:
-            return sweep_num - 1 if sweep_num > 0 else 0
+            return last_no_ap
         last_no_ap = sweep_num
     return last_no_ap
 
@@ -769,22 +775,37 @@ def cp_delay_1st_ap(stim_start, ap_peaks, sampling_rate):
 
 
 def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post_start, post_end):
-    """I–V points and fit for cell-properties Rin_abs / Rin_rel (returns dict for metrics + plots)."""
+    """I–V points and fit for cell-properties Rin_abs / Rin_rel / V_rest."""
+    empty = {
+        "currents": [],
+        "voltages": [],
+        "range_indices": [],
+        "rin_rel": None,
+        "rin_abs": None,
+        "v_rest": None,
+        "r2_abs": None,
+        "slope": None,
+        "intercept": None,
+        "n_subthreshold_sweeps": 0,
+        "v_rest_skip": None,
+        "v_rest_note": None,
+    }
     last_sub_sweep = cp_sweep_1ap(abf, voltage_ch, pre_end, post_end)
+    if last_sub_sweep is None:
+        empty["v_rest_skip"] = (
+            "AP already on sweep 0 in stim window; no subthreshold I–V for V_rest"
+        )
+        return empty
+
     voltages_list, currents_list = [], []
     voltages_delta_list, currents_delta_list = [], []
-    voltage_range_ind_list = []
 
-    for sweep_index, sn in enumerate(range(last_sub_sweep + 1)):
+    for sn in range(last_sub_sweep + 1):
         abf.setSweep(sweepNumber=sn, channel=voltage_ch)
         voltage_pre = float(np.mean(abf.sweepY[pre_start:pre_end]))
         voltage_post = float(np.mean(abf.sweepY[post_start:post_end]))
-        voltage_delta = voltage_post - voltage_pre
-        voltages_delta_list.append(voltage_delta)
+        voltages_delta_list.append(voltage_post - voltage_pre)
         voltages_list.append(voltage_post)
-        if CP_RIN_VMIN <= voltage_post <= CP_RIN_VMAX:
-            voltage_range_ind_list.append(sweep_index)
-
         abf.setSweep(sweepNumber=sn, channel=current_ch)
         current_pre = float(np.mean(abf.sweepY[pre_start:pre_end]))
         current_post = float(np.mean(abf.sweepY[post_start:post_end]))
@@ -796,8 +817,33 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
         for x, y in zip(voltages_delta_list, currents_delta_list)
     ]
 
-    if voltage_range_ind_list:
-        rin_from_range = [rin_relative_list[i] for i in voltage_range_ind_list]
+    def _in_window(vmin, vmax):
+        return [
+            i for i, vm in enumerate(voltages_list)
+            if vmin <= vm <= vmax
+        ]
+
+    primary_idx = _in_window(CP_RIN_VMIN, CP_RIN_VMAX)
+    fallback_idx = _in_window(CP_RIN_VMIN_FALLBACK, CP_RIN_VMAX_FALLBACK)
+    vm_min = min(voltages_list) if voltages_list else None
+    vm_max = max(voltages_list) if voltages_list else None
+    vm_span = (
+        f"subth post Vm {vm_min:.1f}…{vm_max:.1f} mV, {len(voltages_list)} sweep(s)"
+        if vm_min is not None else "no subthreshold sweeps"
+    )
+
+    fit_idx = primary_idx if len(primary_idx) >= 2 else fallback_idx
+    v_rest_note = None
+    if len(primary_idx) < 2 and len(fallback_idx) >= 2:
+        v_rest_note = (
+            f"V_rest used extended I–V window "
+            f"{CP_RIN_VMIN_FALLBACK}…{CP_RIN_VMAX_FALLBACK} mV "
+            f"({len(fallback_idx)} points; primary {CP_RIN_VMIN}…{CP_RIN_VMAX} had {len(primary_idx)})"
+        )
+
+    rin_idx = primary_idx or fallback_idx
+    if rin_idx:
+        rin_from_range = [rin_relative_list[i] for i in rin_idx]
         rin_rel = round(float(np.nanmean(rin_from_range)) * 1000, 3)
     else:
         rin_rel = None
@@ -807,25 +853,33 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
     r2_abs = None
     slope = None
     intercept = None
+    v_rest_skip = None
 
-    if len(voltage_range_ind_list) >= 2:
-        currents_ar = np.array(currents_list)[voltage_range_ind_list]
-        voltages_ar = np.array(voltages_list)[voltage_range_ind_list]
+    if len(fit_idx) >= 2:
+        currents_ar = np.array(currents_list)[fit_idx]
+        voltages_ar = np.array(voltages_list)[fit_idx]
         try:
             fit = np.polyfit(currents_ar, voltages_ar, 1, full=True)
             slope, intercept = fit[0]
             rin_abs = round(float(slope) * 1000, 3)
             v_rest = round(float(intercept), 3)
-            sse = fit[1][0]
+            sse = fit[1][0] if len(fit[1]) else 0.0
             sst = np.sum((voltages_ar - np.mean(voltages_ar)) ** 2)
             r2_abs = round(1 - sse / sst, 3) if sst != 0 else None
-        except (IndexError, ZeroDivisionError, np.linalg.LinAlgError, TypeError, ValueError):
-            pass
+        except (IndexError, ZeroDivisionError, np.linalg.LinAlgError, TypeError, ValueError) as exc:
+            v_rest_skip = f"I–V polyfit failed ({exc}); {vm_span}"
+    else:
+        v_rest_skip = (
+            f"need >=2 subthreshold I–V points for V_rest; "
+            f"primary {CP_RIN_VMIN}…{CP_RIN_VMAX} mV: {len(primary_idx)}, "
+            f"extended {CP_RIN_VMIN_FALLBACK}…{CP_RIN_VMAX_FALLBACK} mV: {len(fallback_idx)}; "
+            f"{vm_span}"
+        )
 
     return {
         "currents": currents_list,
         "voltages": voltages_list,
-        "range_indices": voltage_range_ind_list,
+        "range_indices": fit_idx,
         "rin_rel": rin_rel,
         "rin_abs": rin_abs,
         "v_rest": v_rest,
@@ -833,6 +887,8 @@ def cp_collect_iv_rin_data(abf, voltage_ch, current_ch, pre_start, pre_end, post
         "slope": slope,
         "intercept": intercept,
         "n_subthreshold_sweeps": last_sub_sweep + 1,
+        "v_rest_skip": v_rest_skip,
+        "v_rest_note": v_rest_note,
     }
 
 
@@ -860,44 +916,63 @@ def cp_iv_values(abf, sweep, voltage_ch, current_ch, pre_start, pre_end, in_star
 def compute_cell_properties(abf, voltage_ch, current_ch):
     """Per-cell firing and I–V metrics (Cell Properties notebook logic)."""
     label = f"ch{voltage_ch}"
+    ch_tag = f"ch{voltage_ch}"
     epochs = channel_epochs(abf, voltage_ch)
     if epochs is None:
-        return {f"props_skip_reason_{label}": "no stimulus detected in sweepC"}
+        return {
+            f"props_skip_reason_{label}": "no stimulus detected in sweepC",
+            f"V_rest_skip_reason_{ch_tag}": "no stimulus detected in sweepC",
+        }
 
-    sr = int(abf.dataRate)
     start = epochs["start"]
     stop = epochs["stop"]
     pre_start = epochs["pre_start"]
-    post_stop = epochs["post_stop"]
     within = epochs["within_point"]
+    sr = int(abf.dataRate)
+
+    iv = cp_collect_iv_rin_data(
+        abf, voltage_ch, current_ch, pre_start, start, within, stop
+    )
+    iv_fields = {
+        f"Rin_abs_MOhm_{ch_tag}": iv["rin_abs"],
+        f"Rin_rel_MOhm_{ch_tag}": iv["rin_rel"],
+        f"V_rest_mV_{ch_tag}": iv["v_rest"],
+        f"R2_abs_Rin_{ch_tag}": iv["r2_abs"],
+        f"V_rest_skip_reason_{ch_tag}": iv.get("v_rest_skip"),
+        f"V_rest_note_{ch_tag}": iv.get("v_rest_note"),
+    }
 
     sweep_4 = cp_sweep_4aps(abf, voltage_ch, start, stop)
     if sweep_4 is None:
-        return {f"props_skip_reason_{label}": f"no sweep with >={CP_MIN_APS} APs in stim window"}
+        return {
+            **iv_fields,
+            f"props_skip_reason_{label}": f"no sweep with >={CP_MIN_APS} APs in stim window",
+        }
 
     ind_infls = cp_infl_points(abf, sweep_4, voltage_ch, start, stop)
     ind_peaks = cp_peak_indices(abf, sweep_4, voltage_ch, start, stop)
     if len(ind_peaks) < CP_MIN_APS:
         return {
+            **iv_fields,
             f"props_skip_reason_{label}": (
                 f"sweep {sweep_4} has {len(ind_peaks)} peaks (< {CP_MIN_APS})"
-            )
+            ),
         }
 
     ap_start, ap_end = cp_spike_begin(ind_peaks, ind_infls)
     if not ap_start or not np.isfinite(ap_start[0]) or not np.isfinite(ap_end[0]):
-        return {f"props_skip_reason_{label}": "could not define 1st AP borders (inflection points)"}
+        return {
+            **iv_fields,
+            f"props_skip_reason_{label}": "could not define 1st AP borders (inflection points)",
+        }
 
-    rin_rel, rin_abs, v_rest, r2_abs = cp_iv_rin(
-        abf, voltage_ch, current_ch, pre_start, start, within, stop
-    )
     hold_v, inj = cp_iv_values(
         abf, sweep_4, voltage_ch, current_ch, pre_start, start, within, stop
     )
     freq_12, freq_late, mean_freq = cp_frequencies(ind_peaks, sr)
-    ch_tag = f"ch{voltage_ch}"
 
     return {
+        **iv_fields,
         f"AP21_ratio_{ch_tag}": cp_ap21_ratio(abf, sweep_4, voltage_ch, ap_start, ind_peaks),
         f"init_freq_Hz_{ch_tag}": freq_12,
         f"late_freq_Hz_{ch_tag}": freq_late,
@@ -906,12 +981,8 @@ def compute_cell_properties(abf, voltage_ch, current_ch):
             abf, sweep_4, voltage_ch, ap_start[0], ap_end[0], ind_peaks[0], sr
         ),
         f"delay_AP1_ms_{ch_tag}": cp_delay_1st_ap(start, ind_peaks, sr),
-        f"Rin_abs_MOhm_{ch_tag}": rin_abs,
-        f"Rin_rel_MOhm_{ch_tag}": rin_rel,
-        f"V_rest_mV_{ch_tag}": v_rest,
         f"hold_V_mV_{ch_tag}": hold_v,
         f"inj_current_pA_{ch_tag}": inj,
-        f"R2_abs_Rin_{ch_tag}": r2_abs,
         f"props_sweep_{ch_tag}": sweep_4,
         f"props_skip_reason_{ch_tag}": None,
     }
@@ -2588,7 +2659,7 @@ def _spikelet_means_from_ap_rows(spikelet_rows):
     out = {}
     for key, items in by.items():
         rec = {"sweep": key[2]}
-        for metric in ("amp_ratio", "delay_ms", "delay_10_ms"):
+        for metric in ("amp_ratio", "amp_active_mV", "amp_spikelet_mV", "delay_ms", "delay_10_ms"):
             vals = []
             for item in items:
                 v = item.get(metric)
@@ -2774,6 +2845,8 @@ def save_folder_spikelet_over_time_plot(
                 sw_use = [s for s in sw if s.get("is_primary")]
             sw_key = {
                 "amp_ratio": "mean_amp_ratio",
+                "amp_active_mV": "mean_amp_active_mV",
+                "amp_spikelet_mV": "mean_amp_spikelet_mV",
                 "delay_ms": "mean_delay_ms",
                 "delay_10_ms": "mean_delay_10_ms",
             }.get(metric, metric)
@@ -2789,24 +2862,40 @@ def save_folder_spikelet_over_time_plot(
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
     ratio21 = [_val(r, "21", dir_21, "amp_ratio") for r in rows]
+    amp_a12 = [_val(r, "12", dir_12, "amp_active_mV") for r in rows]
+    amp_a21 = [_val(r, "21", dir_21, "amp_active_mV") for r in rows]
+    amp_p12 = [_val(r, "12", dir_12, "amp_spikelet_mV") for r in rows]
+    amp_p21 = [_val(r, "21", dir_21, "amp_spikelet_mV") for r in rows]
     dpk12 = [_val(r, "12", dir_12, "delay_ms") for r in rows]
     dpk21 = [_val(r, "21", dir_21, "delay_ms") for r in rows]
     d1012 = [_val(r, "12", dir_12, "delay_10_ms") for r in rows]
     d1021 = [_val(r, "21", dir_21, "delay_10_ms") for r in rows]
+    n_ratio = sum(v is not None for v in ratio12 + ratio21)
+    n_amp = sum(v is not None for v in amp_p12 + amp_p21 + amp_a12 + amp_a21)
+    print(
+        f"  spikelet vs time points: amp_ratio={n_ratio}, "
+        f"amplitudes={n_amp}, delay_peak="
+        f"{sum(v is not None for v in dpk12 + dpk21)}"
+    )
 
     plt = _get_agg_plt()
-    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
     if title:
         fig.suptitle(f"{title}  —  spikelet / spike vs time", fontsize=12)
 
     panels = (
-        (axes[0], "Amplitude ratio (spikelet / spike)", "ratio",
+        (axes[0], "Amplitude (mV)", "amp (mV)",
+         ((amp_a12, "o-", "C0", "12 spike (ch0)"),
+          (amp_p12, "s--", "C0", "12 spikelet (ch2)"),
+          (amp_a21, "o-", "C1", "21 spike (ch2)"),
+          (amp_p21, "s--", "C1", "21 spikelet (ch0)"))),
+        (axes[1], "Amplitude ratio (spikelet / spike)", "ratio",
          ((ratio12, "o-", "C0", "12 (ch0→ch2)"),
           (ratio21, "s-", "C1", "21 (ch2→ch0)"))),
-        (axes[1], "Delay peak (ms)", "delay peak (ms)",
+        (axes[2], "Delay peak (ms)", "delay peak (ms)",
          ((dpk12, "o-", "C0", "12 peak"),
           (dpk21, "s-", "C1", "21 peak"))),
-        (axes[2], "Delay 10% (ms)", "delay 10% (ms)",
+        (axes[3], "Delay 10% (ms)", "delay 10% (ms)",
          ((d1012, "o-", "C0", "12 10%"),
           (d1021, "s-", "C1", "21 10%"))),
     )
@@ -2906,15 +2995,20 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
         ("ch0->ch2", "ch0→ch2"),
         ("ch2->ch0", "ch2→ch0"),
     )
+    n_curves = 0
     any_data = False
     for col, (direction, dir_title) in enumerate(directions):
         for row_i, (y_key, ylabel) in enumerate(panels):
             ax = axes[row_i, col]
             curves = file_spikelet_vm_curves(sweep_rows, direction, y_key)
+            n_curves += len(curves)
             if not curves:
                 ax.set_title(f"{dir_title} — no data" if row_i == 0 else "")
-                ax.set_ylabel(ylabel if col == 0 else None)
+                if col == 0:
+                    ax.set_ylabel(ylabel)
                 ax.grid(True, alpha=0.3)
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", color="0.5", fontsize=9)
                 continue
             any_data = True
             all_vm, all_y = [], []
@@ -2938,10 +3032,9 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
             if row_i == 2:
                 ax.set_xlabel("Vm at spikelet begin (active, mV)")
 
+    print(f"  spikelet vs Vm curves: {n_curves} (need mean_amp_ratio/delay + mean_vm_begin_mV)")
     if not any_data:
-        plt.close(fig)
-        print("  spikelet vs Vm: no sweep-mean ratio/delay + Vm_begin points")
-        return None
+        print("  spikelet vs Vm: no points yet; still saving empty figure")
 
     try:
         sm = mplcm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
