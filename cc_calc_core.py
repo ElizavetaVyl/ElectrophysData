@@ -65,6 +65,18 @@ CC_VM_FIT_LINEAR = True  # solid line on folder CC_norm vs Vm
 CC_VM_LINEAR_MIN_POINTS = 3  # no line if the file has fewer CC_norm points
 CC_VM_CMAP = "viridis"  # file color = first→last by file number in the name
 
+# Which analysis to run (notebook dialog can change this per session)
+RUN_CC = True  # CC, Gj, Rin-for-CC, CC QC + folder CC plots
+RUN_CELL_PROPS = True  # V_rest, firing metrics, AP / I–V QC plots
+RUN_TAU_CM = True  # tau/Cm (uses Rin; enable CC or Rin will still be computed)
+RUN_SPIKELETS = True  # spike/spikelet; AP start from cp_* inflections (not the full cell-props block)
+ANALYSIS_BLOCKS = {
+    "cc": RUN_CC,
+    "cell_props": RUN_CELL_PROPS,
+    "tau_cm": RUN_TAU_CM,
+    "spikelets": RUN_SPIKELETS,
+}
+
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
@@ -260,6 +272,97 @@ def recording_datetime_str(abf):
     if isinstance(dt, datetime):
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     return str(dt)
+
+
+def resolve_analysis_blocks(blocks=None):
+    """Normalized {cc, cell_props, tau_cm, spikelets} flags. At least one stays on."""
+    out = {
+        "cc": True,
+        "cell_props": True,
+        "tau_cm": True,
+        "spikelets": True,
+    }
+    src = ANALYSIS_BLOCKS if blocks is None else blocks
+    if src:
+        for key in out:
+            if key in src:
+                out[key] = bool(src[key])
+    if not any(out.values()):
+        out["spikelets"] = True
+    return out
+
+
+def ask_analysis_blocks(initial=None):
+    """Tk window: choose which analysis blocks to run this session."""
+    from tkinter import BooleanVar, Button, Checkbutton, Frame, Label, Tk
+
+    chosen = resolve_analysis_blocks(initial)
+    root = Tk()
+    root.title("Analysis blocks")
+    root.attributes("-topmost", True)
+    try:
+        root.lift()
+    except Exception:
+        pass
+    root.update()
+
+    Label(
+        root,
+        text="What to run?  Unchecked blocks are skipped (faster).",
+        font=("Segoe UI", 11, "bold"),
+        pady=8,
+        padx=12,
+    ).pack(anchor="w")
+    Label(
+        root,
+        text=(
+            "Spike / spikelet does not need the Cell properties block.\n"
+            "AP start is still the same inflection method (peaks + d²V),\n"
+            "computed inside the spikelet analysis."
+        ),
+        justify="left",
+        padx=12,
+    ).pack(anchor="w")
+
+    vars_ = {}
+    labels = (
+        ("cc", "CC / Gj / Rin   (CC QC plots, CC vs Vm, slope vs time)"),
+        ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
+        ("tau_cm", "Tau / Cm   (uses Rin; Rin is computed if CC is off)"),
+        ("spikelets", "Spike / spikelet   (QC + over time + vs Vm)"),
+    )
+    for key, text in labels:
+        var = BooleanVar(value=chosen[key])
+        vars_[key] = var
+        Checkbutton(root, text=text, variable=var, anchor="w").pack(fill="x", padx=16)
+
+    def _read():
+        return {key: bool(var.get()) for key, var in vars_.items()}
+
+    def _finish():
+        chosen.clear()
+        chosen.update(resolve_analysis_blocks(_read()))
+        root.destroy()
+
+    def _all():
+        for var in vars_.values():
+            var.set(True)
+
+    def _spikelet_only():
+        vars_["cc"].set(False)
+        vars_["cell_props"].set(False)
+        vars_["tau_cm"].set(False)
+        vars_["spikelets"].set(True)
+
+    btns = Frame(root)
+    btns.pack(pady=10)
+    Button(btns, text="Spikelet only", command=_spikelet_only, width=14).pack(side="left", padx=4)
+    Button(btns, text="All blocks", command=_all, width=12).pack(side="left", padx=4)
+    Button(btns, text="OK", command=_finish, width=10).pack(side="left", padx=4)
+    root.protocol("WM_DELETE_WINDOW", _finish)
+    root.resizable(False, False)
+    root.mainloop()
+    return chosen
 
 
 def mean_delta_voltage(sweep_y, pre_start, pre_end, post_start, post_end):
@@ -2341,6 +2444,9 @@ def save_qc_plots(
     rin_ch0, r2_ch0, rin_note_0,
     rin_ch2, r2_ch2, rin_note_2,
     tau_plot_meta=None,
+    save_ap=True,
+    save_rin=True,
+    save_tau=True,
 ):
     """Save AP + Rin I–V + tau/Cm QC PNGs into plots_dir."""
     os.makedirs(plots_dir, exist_ok=True)
@@ -2351,11 +2457,17 @@ def save_qc_plots(
         (0, 1, rin_ch0, r2_ch0, rin_note_0),
         (2, 3, rin_ch2, r2_ch2, rin_note_2),
     ):
-        for saver, extra in (
-            (_save_ap_qc_plot, (abf, voltage_ch, plots_dir, stem)),
-            (_save_rin_qc_plot, (abf, voltage_ch, current_ch, plots_dir, stem, borders, rin, r2, None, note)),
-            (_save_tau_cm_qc_plot, (abf, voltage_ch, plots_dir, stem, tau_plot_meta or {})),
-        ):
+        jobs = []
+        if save_ap:
+            jobs.append((_save_ap_qc_plot, (abf, voltage_ch, plots_dir, stem)))
+        if save_rin:
+            jobs.append((
+                _save_rin_qc_plot,
+                (abf, voltage_ch, current_ch, plots_dir, stem, borders, rin, r2, None, note),
+            ))
+        if save_tau:
+            jobs.append((_save_tau_cm_qc_plot, (abf, voltage_ch, plots_dir, stem, tau_plot_meta or {})))
+        for saver, extra in jobs:
             try:
                 path = saver(*extra)
                 if path:
@@ -3641,8 +3753,12 @@ def _skipped_file_row(name, rec_dt, reason):
     })]
 
 
-def analyze_abf_file(filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_plots_dir_path=None):
+def analyze_abf_file(
+    filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_plots_dir_path=None,
+    blocks=None,
+):
     """Return (per_sweep_rows, file_summary_row, qc_plot_paths, spikelet_ap_rows, spikelet_sweep_rows)."""
+    bsel = resolve_analysis_blocks(blocks)
     name = os.path.basename(filepath)
     abf = pyabf.ABF(filepath)
     rec_dt = recording_datetime_str(abf)
@@ -3669,77 +3785,99 @@ def analyze_abf_file(filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_
         )
 
     cell_props = empty_cell_props_fields()
-    try:
-        cell_props = cell_properties_for_file(abf)
-    except Exception as exc:
-        msg = str(exc)
-        cell_props["props_skip_reason_ch0"] = msg
-        cell_props["props_skip_reason_ch2"] = msg
+    if bsel["cell_props"]:
+        try:
+            cell_props = cell_properties_for_file(abf)
+        except Exception as exc:
+            msg = str(exc)
+            cell_props["props_skip_reason_ch0"] = msg
+            cell_props["props_skip_reason_ch2"] = msg
 
     b = time_period_borders(abf.dataRate)
     w0 = (b["start10"], b["end10"], b["start11"], b["end11"])
     w2 = (b["start20"], b["end20"], b["start21"], b["end21"])
 
-    sweeps_ch0 = cc_sweep_indices_direction(
-        abf, 0, 2, b["start10"], b["end10"], b["start11"], b["end11"]
-    )
-    sweeps_ch2 = cc_sweep_indices_direction(
-        abf, 2, 0, b["start20"], b["end20"], b["start21"], b["end21"]
-    )
+    sweeps_ch0, sweeps_ch2 = [], []
+    block_02, block_20 = [], []
+    cc_mean_02 = cc_mean_20 = None
+    n_avg_02 = n_avg_20 = n_neg_02 = n_neg_20 = 0
+    rin_ch0 = rin_ch2 = r2_ch0 = r2_ch2 = None
+    n0 = n2 = 0
+    rin_skip_0 = rin_skip_2 = None
+    rin_range_0 = rin_range_2 = None
+    rin_note_0 = rin_note_2 = None
 
-    block_02 = coupling_block(abf, sweeps_ch0, 0, 2, 1, w0)
-    block_20 = coupling_block(abf, sweeps_ch2, 2, 0, 3, w2)
+    if bsel["cc"]:
+        sweeps_ch0 = cc_sweep_indices_direction(
+            abf, 0, 2, b["start10"], b["end10"], b["start11"], b["end11"]
+        )
+        sweeps_ch2 = cc_sweep_indices_direction(
+            abf, 2, 0, b["start20"], b["end20"], b["start21"], b["end21"]
+        )
+        block_02 = coupling_block(abf, sweeps_ch0, 0, 2, 1, w0)
+        block_20 = coupling_block(abf, sweeps_ch2, 2, 0, 3, w2)
+        cc_list_02 = [r["CC"] for r in block_02]
+        cc_list_20 = [r["CC"] for r in block_20]
+        cc_mean_02 = mean_valid_cc(cc_list_02)
+        cc_mean_20 = mean_valid_cc(cc_list_20)
+        cc_normalize_block(block_02, cc_mean_02)
+        cc_normalize_block(block_20, cc_mean_20)
+        n_avg_02 = n_valid_cc(cc_list_02)
+        n_avg_20 = n_valid_cc(cc_list_20)
+        n_neg_02 = n_negative_cc(cc_list_02)
+        n_neg_20 = n_negative_cc(cc_list_20)
 
-    cc_list_02 = [r["CC"] for r in block_02]
-    cc_list_20 = [r["CC"] for r in block_20]
-    cc_mean_02 = mean_valid_cc(cc_list_02)
-    cc_mean_20 = mean_valid_cc(cc_list_20)
-    cc_normalize_block(block_02, cc_mean_02)
-    cc_normalize_block(block_20, cc_mean_20)
-    n_avg_02 = n_valid_cc(cc_list_02)
-    n_avg_20 = n_valid_cc(cc_list_20)
-    n_neg_02 = n_negative_cc(cc_list_02)
-    n_neg_20 = n_negative_cc(cc_list_20)
-
-    rin_ch0, r2_ch0, n0, rin_skip_0, rin_range_0, rin_note_0, _ = rin_for_channel(
-        abf, 0, 1, b["start10"], b["end10"], b["start11"], b["end11"], b["Rtime_ch0"]
-    )
-    rin_ch2, r2_ch2, n2, rin_skip_2, rin_range_2, rin_note_2, _ = rin_for_channel(
-        abf, 2, 3, b["start20"], b["end20"], b["start21"], b["end21"], b["Rtime_ch2"]
-    )
+    if bsel["cc"] or bsel["tau_cm"]:
+        rin_ch0, r2_ch0, n0, rin_skip_0, rin_range_0, rin_note_0, _ = rin_for_channel(
+            abf, 0, 1, b["start10"], b["end10"], b["start11"], b["end11"], b["Rtime_ch0"]
+        )
+        rin_ch2, r2_ch2, n2, rin_skip_2, rin_range_2, rin_note_2, _ = rin_for_channel(
+            abf, 2, 3, b["start20"], b["end20"], b["start21"], b["end21"], b["Rtime_ch2"]
+        )
+    elif not bsel["cc"]:
+        rin_skip_0 = rin_skip_2 = "CC / Rin block not selected"
+        rin_note_0 = rin_note_2 = "CC / Rin block not selected"
 
     tau_cm = empty_tau_cm_fields()
     tau_plot_meta = {}
-    try:
-        tau_cm_raw = tau_cm_for_file(abf, rin_ch0, rin_ch2, borders=b)
-        tau_plot_meta = tau_cm_raw.pop("_tau_plot_meta", {})
-        tau_cm = {k: v for k, v in tau_cm_raw.items() if not k.startswith("_")}
-    except Exception as exc:
-        msg = str(exc)
-        tau_cm["tau_skip_reason_ch0"] = msg
-        tau_cm["tau_skip_reason_ch2"] = msg
+    if bsel["tau_cm"]:
+        try:
+            tau_cm_raw = tau_cm_for_file(abf, rin_ch0, rin_ch2, borders=b)
+            tau_plot_meta = tau_cm_raw.pop("_tau_plot_meta", {})
+            tau_cm = {k: v for k, v in tau_cm_raw.items() if not k.startswith("_")}
+        except Exception as exc:
+            msg = str(exc)
+            tau_cm["tau_skip_reason_ch0"] = msg
+            tau_cm["tau_skip_reason_ch2"] = msg
+    else:
+        tau_cm["tau_skip_reason_ch0"] = "Tau/Cm block not selected"
+        tau_cm["tau_skip_reason_ch2"] = "Tau/Cm block not selected"
 
     spikelet_rows = []
     spikelet_sweep_rows = []
     spikelet_summary = empty_spikelet_summary_fields()
-    try:
-        sp_dir = spikelet_plots_dir_path
-        if SAVE_SPIKELET_PLOTS and not sp_dir:
-            sp_dir = os.path.join(os.path.dirname(os.path.abspath(filepath)), SPIKELET_PLOTS_SUBDIR)
-        sp_result = spikelets_for_file(
-            abf, name, rec_dt,
-            plots_dir=sp_dir if SAVE_SPIKELET_PLOTS else None,
-            stem=_abf_stem(filepath),
-        )
-        spikelet_rows, spikelet_summary, sp_paths = sp_result[0], sp_result[1], sp_result[2]
-        spikelet_sweep_rows = sp_result[3] if len(sp_result) > 3 else []
-        plot_paths.extend(sp_paths)
-    except Exception as exc:
-        print(f"  Spikelet analysis error: {exc}")
-        traceback.print_exc()
-        spikelet_summary = empty_spikelet_summary_fields()
-        spikelet_summary["spikelet_skip_reason_12"] = str(exc)
-        spikelet_summary["spikelet_skip_reason_21"] = str(exc)
+    if bsel["spikelets"]:
+        try:
+            sp_dir = spikelet_plots_dir_path
+            if SAVE_SPIKELET_PLOTS and not sp_dir:
+                sp_dir = os.path.join(os.path.dirname(os.path.abspath(filepath)), SPIKELET_PLOTS_SUBDIR)
+            sp_result = spikelets_for_file(
+                abf, name, rec_dt,
+                plots_dir=sp_dir if SAVE_SPIKELET_PLOTS else None,
+                stem=_abf_stem(filepath),
+            )
+            spikelet_rows, spikelet_summary, sp_paths = sp_result[0], sp_result[1], sp_result[2]
+            spikelet_sweep_rows = sp_result[3] if len(sp_result) > 3 else []
+            plot_paths.extend(sp_paths)
+        except Exception as exc:
+            print(f"  Spikelet analysis error: {exc}")
+            traceback.print_exc()
+            spikelet_summary = empty_spikelet_summary_fields()
+            spikelet_summary["spikelet_skip_reason_12"] = str(exc)
+            spikelet_summary["spikelet_skip_reason_21"] = str(exc)
+    else:
+        spikelet_summary["spikelet_skip_reason_12"] = "Spikelet block not selected"
+        spikelet_summary["spikelet_skip_reason_21"] = "Spikelet block not selected"
 
     file_summary_extra = {
         **cell_props,
@@ -3757,10 +3895,11 @@ def analyze_abf_file(filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_
         "Rin_ch2_skip_reason": rin_skip_2,
         "Rin_ch2_note": rin_note_2,
         "Rin_vm_range_ch2": rin_range_2,
+        "analysis_blocks": ",".join(k for k, on in bsel.items() if on),
     }
 
-    gj_02, gj_skip_02 = gj_nS(cc_mean_02, rin_ch2)
-    gj_20, gj_skip_20 = gj_nS(cc_mean_20, rin_ch0)
+    gj_02, gj_skip_02 = gj_nS(cc_mean_02, rin_ch2) if bsel["cc"] else (None, "CC block not selected")
+    gj_20, gj_skip_20 = gj_nS(cc_mean_20, rin_ch0) if bsel["cc"] else (None, "CC block not selected")
 
     summary_row = build_file_summary_row(
         name,
@@ -3805,37 +3944,44 @@ def analyze_abf_file(filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_
     )
 
     rows = []
-    for r in block_02:
-        gj_sw, gj_sw_skip = gj_nS(r["CC"], rin_ch2)
+    if bsel["cc"]:
+        for r in block_02:
+            gj_sw, gj_sw_skip = gj_nS(r["CC"], rin_ch2)
+            rows.append(sweep_only_row({
+                "file": name,
+                "recording_datetime": rec_dt,
+                "direction": "ch0->ch2",
+                "Gj_sweep_nS": gj_sw,
+                "Gj_sweep_skip_reason": gj_sw_skip,
+                **r,
+            }))
+        for r in block_20:
+            gj_sw, gj_sw_skip = gj_nS(r["CC"], rin_ch0)
+            rows.append(sweep_only_row({
+                "file": name,
+                "recording_datetime": rec_dt,
+                "direction": "ch2->ch0",
+                "Gj_sweep_nS": gj_sw,
+                "Gj_sweep_skip_reason": gj_sw_skip,
+                **r,
+            }))
+        if not rows:
+            no_sw_reason = "no sweeps without spikes on active or passive in stimulus period"
+            rows.append(sweep_only_row({
+                "file": name,
+                "recording_datetime": rec_dt,
+                "CC_skip_reason": no_sw_reason,
+            }))
+            summary_row["file_skip_reason"] = no_sw_reason
+    else:
         rows.append(sweep_only_row({
             "file": name,
             "recording_datetime": rec_dt,
-            "direction": "ch0->ch2",
-            "Gj_sweep_nS": gj_sw,
-            "Gj_sweep_skip_reason": gj_sw_skip,
-            **r,
-        }))
-    for r in block_20:
-        gj_sw, gj_sw_skip = gj_nS(r["CC"], rin_ch0)
-        rows.append(sweep_only_row({
-            "file": name,
-            "recording_datetime": rec_dt,
-            "direction": "ch2->ch0",
-            "Gj_sweep_nS": gj_sw,
-            "Gj_sweep_skip_reason": gj_sw_skip,
-            **r,
+            "CC_skip_reason": "CC block not selected",
         }))
 
-    if not rows:
-        no_sw_reason = "no sweeps without spikes on active or passive in stimulus period"
-        rows.append(sweep_only_row({
-            "file": name,
-            "recording_datetime": rec_dt,
-            "CC_skip_reason": no_sw_reason,
-        }))
-        summary_row["file_skip_reason"] = no_sw_reason
-
-    if plots_dir and SAVE_QC_PLOTS:
+    want_qc = bsel["cell_props"] or bsel["cc"] or bsel["tau_cm"]
+    if plots_dir and SAVE_QC_PLOTS and want_qc:
         try:
             qc_paths = save_qc_plots(
                 abf,
@@ -3849,12 +3995,15 @@ def analyze_abf_file(filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_
                 r2_ch2,
                 rin_note_2,
                 tau_plot_meta=tau_plot_meta,
+                save_ap=bsel["cell_props"],
+                save_rin=bsel["cc"],
+                save_tau=bsel["tau_cm"],
             )
             plot_paths.extend(qc_paths)
         except Exception as exc:
             print(f"  QC plots error: {exc}")
 
-    if SAVE_CC_PLOTS:
+    if SAVE_CC_PLOTS and bsel["cc"]:
         cc_dir = cc_plots_dir_path
         if not cc_dir:
             cc_dir = os.path.join(os.path.dirname(os.path.abspath(filepath)), CC_PLOTS_SUBDIR)
