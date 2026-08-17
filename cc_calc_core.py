@@ -164,6 +164,11 @@ SPIKELET_SWEEP_KEYS = (
     "mean_delay_ms",
     "mean_delay_10_ms",
     "mean_vm_begin_mV",
+    "avg_amp_ratio",
+    "avg_amp_active_mV",
+    "avg_amp_spikelet_mV",
+    "avg_delay_ms",
+    "avg_delay_10_ms",
     "metric_source",
     "skip_reason",
     "is_primary",
@@ -2017,15 +2022,50 @@ def _savefig_white(fig, path, dpi=None):
     for ax in fig.get_axes():
         ax.set_facecolor("white")
         ax.tick_params(colors="black")
-        ax.xaxis.label.set_color("black")
-        ax.yaxis.label.set_color("black")
-        ax.title.set_color("black")
+        for attr in ("xaxis", "yaxis"):
+            axis = getattr(ax, attr, None)
+            label = getattr(axis, "label", None) if axis is not None else None
+            if label is not None:
+                label.set_color("black")
+        title = getattr(ax, "title", None)
+        if title is not None:
+            title.set_color("black")
         for spine in ax.spines.values():
             spine.set_color("black")
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     fig.savefig(
         path, dpi=dpi, bbox_inches="tight",
         facecolor="white", edgecolor="none", transparent=False,
     )
+
+
+def _mpl_cmap(name=None):
+    """Colormap that works on matplotlib 3.7–3.11 (cm.get_cmap was removed)."""
+    plt = _get_agg_plt()
+    name = name or CC_VM_CMAP
+    try:
+        return plt.colormaps[name]
+    except Exception:
+        pass
+    try:
+        import matplotlib.cm as mplcm
+        return mplcm.get_cmap(name)
+    except Exception:
+        return plt.cm.viridis
+
+
+def _finish_folder_fig(fig, out_path, skip_tight=False):
+    """tight_layout (optional) then save; never leave the caller without a PNG."""
+    if not skip_tight:
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+    _savefig_white(fig, out_path)
+    plt_mod = _get_agg_plt()
+    plt_mod.close(fig)
+    print(f"  saved {out_path}")
+    return out_path
 
 
 def cell_props_plots_dir(folder_path):
@@ -2860,12 +2900,18 @@ def save_folder_spikelet_over_time_plot(
     Always writes the PNG (empty panels if no detections).
     """
     pairs = folder_summary_timed_rows(summary_rows)
-    if not pairs:
-        print("  spikelet vs time: skipped (no recording datetime)")
+    use_dates = bool(pairs)
+    if pairs:
+        times = [dt for dt, _ in pairs]
+        rows = [r for _, r in pairs]
+    else:
+        rows = list(summary_rows or [])
+        rows.sort(key=lambda r: (_abf_file_number(r.get("file") or ""), str(r.get("file") or "")))
+        times = list(range(len(rows)))
+        print("  spikelet vs time: no recording datetime; using file order on X")
+    if not rows:
+        print("  spikelet vs time: skipped (no File_summary rows)")
         return None
-
-    times = [dt for dt, _ in pairs]
-    rows = [r for _, r in pairs]
     from_ap = _spikelet_means_from_ap_rows(spikelet_rows)
     from_sw = {}
     for rec in spikelet_sweep_rows or []:
@@ -2896,20 +2942,35 @@ def save_folder_spikelet_over_time_plot(
             return v
         fname = os.path.basename(str(row.get("file") or ""))
         primary_sn = row.get(f"spikelet_sweep_{tag}")
+        try:
+            primary_sn = int(primary_sn) if primary_sn is not None else None
+        except (TypeError, ValueError):
+            pass
         sw = from_sw.get((fname, direction)) or from_sw.get((str(row.get("file") or ""), direction))
+        sw_key = {
+            "amp_ratio": "mean_amp_ratio",
+            "amp_active_mV": "mean_amp_active_mV",
+            "amp_spikelet_mV": "mean_amp_spikelet_mV",
+            "delay_ms": "mean_delay_ms",
+            "delay_10_ms": "mean_delay_10_ms",
+        }.get(metric, metric)
+
+        def _sweep_num(item):
+            sn = item.get("sweep")
+            try:
+                return int(sn)
+            except (TypeError, ValueError):
+                return sn
+
         if sw:
             if primary_sn is not None:
-                sw_use = [s for s in sw if s.get("sweep") == primary_sn]
+                sw_use = [s for s in sw if _sweep_num(s) == primary_sn]
             else:
                 sw_use = [s for s in sw if s.get("is_primary")]
-            sw_key = {
-                "amp_ratio": "mean_amp_ratio",
-                "amp_active_mV": "mean_amp_active_mV",
-                "amp_spikelet_mV": "mean_amp_spikelet_mV",
-                "delay_ms": "mean_delay_ms",
-                "delay_10_ms": "mean_delay_10_ms",
-            }.get(metric, metric)
             v = _mean_key(sw_use, sw_key)
+            if v is not None:
+                return v
+            v = _mean_key(sw, sw_key)
             if v is not None:
                 return v
         ap = from_ap.get((fname, direction, primary_sn))
@@ -2917,6 +2978,10 @@ def save_folder_spikelet_over_time_plot(
             ap = from_ap.get((str(row.get("file") or ""), direction, primary_sn))
         if ap and ap.get(metric) is not None:
             return ap[metric]
+        for (fn, direc, _sn), rec in from_ap.items():
+            if direc == direction and fn in (fname, str(row.get("file") or "")):
+                if rec.get(metric) is not None:
+                    return rec[metric]
         return None
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
@@ -2935,6 +3000,7 @@ def save_folder_spikelet_over_time_plot(
         f"  spikelet vs time points: amp_ratio={n_ratio}, "
         f"amplitudes={n_amp}, delay_peak="
         f"{sum(v is not None for v in dpk12 + dpk21)}"
+        f"  (will save even if 0)"
     )
 
     plt = _get_agg_plt()
@@ -2972,33 +3038,39 @@ def save_folder_spikelet_over_time_plot(
                     ha="center", va="center", color="0.5", fontsize=9)
         else:
             ax.legend(loc="best", fontsize=8)
-    axes[-1].set_xlabel("Recording time")
+    axes[-1].set_xlabel("Recording time" if use_dates else "File order")
 
-    _format_time_axes(axes[-1])
-    fig.autofmt_xdate()
-    try:
-        fig.tight_layout()
-    except Exception:
-        pass
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-    _savefig_white(fig, out_path)
-    plt.close(fig)
-    print(f"  saved {out_path}  (spikelet points: {n_total})")
-    return out_path
+    if use_dates:
+        _format_time_axes(axes[-1])
+        fig.autofmt_xdate()
+    return _finish_folder_fig(fig, out_path)
 
 
-def file_spikelet_vm_curves(sweep_rows, direction, y_key):
+def file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None):
     """
     Per-file (Vm_begin, y) curves for one direction, sorted by Vm.
 
     Returns list of (file_name, recording_datetime, vm_list, y_list).
     """
+    y_alts = {
+        "mean_amp_ratio": ("mean_amp_ratio", "avg_amp_ratio", "amp_ratio"),
+        "mean_delay_ms": ("mean_delay_ms", "avg_delay_ms", "delay_ms", "delay_peak_ms"),
+        "mean_delay_10_ms": ("mean_delay_10_ms", "avg_delay_10_ms", "delay_10_ms"),
+    }.get(y_key, (y_key,))
+
+    def _y_of(row):
+        for key in y_alts:
+            v = row.get(key)
+            if v is not None:
+                return v
+        return None
+
     by_file = {}
     file_dt = {}
     for row in sweep_rows or []:
         if row.get("direction") != direction:
             continue
-        y = row.get(y_key)
+        y = _y_of(row)
         vm = row.get("mean_vm_begin_mV")
         if y is None or vm is None:
             continue
@@ -3009,6 +3081,24 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key):
             continue
         if fname not in file_dt:
             file_dt[fname] = _parse_recording_datetime(row.get("recording_datetime"))
+
+    if not by_file and ap_rows:
+        for row in ap_rows:
+            if row.get("direction") != direction:
+                continue
+            if not row.get("detected"):
+                continue
+            y = _y_of(row)
+            vm = row.get("vm_begin_active_mV")
+            if y is None or vm is None:
+                continue
+            fname = row.get("file") or "?"
+            try:
+                by_file.setdefault(fname, []).append((float(vm), float(y)))
+            except (TypeError, ValueError):
+                continue
+            if fname not in file_dt:
+                file_dt[fname] = _parse_recording_datetime(row.get("recording_datetime"))
 
     curves = []
     for fname, pairs in by_file.items():
@@ -3023,12 +3113,14 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key):
     return curves
 
 
-def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_rows=None):
+def save_folder_spikelet_vs_vm_plot(
+    sweep_rows, out_path, title=None, summary_rows=None, spikelet_rows=None,
+):
     """
     Folder overview like CC vs Vm: sweep-mean spikelet/spike ratio and delays vs
     mean Vm at spikelet begin (active cell, t=0). Color = first→last file.
+    Always writes the PNG (empty panels if no detections).
     """
-    import matplotlib.cm as mplcm
     from matplotlib.colors import Normalize
 
     plt = _get_agg_plt()
@@ -3037,13 +3129,11 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
         fig.suptitle(f"{title}  —  spikelet / spike vs Vm at begin", fontsize=12)
 
     file_pos, first_lbl, last_lbl, n_files = _cc_vm_file_color_map(
-        sweep_rows or [], summary_rows=summary_rows
+        list(sweep_rows or []) + list(spikelet_rows or []),
+        summary_rows=summary_rows,
     )
     print(f"  spikelet vs Vm color: first={first_lbl}  →  last={last_lbl}  ({n_files} files)")
-    try:
-        cmap = mplcm.get_cmap(CC_VM_CMAP)
-    except Exception:
-        cmap = plt.cm.viridis
+    cmap = _mpl_cmap()
 
     panels = (
         ("mean_amp_ratio", "amp spikelet / amp spike"),
@@ -3059,7 +3149,9 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
     for col, (direction, dir_title) in enumerate(directions):
         for row_i, (y_key, ylabel) in enumerate(panels):
             ax = axes[row_i, col]
-            curves = file_spikelet_vm_curves(sweep_rows, direction, y_key)
+            curves = file_spikelet_vm_curves(
+                sweep_rows, direction, y_key, ap_rows=spikelet_rows,
+            )
             n_curves += len(curves)
             if not curves:
                 ax.set_title(f"{dir_title} — no data" if row_i == 0 else "")
@@ -3091,12 +3183,13 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
             if row_i == 2:
                 ax.set_xlabel("Vm at spikelet begin (active, mV)")
 
-    print(f"  spikelet vs Vm curves: {n_curves} (need mean_amp_ratio/delay + mean_vm_begin_mV)")
+    print(f"  spikelet vs Vm curves: {n_curves} (need ratio/delay + Vm_begin)")
     if not any_data:
         print("  spikelet vs Vm: no points yet; still saving empty figure")
 
+    used_cbar = False
     try:
-        sm = mplcm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=list(axes.ravel()), fraction=0.046, pad=0.03)
         cbar.set_label("first file  →  last file")
@@ -3106,18 +3199,11 @@ def save_folder_spikelet_vs_vm_plot(sweep_rows, out_path, title=None, summary_ro
             cbar.set_ticks([0.0, 1.0])
             cbar.ax.set_yticklabels([f"first  {first_lbl}", f"last  {last_lbl}"])
         cbar.ax.tick_params(labelsize=8)
+        used_cbar = True
     except Exception as exc:
         print(f"  spikelet vs Vm colorbar skipped: {exc}")
 
-    try:
-        fig.tight_layout()
-    except Exception:
-        pass
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-    _savefig_white(fig, out_path)
-    plt.close(fig)
-    print(f"  saved {out_path}")
-    return out_path
+    return _finish_folder_fig(fig, out_path, skip_tight=used_cbar)
 
 
 def file_cc_norm_curves(all_rows, direction):
@@ -3275,7 +3361,6 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
 
     Linear fit only. Two panels: CC12 (ch0→ch2) and CC21 (ch2→ch0).
     """
-    import matplotlib.cm as mplcm
     from matplotlib.colors import Normalize
 
     plt = _get_agg_plt()
@@ -3287,10 +3372,7 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
         all_rows, summary_rows=summary_rows
     )
     print(f"  CC_norm vs Vm color: first={first_lbl}  →  last={last_lbl}  ({n_files} files)")
-    try:
-        cmap = mplcm.get_cmap(CC_VM_CMAP)
-    except Exception:
-        cmap = plt.cm.viridis
+    cmap = _mpl_cmap()
 
     panels = (
         ("ch0->ch2", "CC12 (ch0→ch2)"),
@@ -3328,8 +3410,9 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
         return None
 
     axes[0].set_ylabel("CC_norm (CC / file mean)")
+    used_cbar = False
     try:
-        sm = mplcm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=list(axes), fraction=0.046, pad=0.03)
         cbar.set_label("first file  →  last file")
@@ -3339,18 +3422,11 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None, summary_rows=
             cbar.set_ticks([0.0, 1.0])
             cbar.ax.set_yticklabels([f"first  {first_lbl}", f"last  {last_lbl}"])
         cbar.ax.tick_params(labelsize=8)
+        used_cbar = True
     except Exception as exc:
         print(f"  CC_norm vs Vm colorbar skipped: {exc}")
 
-    try:
-        fig.tight_layout()
-    except Exception:
-        pass
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-    _savefig_white(fig, out_path)
-    plt.close(fig)
-    print(f"  saved {out_path}")
-    return out_path
+    return _finish_folder_fig(fig, out_path, skip_tight=used_cbar)
 
 
 def cc_vm_fits_for_direction(all_rows, direction):
