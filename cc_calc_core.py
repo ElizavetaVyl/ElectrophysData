@@ -2451,22 +2451,20 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
     Solid = linear fit; dashed = 2nd-order polynomial (if ≥3 Vm points).
     Two panels: CC12 (ch0→ch2) and CC21 (ch2→ch0).
     """
+    import matplotlib.cm as mplcm
     from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
 
     plt = _get_agg_plt()
-    try:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True, layout="constrained")
-    except TypeError:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True)
     if title:
         fig.suptitle(title, fontsize=12)
 
     file_pos, first_lbl, last_lbl = _cc_vm_file_color_map(all_rows)
     try:
-        cmap = plt.colormaps.get_cmap(CC_VM_CMAP)
+        cmap = mplcm.get_cmap(CC_VM_CMAP)
     except Exception:
-        cmap = plt.cm.get_cmap(CC_VM_CMAP)
+        cmap = plt.cm.viridis
 
     panels = (
         ("ch0->ch2", "CC12 (ch0→ch2)"),
@@ -2482,8 +2480,8 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
         any_data = True
 
         for fname, _dt, vms, norms in curves:
-            color = cmap(file_pos.get(fname, 0.5))
-            ax.scatter(vms, norms, color=color, s=28, zorder=3, alpha=0.9)
+            color = cmap(float(file_pos.get(fname, 0.5)))
+            ax.scatter(vms, norms, color=[color], s=28, zorder=3, alpha=0.9)
             if CC_VM_FIT_LINEAR:
                 x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, norms)
                 if x1 is not None:
@@ -2509,19 +2507,29 @@ def save_folder_cc_norm_vs_vm_plot(all_rows, out_path, title=None):
 
     if not any_data:
         plt.close(fig)
+        print("  CC_norm vs Vm: no CC_norm + Vm_active_stim_mV points")
         return None
 
     axes[0].set_ylabel("CC_norm (CC / file mean)")
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axes, fraction=0.035, pad=0.02)
-    cbar.set_label("recording order (first → last)")
-    cbar.set_ticks([0, 1])
-    cbar.set_ticklabels([first_lbl, last_lbl])
-    cbar.ax.tick_params(labelsize=7)
+    try:
+        sm = mplcm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=list(axes), fraction=0.035, pad=0.02)
+        cbar.set_label("recording order (first → last)")
+        try:
+            cbar.set_ticks([0.0, 1.0], labels=[first_lbl, last_lbl])
+        except TypeError:
+            cbar.set_ticks([0.0, 1.0])
+            cbar.ax.set_yticklabels([first_lbl, last_lbl])
+        cbar.ax.tick_params(labelsize=7)
+    except Exception as exc:
+        print(f"  CC_norm vs Vm colorbar skipped: {exc}")
+
+    fig.tight_layout()
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     _savefig_white(fig, out_path)
     plt.close(fig)
+    print(f"  saved {out_path}")
     return out_path
 
 
