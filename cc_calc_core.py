@@ -90,6 +90,7 @@ SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sw
 SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_MIN_APS = 2  # prefer AP2+; fall back to 1-AP sweeps if none exist
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
+SPIKELET_TIME_VM_TARGET_MV = -67.0  # extra vs-time plot: sweep with baseline closest to this
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 SPIKELET_DIR_TAG = {"ch0->ch2": "12", "ch2->ch0": "21"}
@@ -3584,6 +3585,44 @@ def _primary_sweep_row(sweep_rows, fname, direction):
     return matched[0]
 
 
+def _sweep_closest_to_vm(sweep_rows, fname, direction, target_mv, ap_rows=None):
+    """Sweep whose mean spikelet baseline is closest to ``target_mv``."""
+    target = _finite_number(target_mv)
+    if target is None:
+        return None
+    candidates = []
+
+    def _add(rec):
+        vm = _sweep_row_metric(rec, "baseline_mV")
+        if vm is None:
+            return
+        sw = rec.get("sweep")
+        candidates.append((abs(float(vm) - target), sw if sw is not None else 10**9, rec))
+
+    for rec in sweep_rows or []:
+        if rec.get("direction") != direction:
+            continue
+        if not _spikelet_file_names_match(rec.get("file"), fname):
+            continue
+        _add(rec)
+    if not candidates and ap_rows:
+        rebuilt = _spikelet_means_from_ap_rows(
+            [r for r in ap_rows if r.get("direction") == direction]
+        )
+        for (fn, _dir, sw), rec in rebuilt.items():
+            if not _spikelet_file_names_match(fn, fname):
+                continue
+            packed = dict(rec)
+            packed.setdefault("file", fn)
+            packed.setdefault("direction", direction)
+            packed.setdefault("sweep", sw)
+            _add(packed)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (t[0], t[1]))
+    return candidates[0][2]
+
+
 def _sweep_row_metric(row, metric):
     if not row:
         return None
@@ -3810,12 +3849,18 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
 
 def save_folder_spikelet_over_time_plot(
     summary_rows, out_path, title=None, spikelet_rows=None, spikelet_sweep_rows=None,
+    target_vm=None,
 ):
     """
     Spikelet/spike vs recording time: one point per file.
 
-    Y = primary-sweep mean ratio and delays (AP2+, or AP1 if no multi-spike sweep).
-    Primary = first sweep with >=4 APs, else 3, else 2, else 1.
+    If ``target_vm`` is None, Y = primary-sweep mean ratio and delays
+    (AP2+, or AP1 if no multi-spike sweep). Primary = first sweep with
+    >=4 APs, else 3, else 2, else 1.
+
+    If ``target_vm`` is set, Y comes from the sweep whose mean spikelet
+    baseline (passive, 1 ms before t=0) is closest to that Vm.
+
     X = recording datetime. Amplitude vs time is not plotted.
     Always writes the PNG (empty panels if no values).
     """
@@ -3833,26 +3878,37 @@ def save_folder_spikelet_over_time_plot(
         print("  spikelet vs time: skipped (no File_summary rows)")
         return None
     dir_12, dir_21 = "ch0->ch2", "ch2->ch0"
+    near_vm = _finite_number(target_vm)
+
+    def _pick_sweep(fname, direction):
+        if near_vm is not None:
+            return _sweep_closest_to_vm(
+                spikelet_sweep_rows, fname, direction, near_vm,
+                ap_rows=spikelet_rows,
+            )
+        picked = _primary_sweep_row(spikelet_sweep_rows, fname, direction)
+        if picked is None:
+            picked = _primary_sweep_row(
+                spikelet_sweep_rows, str(fname or ""), direction
+            )
+        return picked
 
     def _val(row, tag, direction, metric):
         fname = os.path.basename(str(row.get("file") or ""))
-        # 1) primary sweep means (Spikelet_sweeps, is_primary)
-        primary = _primary_sweep_row(spikelet_sweep_rows, fname, direction)
-        if primary is None:
-            primary = _primary_sweep_row(
-                spikelet_sweep_rows, str(row.get("file") or ""), direction
-            )
-        v = _sweep_row_metric(primary, metric)
+        picked = _pick_sweep(fname, direction)
+        if picked is None and fname != str(row.get("file") or ""):
+            picked = _pick_sweep(str(row.get("file") or ""), direction)
+        v = _sweep_row_metric(picked, metric)
         if v is not None:
             return v
-        # 2) recompute from AP2+ on that same primary sweep
-        p_sw = None if primary is None else primary.get("sweep")
+        p_sw = None if picked is None else picked.get("sweep")
         v = _spikelet_file_mean_from_aps(
             spikelet_rows, fname, direction, metric, primary_sweep=p_sw,
         )
         if v is not None:
             return v
-        # 3) File_summary (primary-sweep fields)
+        if near_vm is not None:
+            return None
         return _spikelet_file_metric(row, tag, metric)
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
@@ -3863,31 +3919,44 @@ def save_folder_spikelet_over_time_plot(
     d1021 = [_val(r, "21", dir_21, "delay_10_ms") for r in rows]
     n_ratio = sum(v is not None for v in ratio12 + ratio21)
     n_del = sum(v is not None for v in dpk12 + dpk21 + d1012 + d1021)
-    n_primary = 0
+    n_picked = 0
     for r in rows:
         fname = os.path.basename(str(r.get("file") or ""))
-        if _primary_sweep_row(spikelet_sweep_rows, fname, dir_12) or _primary_sweep_row(
-            spikelet_sweep_rows, fname, dir_21
-        ):
-            n_primary += 1
-    print(
-        f"  spikelet vs time (PRIMARY sweep mean vs recording time): "
-        f"files={len(rows)}, files_with_primary_sweep={n_primary}, "
-        f"amp_ratio={n_ratio}, delays={n_del}"
-    )
+        if _pick_sweep(fname, dir_12) or _pick_sweep(fname, dir_21):
+            n_picked += 1
+    if near_vm is not None:
+        print(
+            f"  spikelet vs time (sweep nearest baseline {near_vm} mV vs recording time): "
+            f"files={len(rows)}, files_with_sweep={n_picked}, "
+            f"amp_ratio={n_ratio}, delays={n_del}"
+        )
+    else:
+        print(
+            f"  spikelet vs time (PRIMARY sweep mean vs recording time): "
+            f"files={len(rows)}, files_with_primary_sweep={n_picked}, "
+            f"amp_ratio={n_ratio}, delays={n_del}"
+        )
     if n_ratio == 0 and n_del == 0:
         print(
             "  spikelet vs time: ratio/delay empty — check console [spikelet] lines "
-            "and Excel Spikelet_sweeps (mean_amp_ratio, mean_delay_ms, is_primary)"
+            "and Excel Spikelet_sweeps (mean_amp_ratio, mean_delay_ms, "
+            "mean_baseline_passive_mV, is_primary)"
         )
 
     plt = _get_agg_plt()
     fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
     if title:
-        fig.suptitle(
-            f"{title}  —  primary-sweep ratio and delays vs recording time",
-            fontsize=12,
-        )
+        if near_vm is not None:
+            fig.suptitle(
+                f"{title}  —  ratio and delays vs recording time  "
+                f"(sweep with spikelet baseline nearest {near_vm:g} mV)",
+                fontsize=12,
+            )
+        else:
+            fig.suptitle(
+                f"{title}  —  primary-sweep ratio and delays vs recording time",
+                fontsize=12,
+            )
 
     panels = (
         (axes[0], "Amplitude ratio (spikelet / spike; ratio>1 omitted)", "ratio",
