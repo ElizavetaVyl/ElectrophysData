@@ -81,14 +81,15 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
-SPIKELET_NOISE_K = 1.5  # pass if amp_spikelet > k × local robust noise
-SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, QC comparison only
-SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), not the 125 ms prestim
+SPIKELET_NOISE_K = 1.0  # pass if amp_spikelet > 1 × pooled local noise
+SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
+SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sweep
 SPIKELET_MIN_AMP_MV = 0.15  # extra floor so tiny bumps still need 0.15 mV
 SPIKELET_MIN_APS = 2  # need AP2, so at least 2 APs on the sweep
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
+SPIKELET_DIR_TAG = {"ch0->ch2": "12", "ch2->ch0": "21"}
 
 # Tau / Cm (Tau Cm calculations.ipynb); Rin = same CC/Gj rin_for_channel
 TCM_VMIN_LIMIT = -90  # mV; skip sweep if min Vm in post epoch is below this
@@ -1297,7 +1298,10 @@ def _pooled_rms_mad(chunks):
         return None
     y = np.concatenate(parts)
     return _segment_rms_mad(y, 0, len(y))
-    """Prestim noise on passive (QC reference only; gate uses local window)."""
+
+
+def _passive_rms_prestim(abf, sweep, passive_ch, pre_start, stim_start):
+    """Prestim noise on passive (fallback if no local 10 ms windows)."""
     abf.setSweep(sweepNumber=sweep, channel=passive_ch)
     return _segment_rms_mad(abf.sweepY, pre_start, stim_start)
 
@@ -1442,27 +1446,26 @@ def _rows_with_spikelet_amp(ap_rows):
 
 def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     """
-    Sweep means: AP1 excluded; average AP2+ that pass the noise gate (k=1.5).
-
-    n_with_amp still counts every measured peak. Folder-plot means use only
-    detected (above max(k×noise, 0.15 mV)).
+    Sweep means for folder plots: AP1 excluded; average every AP2+ with a
+    measured spikelet peak. The noise gate (k=1) only sets ``detected`` for QC.
     """
     measured = _rows_with_spikelet_amp(ap_rows)
     passed = [r for r in measured if r.get("detected")]
     metrics["n_AP_used"] = len(ap_rows or [])
     metrics["n_with_amp"] = len(measured)
-    if not passed:
+    used = passed or measured
+    if not used:
         return False
-    metrics["mean_amp_active_mV"] = _mean_row_field(passed, "amp_active_mV")
-    metrics["mean_amp_spikelet_mV"] = _mean_row_field(passed, "amp_spikelet_mV")
-    metrics["mean_amp_ratio"] = _mean_row_field(passed, "amp_ratio")
-    metrics["mean_delay_ms"] = _mean_row_field(passed, "delay_ms", "delay_peak_ms")
-    metrics["mean_delay_10_ms"] = _mean_row_field(passed, "delay_10_ms")
-    metrics["mean_vm_begin_mV"] = _mean_row_field(passed, "vm_begin_active_mV")
+    metrics["mean_amp_active_mV"] = _mean_row_field(used, "amp_active_mV")
+    metrics["mean_amp_spikelet_mV"] = _mean_row_field(used, "amp_spikelet_mV")
+    metrics["mean_amp_ratio"] = _mean_row_field(used, "amp_ratio")
+    metrics["mean_delay_ms"] = _mean_row_field(used, "delay_ms", "delay_peak_ms")
+    metrics["mean_delay_10_ms"] = _mean_row_field(used, "delay_10_ms")
+    metrics["mean_vm_begin_mV"] = _mean_row_field(used, "vm_begin_active_mV")
     metrics["mean_baseline_passive_mV"] = _mean_row_field(
-        passed, "baseline_passive_mV"
+        used, "baseline_passive_mV"
     )
-    metrics["metric_source"] = "ap2_noise_gate"
+    metrics["metric_source"] = "ap2_noise_gate" if passed else "ap2_with_amp"
     metrics["skip_reason"] = None
     return True
 
@@ -1471,9 +1474,9 @@ def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
     """
     Spikelet metrics on every sweep with >=2 APs (from the first such sweep on).
 
-    Sweep means: AP1 excluded; mean over AP2+ that pass one sweep-level
-    noise gate. Noise = MAD of all local baseline windows (10 ms before
-    each spikelet t=0) pooled together; threshold = max(1.5×that, 0.15 mV).
+    Sweep means: AP1 excluded; mean over AP2+ with a measured peak
+    (gate is QC-only). Noise = MAD of all local baseline windows (10 ms
+    before each spikelet t=0) pooled together; threshold = max(1×that, 0.15 mV).
     QC PNG is the primary sweep only: ``{stem}_12_spikelets.png`` and
     ``{stem}_21_spikelets.png`` in the Spikelet_plots folder.
 
@@ -1865,11 +1868,12 @@ def _spikelet_row(row_dict):
     return {k: row_dict.get(k) for k in SPIKELET_AP_KEYS}
 
 
-def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
+def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     """Sweep overlay (active+passive, one axis) + aligned AP2+ mean (twin scales)."""
     if not plot_meta:
         return None
     import os
+    import shutil
 
     os.makedirs(plots_dir, exist_ok=True)
     plt = _get_agg_plt()
@@ -2079,11 +2083,20 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem):
         fig.tight_layout()
     except Exception:
         pass
-    tag = direction.replace(">", "")
-    path = os.path.join(plots_dir, f"{stem}_{tag}_spikelets.png")
+    tag = dir_tag or SPIKELET_DIR_TAG.get(direction) or "na"
+    fname = f"{stem}_{tag}_spikelets.png"
+    path = os.path.join(plots_dir, fname)
     _savefig_white(fig, path)
     plt.close(fig)
     print(f"  saved spikelet QC (primary sweep {sweep}): {path}")
+    parent = os.path.dirname(os.path.abspath(plots_dir))
+    extra = os.path.join(parent, fname)
+    if os.path.abspath(extra) != os.path.abspath(path) and os.path.isdir(parent):
+        try:
+            shutil.copy2(path, extra)
+            print(f"  also copied spikelet QC next to ABFs: {extra}")
+        except OSError as exc:
+            print(f"  spikelet QC copy skipped: {exc}")
     return path
 
 
@@ -2162,6 +2175,8 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
             ap_rows, metrics, meta = result[0], result[1], result[2]
             sweep_metrics = result[3] if len(result) > 3 else []
         except Exception as exc:
+            print(f"  Spikelet analysis error ({direction}): {exc}")
+            traceback.print_exc()
             metrics = _empty_spikelet_metrics(str(exc))
             ap_rows, meta, sweep_metrics = [], None, []
         for r in ap_rows:
@@ -2192,7 +2207,9 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
                 )
             else:
                 try:
-                    p = save_spikelet_qc_plot(abf, meta, plots_dir, stem)
+                    p = save_spikelet_qc_plot(
+                        abf, meta, plots_dir, stem, dir_tag=tag,
+                    )
                     if p:
                         plot_paths.append(p)
                 except Exception as exc:
@@ -3230,7 +3247,7 @@ def _sweep_row_metric(row, metric):
 
 
 def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_sweep=None):
-    """Mean of AP2+ that pass the noise gate (optionally one sweep only)."""
+    """Mean of AP2+ with a measured spikelet amp (optionally one sweep only)."""
     vals = []
     for r in ap_rows or []:
         if r.get("direction") != direction:
@@ -3238,8 +3255,6 @@ def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_swee
         if not _spikelet_file_names_match(r.get("file"), fname):
             continue
         if primary_sweep is not None and r.get("sweep") != primary_sweep:
-            continue
-        if not r.get("detected"):
             continue
         if _finite_number(r.get("amp_spikelet_mV")) is None:
             continue
@@ -3253,11 +3268,9 @@ def _spikelet_file_mean_from_aps(ap_rows, fname, direction, metric, primary_swee
 
 
 def _spikelet_means_from_ap_rows(spikelet_rows):
-    """One mean per file, direction, and sweep from AP2+ that pass the noise gate."""
+    """One mean per file, direction, and sweep from AP2+ with measured amp."""
     by = {}
     for r in spikelet_rows or []:
-        if not r.get("detected"):
-            continue
         if _finite_number(r.get("amp_spikelet_mV")) is None:
             continue
         fname = os.path.basename(str(r.get("file") or ""))
