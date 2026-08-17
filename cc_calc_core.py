@@ -1450,6 +1450,14 @@ def _ratio_gt_one(val):
     return bool(v is not None and v > 1.0)
 
 
+def _plottable_amp_ratio(val):
+    """Ratio for folder plots: drop unphysical spikelet/spike > 1."""
+    v = _finite_number(val)
+    if v is None or v > 1.0:
+        return None
+    return v
+
+
 def _mark_spikelet_quality(row):
     """Flag unphysical delay (<0) and ratio (>1). Values stay in Excel."""
     d = _finite_number(row.get("delay_ms"))
@@ -2144,6 +2152,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
 
     labeled_pass = False
     labeled_fail = False
+    labeled_ratio = False
     labeled_10a = False
     labeled_10p = False
     thr_u = plot_meta.get("noise_thr_mV")
@@ -2159,7 +2168,14 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
         if idx is not None:
             idx = min(max(int(idx), 0), len(y_p) - 1)
             amp = r.get("amp_spikelet_mV")
-            if r.get("detected"):
+            if r.get("ratio_gt_1"):
+                ax_ov.scatter(
+                    t[idx], y_p[idx], c="C3", s=70, zorder=7, marker="*",
+                    edgecolors="k", linewidths=0.4,
+                    label="ratio > 1 (omitted from folder plots)" if not labeled_ratio else None,
+                )
+                labeled_ratio = True
+            elif r.get("detected"):
                 ax_ov.scatter(
                     t[idx], y_p[idx], c="darkorange", s=48, zorder=6, marker="o",
                     edgecolors="k", linewidths=0.4,
@@ -2176,7 +2192,7 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
                 tag_txt = "local max" if r.get("detected") else "no peak"
                 extra = ""
                 if r.get("ratio_gt_1"):
-                    extra += f"  ratio {r.get('amp_ratio')} > 1"
+                    extra += f"  ratio {r.get('amp_ratio')} > 1 (error, not plotted)"
                 if r.get("delay_negative"):
                     extra += f"  delay {r.get('delay_ms')} ms < 0"
                 ax_ov.annotate(
@@ -2215,12 +2231,14 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
 
     n_meas = sum(1 for r in (plot_meta.get("ap_rows") or []) if r.get("amp_spikelet_mV") is not None)
     n_pass = sum(1 for r in (plot_meta.get("ap_rows") or []) if r.get("detected"))
+    n_bad_ratio = sum(1 for r in (plot_meta.get("ap_rows") or []) if r.get("ratio_gt_1"))
     src = (plot_meta.get("metrics") or {}).get("metric_source")
     err = plot_meta.get("error") or (plot_meta.get("metrics") or {}).get("skip_reason")
     ax_ov.set_ylabel("Vm (mV)")
+    ratio_note = f", ratio>1={n_bad_ratio} omitted from folder plots" if n_bad_ratio else ""
     ax_ov.set_title(
         f"{stem} — {direction}  sweep {sweep} ({plot_meta.get('tier')}, "
-        f"n_AP={plot_meta.get('n_ap')}, local_max={n_pass}/{n_meas}  "
+        f"n_AP={plot_meta.get('n_ap')}, local_max={n_pass}/{n_meas}{ratio_note}  "
         f"{'noise gate OFF' if not SPIKELET_USE_NOISE_GATE else f'thr={_round_or_none(thr_u, 3)} mV'}  "
         f"source={src})"
     )
@@ -2374,6 +2392,7 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
         f"    PRIMARY mean: spike={metrics.get('mean_amp_active_mV')}  "
         f"spikelet={metrics.get('mean_amp_spikelet_mV')}  "
         f"ratio={metrics.get('mean_amp_ratio')}  "
+        f"n_ratio>1={metrics.get('n_ratio_gt_1')}  "
         f"delay_pk={metrics.get('mean_delay_ms')}  "
         f"delay_10={metrics.get('mean_delay_10_ms')}  "
         f"V_base={metrics.get('mean_baseline_passive_mV')}  "
@@ -2388,6 +2407,7 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
             f"    sweep {m.get('sweep')}{flag}: n_AP={m.get('n_AP_active')}  "
             f"n_amp={m.get('n_with_amp')}  n_det={m.get('n_spikelet_detected')}  "
             f"ratio={m.get('mean_amp_ratio')}  "
+            f"n_ratio>1={m.get('n_ratio_gt_1')}  "
             f"d_pk={m.get('mean_delay_ms')}  d10={m.get('mean_delay_10_ms')}  "
             f"V_base={m.get('mean_baseline_passive_mV')}  "
             f"thr={m.get('noise_thr_mV')}"
@@ -3475,10 +3495,12 @@ def _vm_for_channel(row, ch_tag):
 
 def _spikelet_file_metric(row, tag, metric):
     """File-level spikelet value (primary-sweep means stored on File_summary)."""
-    keys = (
-        f"spikelet_mean_{metric}_{tag}",
-        f"spikelet_avg_{metric}_{tag}",
-    )
+    keys = (f"spikelet_mean_{metric}_{tag}",)
+    if metric != "amp_ratio":
+        keys = (
+            f"spikelet_mean_{metric}_{tag}",
+            f"spikelet_avg_{metric}_{tag}",
+        )
     for key in keys:
         val = row.get(key)
         if val is None:
@@ -3486,8 +3508,10 @@ def _spikelet_file_metric(row, tag, metric):
         v = _finite_number(val)
         if v is None:
             continue
-        if metric == "amp_ratio" and v > 1.0:
-            continue
+        if metric == "amp_ratio":
+            v = _plottable_amp_ratio(v)
+            if v is None:
+                continue
         return v
     return None
 
@@ -3528,7 +3552,7 @@ def _sweep_row_metric(row, metric):
     if not row:
         return None
     key_map = {
-        "amp_ratio": ("mean_amp_ratio", "avg_amp_ratio", "amp_ratio"),
+        "amp_ratio": ("mean_amp_ratio",),
         "amp_active_mV": ("mean_amp_active_mV", "avg_amp_active_mV", "amp_active_mV"),
         "amp_spikelet_mV": (
             "mean_amp_spikelet_mV", "avg_amp_spikelet_mV", "amp_spikelet_mV",
@@ -3543,8 +3567,10 @@ def _sweep_row_metric(row, metric):
         v = _finite_number(row.get(key))
         if v is None:
             continue
-        if metric == "amp_ratio" and v > 1.0:
-            continue
+        if metric == "amp_ratio":
+            v = _plottable_amp_ratio(v)
+            if v is None:
+                continue
         return v
     return None
 
@@ -3828,7 +3854,7 @@ def save_folder_spikelet_over_time_plot(
         )
 
     panels = (
-        (axes[0], "Amplitude ratio (spikelet / spike)", "ratio",
+        (axes[0], "Amplitude ratio (spikelet / spike; ratio>1 omitted)", "ratio",
          ((ratio12, "o-", "C0", "12 (ch0→ch2)"),
           (ratio21, "s-", "C1", "21 (ch2→ch0)"))),
         (axes[1], "Delay peak (ms)", "delay peak (ms)",
@@ -3875,7 +3901,7 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None):
     (file_name, recording_datetime, vm_list, y_list).
     """
     y_alts = {
-        "mean_amp_ratio": ("mean_amp_ratio", "avg_amp_ratio", "amp_ratio"),
+        "mean_amp_ratio": ("mean_amp_ratio",),
         "mean_delay_ms": ("mean_delay_ms", "avg_delay_ms", "delay_ms", "delay_peak_ms"),
         "mean_delay_10_ms": ("mean_delay_10_ms", "avg_delay_10_ms", "delay_10_ms"),
     }.get(y_key, (y_key,))
@@ -3885,8 +3911,10 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None):
             v = _finite_number(row.get(key))
             if v is None:
                 continue
-            if y_key == "mean_amp_ratio" and v > 1.0:
-                continue
+            if y_key == "mean_amp_ratio":
+                v = _plottable_amp_ratio(v)
+                if v is None:
+                    continue
             return v
         return None
 
@@ -3965,7 +3993,7 @@ def save_folder_spikelet_vs_vm_plot(
     cmap = _mpl_cmap()
 
     panels = (
-        ("mean_amp_ratio", "amp spikelet / amp spike"),
+        ("mean_amp_ratio", "amp spikelet / amp spike (ratio>1 omitted)"),
         ("mean_delay_ms", "delay peak (ms)"),
         ("mean_delay_10_ms", "delay 10% (ms)"),
     )
