@@ -150,6 +150,7 @@ SPIKELET_SWEEP_KEYS = (
     "mean_vm_begin_mV",
     "metric_source",
     "skip_reason",
+    "is_primary",
 )
 
 
@@ -1401,59 +1402,31 @@ def _analyze_spikelets_sweep(
     return ap_rows, metrics, plot_meta
 
 
-def _mean_of_sweep_field(sweep_metrics, key):
-    vals = []
-    for m in sweep_metrics:
-        v = m.get(key)
-        if v is None:
-            continue
-        try:
-            fv = float(v)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(fv):
-            vals.append(fv)
-    return _round_or_none(statistics.mean(vals), 4) if vals else None
-
-
 def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
-    """File-level spikelet fields: mean of per-sweep means; QC sweep kept in `sweep`."""
+    """File-level spikelet fields from the primary QC sweep (>=4 APs, else 3, else 2)."""
     out = _empty_spikelet_metrics(None)
-    out["n_sweeps"] = len(sweep_metrics)
+    n_all = len(sweep_metrics)
+    out["n_sweeps"] = n_all
     out["sweep"] = primary_sn
     if not sweep_metrics:
         out["skip_reason"] = f"no sweep with >={SPIKELET_MIN_APS} APs in stim window"
         return out
-    out["n_AP_used"] = int(sum(m.get("n_AP_used") or 0 for m in sweep_metrics))
-    out["n_spikelet_detected"] = int(
-        sum(m.get("n_spikelet_detected") or 0 for m in sweep_metrics)
-    )
-    det = [m for m in sweep_metrics if (m.get("n_spikelet_detected") or 0) > 0]
-    src = det or sweep_metrics
-    out["mean_amp_ratio"] = _mean_of_sweep_field(src, "mean_amp_ratio")
-    out["mean_delay_ms"] = _mean_of_sweep_field(src, "mean_delay_ms")
-    out["mean_delay_10_ms"] = _mean_of_sweep_field(src, "mean_delay_10_ms")
-    out["mean_vm_begin_mV"] = _mean_of_sweep_field(src, "mean_vm_begin_mV")
-    out["mean_amp_active_mV"] = _mean_of_sweep_field(src, "mean_amp_active_mV")
-    out["mean_amp_spikelet_mV"] = _mean_of_sweep_field(src, "mean_amp_spikelet_mV")
-    if out["mean_amp_ratio"] is not None or out["n_spikelet_detected"]:
-        out["metric_source"] = "sweep_means"
-        out["skip_reason"] = None
-    else:
-        reasons = [m.get("skip_reason") for m in sweep_metrics if m.get("skip_reason")]
-        out["skip_reason"] = reasons[0] if reasons else "no spikelet on AP2+ sweeps"
-        out["metric_source"] = None
+    primary = None
     for m in sweep_metrics:
         if m.get("sweep") == primary_sn:
-            out["n_AP_active"] = m.get("n_AP_active")
-            out["sweep_tier"] = m.get("sweep_tier")
-            out["avg_amp_active_mV"] = m.get("avg_amp_active_mV")
-            out["avg_amp_spikelet_mV"] = m.get("avg_amp_spikelet_mV")
-            out["avg_amp_ratio"] = m.get("avg_amp_ratio")
-            out["avg_delay_ms"] = m.get("avg_delay_ms")
-            out["avg_delay_10_ms"] = m.get("avg_delay_10_ms")
-            out["rms_noise_mV"] = m.get("rms_noise_mV")
+            primary = m
             break
+    if primary is None:
+        primary = sweep_metrics[0]
+        out["sweep"] = primary.get("sweep")
+    for key, val in primary.items():
+        if key != "n_sweeps":
+            out[key] = val
+    out["n_sweeps"] = n_all
+    if out.get("metric_source") is None and (
+        out.get("mean_amp_ratio") is not None or (out.get("n_spikelet_detected") or 0) > 0
+    ):
+        out["metric_source"] = "primary_sweep"
     return out
 
 
@@ -1654,6 +1627,7 @@ def spikelets_for_file(abf, name, rec_dt, plots_dir=None, stem=None):
                 "file": name,
                 "recording_datetime": rec_dt,
                 "direction": direction,
+                "is_primary": m.get("sweep") == metrics.get("sweep"),
                 **m,
             }))
         for key, val in metrics.items():
@@ -2599,11 +2573,7 @@ def _spikelet_file_metric(row, tag, metric):
 
 
 def _spikelet_means_from_ap_rows(spikelet_rows):
-    """
-    One mean per file and direction from the sweep that was analyzed.
-
-    Uses detected spikelets on that sweep (amp_ratio, delay_ms, delay_10_ms).
-    """
+    """One mean per file, direction, and sweep from detected AP2+ spikelets."""
     by = {}
     for r in spikelet_rows or []:
         if not r.get("detected"):
@@ -2612,11 +2582,12 @@ def _spikelet_means_from_ap_rows(spikelet_rows):
         direction = r.get("direction")
         if not fname or not direction:
             continue
-        by.setdefault((fname, direction), []).append(r)
+        key = (fname, direction, r.get("sweep"))
+        by.setdefault(key, []).append(r)
 
     out = {}
     for key, items in by.items():
-        rec = {}
+        rec = {"sweep": key[2]}
         for metric in ("amp_ratio", "delay_ms", "delay_10_ms"):
             vals = []
             for item in items:
@@ -2752,9 +2723,10 @@ def save_folder_spikelet_over_time_plot(
     summary_rows, out_path, title=None, spikelet_rows=None, spikelet_sweep_rows=None,
 ):
     """
-    Spikelet/spike vs recording time. One point per file = mean of per-sweep
-    means (every sweep with >=2 APs), both directions.
+    Spikelet/spike vs recording time.
 
+    Temporarily one point per file from the primary sweep only
+    (first >=4 APs, else 3, else 2) — not the all-sweep mean used for vs-Vm.
     Always writes the PNG (empty panels if no detections).
     """
     pairs = folder_summary_timed_rows(summary_rows)
@@ -2789,23 +2761,31 @@ def save_folder_spikelet_over_time_plot(
         return statistics.mean(vals) if vals else None
 
     def _val(row, tag, direction, metric):
+        v = _spikelet_file_metric(row, tag, metric)
+        if v is not None:
+            return v
         fname = os.path.basename(str(row.get("file") or ""))
+        primary_sn = row.get(f"spikelet_sweep_{tag}")
         sw = from_sw.get((fname, direction)) or from_sw.get((str(row.get("file") or ""), direction))
         if sw:
+            if primary_sn is not None:
+                sw_use = [s for s in sw if s.get("sweep") == primary_sn]
+            else:
+                sw_use = [s for s in sw if s.get("is_primary")]
             sw_key = {
                 "amp_ratio": "mean_amp_ratio",
                 "delay_ms": "mean_delay_ms",
                 "delay_10_ms": "mean_delay_10_ms",
             }.get(metric, metric)
-            v = _mean_key(sw, sw_key)
+            v = _mean_key(sw_use, sw_key)
             if v is not None:
                 return v
-        ap = from_ap.get((fname, direction))
+        ap = from_ap.get((fname, direction, primary_sn))
         if ap is None:
-            ap = from_ap.get((str(row.get("file") or ""), direction))
+            ap = from_ap.get((str(row.get("file") or ""), direction, primary_sn))
         if ap and ap.get(metric) is not None:
             return ap[metric]
-        return _spikelet_file_metric(row, tag, metric)
+        return None
 
     ratio12 = [_val(r, "12", dir_12, "amp_ratio") for r in rows]
     ratio21 = [_val(r, "21", dir_21, "amp_ratio") for r in rows]
