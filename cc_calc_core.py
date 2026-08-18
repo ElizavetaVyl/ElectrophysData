@@ -81,7 +81,8 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2; else AP1 if only 1-spike sweeps)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
-SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
+SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for per-AP local-max search only
+SPIKELET_MEANTRACE_SMOOTH_MS = 1.5  # stronger σ on aligned mean passive trace
 SPIKELET_MIN_PROMINENCE_MV = 0.15  # original per-AP scheme: drop after the top
 SPIKELET_MEANTRACE_MIN_PROMINENCE_MV = 0.05  # meantrace: looser drop than 0.15 mV
 SPIKELET_USE_NOISE_GATE = False  # amplitude vs noise; peak shape is separate (prominence)
@@ -1285,22 +1286,25 @@ def _frac_rise_time_ms(y, i0, i_peak, v_base, amp, sr, frac=None):
     return _frac_crossing_time_ms(y, i0, i_peak, level, sr)
 
 
-def _spikelet_smooth_for_peak(y, sr):
+def _spikelet_smooth_for_peak(y, sr, smooth_ms=None):
     """Light Gaussian on a short window; used only to find the peak index."""
     y = np.asarray(y, dtype=float).ravel()
-    if y.size < 5 or sr is None or SPIKELET_PEAK_SMOOTH_MS <= 0:
+    if smooth_ms is None:
+        smooth_ms = SPIKELET_PEAK_SMOOTH_MS
+    if y.size < 5 or sr is None or smooth_ms <= 0:
         return y
-    sigma = float(SPIKELET_PEAK_SMOOTH_MS) * float(sr) / 1000.0
+    sigma = float(smooth_ms) * float(sr) / 1000.0
     if sigma < 0.5:
         return y
     return gaussian_filter1d(y, sigma=sigma, mode="nearest")
 
 
-def _spikelet_local_peak_index(seg, sr=None, prominence=None):
+def _spikelet_local_peak_index(seg, sr=None, prominence=None, smooth_ms=None):
     """Index of a peaked spikelet in the search window, or None.
 
     The full search window is scanned. Not ``argmax``.
-    Digitizer jitter is first smoothed (σ = SPIKELET_PEAK_SMOOTH_MS).
+    Digitizer jitter is first smoothed (default σ = SPIKELET_PEAK_SMOOTH_MS,
+    or ``smooth_ms`` when given).
     A candidate must then be a real peak: the smoothed trace falls after
     the top by at least ``prominence`` (scipy; default
     ``SPIKELET_MIN_PROMINENCE_MV``). A monotonic rise, a slow coupling
@@ -1315,7 +1319,7 @@ def _spikelet_local_peak_index(seg, sr=None, prominence=None):
         return None
     if prominence is None:
         prominence = SPIKELET_MIN_PROMINENCE_MV
-    y = _spikelet_smooth_for_peak(y_raw, sr)
+    y = _spikelet_smooth_for_peak(y_raw, sr, smooth_ms=smooth_ms)
     peaks, _props = find_peaks(y, prominence=float(prominence))
     if peaks.size == 0:
         return None
@@ -1696,7 +1700,9 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     base_p = float(np.mean(mean_p[:n_pre])) if n_pre > 0 else float(mean_p[0])
     base_a = float(mean_a[n_pre])
     i_rel_p = _spikelet_local_peak_index(
-        seg_p, sr, prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+        seg_p, sr,
+        prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+        smooth_ms=SPIKELET_MEANTRACE_SMOOTH_MS,
     )
     i_rel_a = _spikelet_local_peak_index(seg_a, sr)
     if i_rel_a is None:
@@ -2204,7 +2210,8 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     mt = metrics or {}
     title_base = (
         f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms, "
-        f"local peak, drop>={SPIKELET_MEANTRACE_MIN_PROMINENCE_MV:g} mV)"
+        f"smooth σ={SPIKELET_MEANTRACE_SMOOTH_MS:g} ms, "
+        f"drop>={SPIKELET_MEANTRACE_MIN_PROMINENCE_MV:g} mV)"
     )
     ax.set_xlabel("Time from active AP start (ms)")
     ax.set_ylabel("Passive Vm (mV)", color="C1")
@@ -2237,18 +2244,25 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     ma = np.asarray(mean_a[:i1], dtype=float)
     seg_p = mp[n_pre:i1]
     seg_a = ma[n_pre:i1]
-    seg_smooth = _spikelet_smooth_for_peak(seg_p, sr)
+    mp_smooth = _spikelet_smooth_for_peak(
+        mp, sr, smooth_ms=SPIKELET_MEANTRACE_SMOOTH_MS,
+    )
 
-    ax.plot(t_rel, mp, color="C1", lw=2.2, label="mean passive")
     ax.plot(
-        t_rel[n_pre:i1], seg_smooth, color="darkorange", lw=1.2, ls="--", alpha=0.85,
-        label="smoothed (peak search)",
+        t_rel, mp, color="C1", lw=0.9, alpha=0.35,
+        label="mean passive (raw)",
+    )
+    ax.plot(
+        t_rel, mp_smooth, color="C1", lw=2.2,
+        label=f"mean passive (σ={SPIKELET_MEANTRACE_SMOOTH_MS:g} ms)",
     )
     base_p = float(np.mean(mp[:n_pre])) if n_pre > 0 else float(mp[0])
     ax.axhline(base_p, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline")
 
     i_rel_p = _spikelet_local_peak_index(
-        seg_p, sr, prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+        seg_p, sr,
+        prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+        smooth_ms=SPIKELET_MEANTRACE_SMOOTH_MS,
     )
     i_rel_a = _spikelet_local_peak_index(seg_a, sr)
     if i_rel_a is None and len(seg_a):
@@ -2290,7 +2304,7 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     ax2.tick_params(axis="y", labelcolor="C0")
 
     # Zoom Y axes so small passive spikelets are visible (independent scales).
-    win_p = np.concatenate([mp[n_pre:i1], seg_smooth, [base_p]])
+    win_p = np.concatenate([mp[n_pre:i1], mp_smooth[n_pre:i1], [base_p]])
     y_lo = float(np.min(win_p))
     y_hi = float(np.max(win_p))
     span_p = max(y_hi - y_lo, 0.05)
