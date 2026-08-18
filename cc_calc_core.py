@@ -1663,8 +1663,12 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     return True
 
 
-def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified):
-    """Parallel scheme on mean traces: 10 ms passive window after t=0."""
+def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
+    """Parallel scheme on mean traces: 10 ms passive window after t=0.
+
+    Detection = local maximum with post-peak decline (prominence on smoothed
+    trace). No noise-amplitude gate.
+    """
     out = {
         "meantrace10_amp_active_mV": None,
         "meantrace10_amp_spikelet_mV": None,
@@ -1700,10 +1704,6 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified):
     amp_a = float(seg_a[int(i_rel_a)]) - base_a
     out["meantrace10_amp_active_mV"] = _round_or_none(amp_a, 4)
     out["meantrace10_amp_spikelet_mV"] = _round_or_none(amp_p, 4)
-    ok, why = spikelet_amp_passes(amp_p, rms_unified)
-    if not ok:
-        out["meantrace10_skip_reason"] = why
-        return out
     out["meantrace10_detected"] = True
     out["meantrace10_skip_reason"] = None
     if amp_a not in (None, 0):
@@ -2192,11 +2192,11 @@ def _spikelet_row(row_dict):
     return {k: row_dict.get(k) for k in SPIKELET_AP_KEYS}
 
 
-def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms):
+def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     """QC subplot for parallel meantrace10 scheme (10 ms passive window after t=0)."""
     mt = metrics or {}
     title_base = (
-        f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms window, noise gate ON)"
+        f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms, local peak + prominence)"
     )
     ax.set_xlabel("Time from active AP start (ms)")
     ax.set_ylabel("Passive Vm (mV)", color="C1")
@@ -2238,11 +2238,6 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms):
     )
     base_p = float(np.mean(mp[:n_pre])) if n_pre > 0 else float(mp[0])
     ax.axhline(base_p, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline")
-    thr = spikelet_amp_threshold(rms)
-    ax.axhline(
-        base_p + thr, color="C3", ls=":", lw=1.0,
-        label=f"noise thr (+{thr:.3f} mV)",
-    )
 
     i_rel_p = _spikelet_local_peak_index(seg_p, sr)
     i_rel_a = _spikelet_local_peak_index(seg_a, sr)
@@ -2258,7 +2253,7 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms):
             s=55, zorder=6,
             marker="o" if detected else "x",
             edgecolors="k", linewidths=0.4,
-            label="spikelet peak (pass)" if detected else "spikelet peak (fail)",
+            label="spikelet local peak" if detected else "peak search (no detection)",
         )
         amp_p = mt.get("meantrace10_amp_spikelet_mV")
         if amp_p is not None:
@@ -2283,6 +2278,19 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms):
     ax2.plot(t_rel, ma, color="C0", lw=1.4, alpha=0.85, label="mean active")
     ax2.set_ylabel("Active Vm (mV)", color="C0")
     ax2.tick_params(axis="y", labelcolor="C0")
+
+    # Zoom Y axes so small passive spikelets are visible (independent scales).
+    win_p = np.concatenate([mp[n_pre:i1], seg_smooth, [base_p]])
+    y_lo = float(np.min(win_p))
+    y_hi = float(np.max(win_p))
+    span_p = max(y_hi - y_lo, 0.05)
+    pad_p = max(0.03, 0.25 * span_p)
+    ax.set_ylim(y_lo - pad_p, y_hi + pad_p)
+    win_a = ma[n_pre:i1]
+    if len(win_a):
+        span_a = max(float(np.max(win_a) - np.min(win_a)), 1.0)
+        pad_a = max(0.5, 0.15 * span_a)
+        ax2.set_ylim(float(np.min(win_a)) - pad_a, float(np.max(win_a)) + pad_a)
 
     skip = mt.get("meantrace10_skip_reason")
     if detected:
