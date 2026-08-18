@@ -2192,8 +2192,131 @@ def _spikelet_row(row_dict):
     return {k: row_dict.get(k) for k in SPIKELET_AP_KEYS}
 
 
+def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms):
+    """QC subplot for parallel meantrace10 scheme (10 ms passive window after t=0)."""
+    mt = metrics or {}
+    title_base = (
+        f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms window, noise gate ON)"
+    )
+    ax.set_xlabel("Time from active AP start (ms)")
+    ax.set_ylabel("Passive Vm (mV)", color="C1")
+    ax.tick_params(axis="y", labelcolor="C1")
+
+    if mean_a is None or mean_p is None or sr in (None, 0):
+        reason = mt.get("meantrace10_skip_reason") or "no mean traces"
+        ax.text(
+            0.5, 0.5, reason,
+            transform=ax.transAxes, ha="center", va="center",
+            color="C3", fontsize=10,
+        )
+        ax.set_title(f"{title_base}: no aligned mean")
+        return
+
+    n_peak = _ms_to_samples(SPIKELET_MEANTRACE_PEAK_MS, sr)
+    i1 = min(len(mean_p), n_pre + n_peak + 1)
+    if i1 <= n_pre + 2 or len(mean_a) < i1:
+        reason = mt.get("meantrace10_skip_reason") or "meantrace10 window too short"
+        ax.text(
+            0.5, 0.5, reason,
+            transform=ax.transAxes, ha="center", va="center",
+            color="C3", fontsize=10,
+        )
+        ax.set_title(title_base)
+        return
+
+    t_rel = (np.arange(i1) - n_pre) / float(sr) * 1000.0
+    mp = np.asarray(mean_p[:i1], dtype=float)
+    ma = np.asarray(mean_a[:i1], dtype=float)
+    seg_p = mp[n_pre:i1]
+    seg_a = ma[n_pre:i1]
+    seg_smooth = _spikelet_smooth_for_peak(seg_p, sr)
+
+    ax.plot(t_rel, mp, color="C1", lw=2.2, label="mean passive")
+    ax.plot(
+        t_rel[n_pre:i1], seg_smooth, color="darkorange", lw=1.2, ls="--", alpha=0.85,
+        label="smoothed (peak search)",
+    )
+    base_p = float(np.mean(mp[:n_pre])) if n_pre > 0 else float(mp[0])
+    ax.axhline(base_p, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline")
+    thr = spikelet_amp_threshold(rms)
+    ax.axhline(
+        base_p + thr, color="C3", ls=":", lw=1.0,
+        label=f"noise thr (+{thr:.3f} mV)",
+    )
+
+    i_rel_p = _spikelet_local_peak_index(seg_p, sr)
+    i_rel_a = _spikelet_local_peak_index(seg_a, sr)
+    if i_rel_a is None and len(seg_a):
+        i_rel_a = int(np.argmax(seg_a))
+
+    detected = bool(mt.get("meantrace10_detected"))
+    if i_rel_p is not None:
+        ip = n_pre + int(i_rel_p)
+        ax.scatter(
+            t_rel[ip], mp[ip],
+            c="darkorange" if detected else "0.45",
+            s=55, zorder=6,
+            marker="o" if detected else "x",
+            edgecolors="k", linewidths=0.4,
+            label="spikelet peak (pass)" if detected else "spikelet peak (fail)",
+        )
+        amp_p = mt.get("meantrace10_amp_spikelet_mV")
+        if amp_p is not None:
+            ax.annotate(
+                f"{amp_p:.2f} mV",
+                (t_rel[ip], mp[ip]),
+                textcoords="offset points", xytext=(4, 6),
+                fontsize=8, color="0.15",
+            )
+    if i_rel_a is not None:
+        ia = n_pre + int(i_rel_a)
+        ax.scatter(
+            t_rel[ia], ma[ia], c="C0", s=40, zorder=5, marker="v",
+            label="AP peak on mean",
+        )
+
+    ax.axvline(0, color="limegreen", ls="--", lw=1.2)
+    ax.axvspan(-SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25)
+    ax.axvspan(0, SPIKELET_MEANTRACE_PEAK_MS, color="C4", alpha=0.12)
+
+    ax2 = ax.twinx()
+    ax2.plot(t_rel, ma, color="C0", lw=1.4, alpha=0.85, label="mean active")
+    ax2.set_ylabel("Active Vm (mV)", color="C0")
+    ax2.tick_params(axis="y", labelcolor="C0")
+
+    skip = mt.get("meantrace10_skip_reason")
+    if detected:
+        status = "DETECTED"
+        detail = (
+            f"  amp={mt.get('meantrace10_amp_spikelet_mV')} mV, "
+            f"delay={mt.get('meantrace10_delay_ms')} ms, "
+            f"ratio={mt.get('meantrace10_amp_ratio')}"
+        )
+        status_color = "0.15"
+    else:
+        status = "NOT detected"
+        detail = f" ({skip})" if skip else ""
+        status_color = "C3"
+    ax.set_title(f"{title_base}: {status}{detail}", color=status_color)
+
+    if not detected and skip:
+        ax.text(
+            0.01, 0.99, skip,
+            transform=ax.transAxes, va="top", ha="left",
+            fontsize=8, color="C3", wrap=True,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="C3", alpha=0.9),
+            zorder=10,
+        )
+
+    handles, labels = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(handles + h2, labels + l2, loc="upper left", fontsize=7)
+    ax.set_xlim(t_rel[0], t_rel[-1])
+    ax.grid(True, alpha=0.3)
+
+
 def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
-    """Sweep overlay (active+passive, one axis) + aligned AP2+ mean (twin scales)."""
+    """Sweep overlay + aligned AP mean + meantrace10 QC (three subplots)."""
     if not plot_meta:
         return None
     import os
@@ -2215,10 +2338,10 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
     y_p = np.asarray(abf.sweepY, dtype=float)
 
     fig, axes = plt.subplots(
-        2, 1, figsize=(12, 8), sharex=False,
-        gridspec_kw={"height_ratios": [1.35, 1.0]},
+        3, 1, figsize=(12, 10.5), sharex=False,
+        gridspec_kw={"height_ratios": [1.35, 1.0, 0.85]},
     )
-    ax_ov, ax_avg = axes
+    ax_ov, ax_avg, ax_mt10 = axes
 
     ss = int(plot_meta["stim_start"])
     se = int(plot_meta["stim_stop"])
@@ -2231,6 +2354,15 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
         ax_ov.text(0.5, 0.5, "empty sweep", transform=ax_ov.transAxes, ha="center")
         err = plot_meta.get("error") or "empty sweep"
         ax_ov.set_title(f"{stem} — {direction}  {err}")
+        ax_avg.axis("off")
+        _meantrace10_qc_panel(
+            ax_mt10,
+            plot_meta.get("mean_a"),
+            plot_meta.get("mean_p"),
+            n_pre, sr,
+            plot_meta.get("metrics"),
+            plot_meta.get("rms"),
+        )
         tag = dir_tag or SPIKELET_DIR_TAG.get(direction) or "na"
         fname = f"{stem}_{tag}_spikelets.png"
         path = os.path.join(plots_dir, fname)
@@ -2461,6 +2593,15 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
         f"{'OFF' if not SPIKELET_USE_NOISE_GATE else 'ON'}"
     )
     ax_avg.grid(True, alpha=0.3)
+
+    _meantrace10_qc_panel(
+        ax_mt10,
+        plot_meta.get("mean_a"),
+        plot_meta.get("mean_p"),
+        n_pre, sr,
+        plot_meta.get("metrics"),
+        plot_meta.get("rms"),
+    )
 
     try:
         fig.tight_layout()
