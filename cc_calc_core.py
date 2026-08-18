@@ -1694,10 +1694,13 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     if i1 <= n_pre + 2 or len(mean_a) < i1:
         out["meantrace10_skip_reason"] = "meantrace10 window too short"
         return out
-    seg_p = np.asarray(mean_p[n_pre:i1], dtype=float)
-    seg_a = np.asarray(mean_a[n_pre:i1], dtype=float)
-    base_p = float(np.mean(mean_p[:n_pre])) if n_pre > 0 else float(mean_p[0])
-    base_a = float(mean_a[n_pre])
+    mp = np.asarray(mean_p[:i1], dtype=float)
+    ma = np.asarray(mean_a[:i1], dtype=float)
+    mp_smooth = _spikelet_smooth_for_peak(mp, sr)
+    seg_p = mp[n_pre:i1]
+    seg_a = ma[n_pre:i1]
+    base_p = float(np.mean(mp_smooth[:n_pre])) if n_pre > 0 else float(mp_smooth[0])
+    base_a = float(ma[n_pre])
     i_rel_p = _spikelet_local_peak_index(
         seg_p, sr, prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
     )
@@ -1710,7 +1713,7 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     if i_rel_a is None:
         out["meantrace10_skip_reason"] = "no AP peak on meantrace10"
         return out
-    amp_p = float(seg_p[int(i_rel_p)]) - base_p
+    amp_p = float(mp_smooth[n_pre + int(i_rel_p)]) - base_p
     amp_a = float(seg_a[int(i_rel_a)]) - base_a
     out["meantrace10_amp_active_mV"] = _round_or_none(amp_a, 4)
     out["meantrace10_amp_spikelet_mV"] = _round_or_none(amp_p, 4)
@@ -1723,8 +1726,8 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     )
     i_peak_a = n_pre + int(i_rel_a)
     i_peak_p = n_pre + int(i_rel_p)
-    t10_a = _frac_rise_time_ms(mean_a, n_pre, i_peak_a, base_a, amp_a, sr)
-    t10_p = _frac_rise_time_ms(mean_p, n_pre, i_peak_p, base_p, amp_p, sr)
+    t10_a = _frac_rise_time_ms(ma, n_pre, i_peak_a, base_a, amp_a, sr)
+    t10_p = _frac_rise_time_ms(mp_smooth, n_pre, i_peak_p, base_p, amp_p, sr)
     if t10_a is not None and t10_p is not None:
         out["meantrace10_delay_10_ms"] = _round_or_none(t10_p - t10_a, 4)
     return out
@@ -2202,7 +2205,9 @@ def _spikelet_row(row_dict):
     return {k: row_dict.get(k) for k in SPIKELET_AP_KEYS}
 
 
-def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
+def _meantrace10_qc_panel(
+    ax, mean_a, mean_p, n_pre, sr, metrics, rms=None, snips_p=None, snips_a=None,
+):
     """QC subplot for parallel meantrace10 scheme (15 ms passive window after t=0)."""
     mt = metrics or {}
     title_base = (
@@ -2242,15 +2247,25 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     seg_a = ma[n_pre:i1]
     mp_smooth = _spikelet_smooth_for_peak(mp, sr)
 
+    n_snips = 0
+    labeled_snip = False
+    for sn in snips_p or []:
+        if sn is None or len(sn) < i1:
+            continue
+        ax.plot(
+            t_rel, np.asarray(sn[:i1], dtype=float),
+            color="0.55", lw=0.6, alpha=0.45,
+            label="aligned APs" if not labeled_snip else None,
+        )
+        labeled_snip = True
+        n_snips += 1
+
+    ax.plot(t_rel, mp, color="C1", lw=2.4, zorder=3, label="mean passive")
     ax.plot(
-        t_rel, mp, color="C1", lw=0.9, alpha=0.35,
-        label="mean passive (raw)",
+        t_rel, mp_smooth, color="darkorange", lw=1.3, zorder=4,
+        label=f"smoothed (σ={SPIKELET_PEAK_SMOOTH_MS:g} ms)",
     )
-    ax.plot(
-        t_rel, mp_smooth, color="C1", lw=2.2,
-        label=f"mean passive smoothed (σ={SPIKELET_PEAK_SMOOTH_MS:g} ms)",
-    )
-    base_p = float(np.mean(mp[:n_pre])) if n_pre > 0 else float(mp[0])
+    base_p = float(np.mean(mp_smooth[:n_pre])) if n_pre > 0 else float(mp_smooth[0])
     ax.axhline(base_p, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline")
 
     i_rel_p = _spikelet_local_peak_index(
@@ -2264,55 +2279,74 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     if i_rel_p is not None:
         ip = n_pre + int(i_rel_p)
         ax.scatter(
-            t_rel[ip], mp[ip],
+            t_rel[ip], mp_smooth[ip],
             c="darkorange" if detected else "0.45",
-            s=55, zorder=6,
+            s=55, zorder=7,
             marker="o" if detected else "x",
             edgecolors="k", linewidths=0.4,
-            label="spikelet local peak" if detected else "peak search (no detection)",
+            label="spikelet peak (smoothed)" if detected else "peak search (no detection)",
         )
         amp_p = mt.get("meantrace10_amp_spikelet_mV")
         if amp_p is not None:
             ax.annotate(
                 f"{amp_p:.2f} mV",
-                (t_rel[ip], mp[ip]),
+                (t_rel[ip], mp_smooth[ip]),
                 textcoords="offset points", xytext=(4, 6),
                 fontsize=8, color="0.15",
             )
-    if i_rel_a is not None:
-        ia = n_pre + int(i_rel_a)
-        ax.scatter(
-            t_rel[ia], ma[ia], c="C0", s=40, zorder=5, marker="v",
-            label="AP peak on mean",
-        )
 
     ax.axvline(0, color="limegreen", ls="--", lw=1.2)
     ax.axvspan(-SPIKELET_BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax.axvspan(0, SPIKELET_MEANTRACE_PEAK_MS, color="C4", alpha=0.12)
 
     ax2 = ax.twinx()
-    ax2.plot(t_rel, ma, color="C0", lw=1.4, alpha=0.85, label="mean active")
+    labeled_snip_a = False
+    for sna in snips_a or []:
+        if sna is None or len(sna) < i1:
+            continue
+        ax2.plot(
+            t_rel, np.asarray(sna[:i1], dtype=float),
+            color="C0", lw=0.5, alpha=0.25,
+            label="aligned APs (active)" if not labeled_snip_a else None,
+        )
+        labeled_snip_a = True
+    ax2.plot(t_rel, ma, color="C0", lw=1.8, alpha=0.9, zorder=3, label="mean active")
+    if i_rel_a is not None:
+        ia = n_pre + int(i_rel_a)
+        ax2.scatter(
+            t_rel[ia], ma[ia], c="C0", s=55, zorder=8, marker="v",
+            edgecolors="k", linewidths=0.4,
+            label="AP peak on mean",
+        )
+        ax.axvline(t_rel[ia], color="C0", ls=":", lw=1.0, alpha=0.7)
     ax2.set_ylabel("Active Vm (mV)", color="C0")
     ax2.tick_params(axis="y", labelcolor="C0")
 
-    # Zoom Y axes so small passive spikelets are visible (independent scales).
-    win_p = np.concatenate([mp[n_pre:i1], mp_smooth[n_pre:i1], [base_p]])
+    win_parts = [mp[n_pre:i1], mp_smooth[n_pre:i1], np.array([base_p])]
+    for sn in snips_p or []:
+        if sn is not None and len(sn) >= i1:
+            win_parts.append(np.asarray(sn[n_pre:i1], dtype=float))
+    win_p = np.concatenate(win_parts)
     y_lo = float(np.min(win_p))
     y_hi = float(np.max(win_p))
     span_p = max(y_hi - y_lo, 0.05)
-    pad_p = max(0.03, 0.25 * span_p)
+    pad_p = max(0.03, 0.12 * span_p)
     ax.set_ylim(y_lo - pad_p, y_hi + pad_p)
-    win_a = ma[n_pre:i1]
+    win_a = [ma[n_pre:i1]]
+    for sna in snips_a or []:
+        if sna is not None and len(sna) >= i1:
+            win_a.append(np.asarray(sna[n_pre:i1], dtype=float))
+    win_a = np.concatenate(win_a) if win_a else ma[n_pre:i1]
     if len(win_a):
         span_a = max(float(np.max(win_a) - np.min(win_a)), 1.0)
-        pad_a = max(0.5, 0.15 * span_a)
+        pad_a = max(0.5, 0.12 * span_a)
         ax2.set_ylim(float(np.min(win_a)) - pad_a, float(np.max(win_a)) + pad_a)
 
     skip = mt.get("meantrace10_skip_reason")
     if detected:
         status = "DETECTED"
         detail = (
-            f"  amp={mt.get('meantrace10_amp_spikelet_mV')} mV, "
+            f"  amp={mt.get('meantrace10_amp_spikelet_mV')} mV (smoothed), "
             f"delay={mt.get('meantrace10_delay_ms')} ms, "
             f"ratio={mt.get('meantrace10_amp_ratio')}"
         )
@@ -2321,7 +2355,8 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
         status = "NOT detected"
         detail = f" ({skip})" if skip else ""
         status_color = "C3"
-    ax.set_title(f"{title_base}: {status}{detail}", color=status_color)
+    extra = f", n={n_snips}" if n_snips else ""
+    ax.set_title(f"{title_base}: {status}{detail}{extra}", color=status_color)
 
     if not detected and skip:
         ax.text(
@@ -5093,6 +5128,52 @@ def _excel_dataframe(rows):
     return pd.DataFrame(clean)
 
 
+def _compact_excel_summary_rows(summary_rows):
+    """Short user-facing cut from File_summary while keeping the full sheets."""
+    rows = []
+    preferred = (
+        "file",
+        "recording_datetime",
+        "file_skip_reason",
+        "analysis_blocks",
+        "CC12",
+        "CC21",
+        "Gj12_nS",
+        "Gj21_nS",
+        "Rin_ch0_MOhm",
+        "Rin_ch2_MOhm",
+        "V_rest_mV_ch0",
+        "V_rest_mV_ch2",
+        "AP21_ratio_ch0",
+        "AP21_ratio_ch2",
+        "FWHM_ms_ch0",
+        "FWHM_ms_ch2",
+        "tau_ms_ch0",
+        "tau_ms_ch2",
+        "Cm_pF_ch0",
+        "Cm_pF_ch2",
+        "spikelet_mean_amp_ratio_12",
+        "spikelet_mean_amp_ratio_21",
+        "spikelet_mean_delay_ms_12",
+        "spikelet_mean_delay_ms_21",
+        "spikelet_meantrace10_amp_ratio_12",
+        "spikelet_meantrace10_amp_ratio_21",
+        "spikelet_meantrace10_delay_ms_12",
+        "spikelet_meantrace10_delay_ms_21",
+        "spikelet_meantrace10_detected_12",
+        "spikelet_meantrace10_detected_21",
+        "spikelet_skip_reason_12",
+        "spikelet_skip_reason_21",
+    )
+    for src in summary_rows or []:
+        row = {}
+        for key in preferred:
+            if key in src:
+                row[key] = src.get(key)
+        rows.append(row)
+    return rows
+
+
 def save_batch_excel(
     path,
     all_rows,
@@ -5100,12 +5181,14 @@ def save_batch_excel(
     spikelet_rows=None,
     spikelet_sweep_rows=None,
 ):
-    """Write All_data / File_summary / Spikelets / Spikelet_sweeps. Always all four sheets."""
+    """Write full sheets plus a compact summary cut for quick reading."""
     import pandas as pd
 
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    compact_rows = _compact_excel_summary_rows(summary_rows or [])
     sheets = (
+        ("Summary_short", compact_rows),
         ("File_summary", summary_rows or []),
         ("All_data", all_rows or []),
         ("Spikelets", spikelet_rows or []),
