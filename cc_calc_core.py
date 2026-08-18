@@ -5084,10 +5084,12 @@ def save_folder_cc_vm_slope_over_time_plot(
 
 def format_excel_header_wrap(workbook, header_row=1, min_width=12, max_width=18):
     """Wrap header text to the column width and raise row 1 so names are fully visible."""
-    from openpyxl.styles import Alignment
+    from openpyxl.styles import Alignment, PatternFill
     from openpyxl.utils import get_column_letter
 
     wrap = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    fill_primary = PatternFill(fill_type="solid", fgColor="DDEBF7")
+    fill_mode = PatternFill(fill_type="solid", fgColor="FCE4D6")
     for ws in workbook.worksheets:
         max_lines = 1
         for col in range(1, ws.max_column + 1):
@@ -5097,6 +5099,13 @@ def format_excel_header_wrap(workbook, header_row=1, min_width=12, max_width=18)
             letter = get_column_letter(col)
             width = min(max_width, max(min_width, len(text) + 1))
             ws.column_dimensions[letter].width = width
+            if ws.title == "Summary_short":
+                if text.startswith("primary_"):
+                    for row_i in range(1, ws.max_row + 1):
+                        ws.cell(row_i, col).fill = fill_primary
+                elif text.startswith("near_mode_vm_"):
+                    for row_i in range(1, ws.max_row + 1):
+                        ws.cell(row_i, col).fill = fill_mode
             chars_per_line = max(8, int(width))
             n_lines = text.count("\n") + 1
             if "\n" not in text:
@@ -5128,48 +5137,68 @@ def _excel_dataframe(rows):
     return pd.DataFrame(clean)
 
 
-def _compact_excel_summary_rows(summary_rows):
+def _compact_excel_summary_rows(summary_rows, spikelet_sweep_rows=None, spikelet_rows=None):
     """Short user-facing cut from File_summary while keeping the full sheets."""
+
+    def _add_spikelet_block(dst, prefix, picked, tag):
+        dst[f"{prefix}_{tag}_sweep"] = picked.get("sweep") if picked else None
+        dst[f"{prefix}_{tag}_baseline_mV"] = _sweep_row_metric(picked, "baseline_mV")
+        dst[f"{prefix}_{tag}_amp_spikelet_mV"] = (
+            _finite_number(picked.get("meantrace10_amp_spikelet_mV")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_delay_peak_ms"] = (
+            _finite_number(picked.get("meantrace10_delay_ms")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_amp_ratio"] = (
+            _finite_number(picked.get("meantrace10_amp_ratio")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_detected"] = picked.get("meantrace10_detected") if picked else None
+        dst[f"{prefix}_{tag}_skip_reason"] = picked.get("meantrace10_skip_reason") if picked else None
+
     rows = []
-    preferred = (
-        "file",
-        "recording_datetime",
-        "file_skip_reason",
-        "analysis_blocks",
-        "CC12",
-        "CC21",
-        "Gj12_nS",
-        "Gj21_nS",
-        "Rin_ch0_MOhm",
-        "Rin_ch2_MOhm",
-        "V_rest_mV_ch0",
-        "V_rest_mV_ch2",
-        "AP21_ratio_ch0",
-        "AP21_ratio_ch2",
-        "FWHM_ms_ch0",
-        "FWHM_ms_ch2",
-        "tau_ms_ch0",
-        "tau_ms_ch2",
-        "Cm_pF_ch0",
-        "Cm_pF_ch2",
-        "spikelet_mean_amp_ratio_12",
-        "spikelet_mean_amp_ratio_21",
-        "spikelet_mean_delay_ms_12",
-        "spikelet_mean_delay_ms_21",
-        "spikelet_meantrace10_amp_ratio_12",
-        "spikelet_meantrace10_amp_ratio_21",
-        "spikelet_meantrace10_delay_ms_12",
-        "spikelet_meantrace10_delay_ms_21",
-        "spikelet_meantrace10_detected_12",
-        "spikelet_meantrace10_detected_21",
-        "spikelet_skip_reason_12",
-        "spikelet_skip_reason_21",
-    )
+    mode_vm = spikelet_baseline_mode_vm(spikelet_sweep_rows, ap_rows=spikelet_rows)
     for src in summary_rows or []:
-        row = {}
-        for key in preferred:
-            if key in src:
-                row[key] = src.get(key)
+        row = {
+            "file": src.get("file"),
+            "recording_datetime": src.get("recording_datetime"),
+            "file_skip_reason": src.get("file_skip_reason"),
+            "analysis_blocks": src.get("analysis_blocks"),
+            "CC12": src.get("CC12"),
+            "CC21": src.get("CC21"),
+            "Gj12_nS": src.get("Gj12_nS"),
+            "Gj21_nS": src.get("Gj21_nS"),
+            "Rin_ch0_MOhm": src.get("Rin_ch0_MOhm"),
+            "Rin_ch2_MOhm": src.get("Rin_ch2_MOhm"),
+            "V_rest_mV_ch0": src.get("V_rest_mV_ch0"),
+            "V_rest_mV_ch2": src.get("V_rest_mV_ch2"),
+            "AP21_ratio_ch0": src.get("AP21_ratio_ch0"),
+            "AP21_ratio_ch2": src.get("AP21_ratio_ch2"),
+            "FWHM_ms_ch0": src.get("FWHM_ms_ch0"),
+            "FWHM_ms_ch2": src.get("FWHM_ms_ch2"),
+            "props_sweep_ch0": src.get("props_sweep_ch0"),
+            "props_sweep_ch2": src.get("props_sweep_ch2"),
+            "inj_current_pA_ch0": src.get("inj_current_pA_ch0"),
+            "inj_current_pA_ch2": src.get("inj_current_pA_ch2"),
+            "tau_ms_ch0": src.get("tau_ms_ch0"),
+            "tau_ms_ch2": src.get("tau_ms_ch2"),
+            "Cm_pF_ch0": src.get("Cm_pF_ch0"),
+            "Cm_pF_ch2": src.get("Cm_pF_ch2"),
+            "tau_sweep_ch0": src.get("tau_sweep_ch0"),
+            "tau_sweep_ch2": src.get("tau_sweep_ch2"),
+            "delta_V_mV_ch0": src.get("delta_V_mV_ch0"),
+            "delta_V_mV_ch2": src.get("delta_V_mV_ch2"),
+            "V_post_min_mV_ch0": src.get("V_post_min_mV_ch0"),
+            "V_post_min_mV_ch2": src.get("V_post_min_mV_ch2"),
+            "mode_spikelet_baseline_mV": mode_vm,
+        }
+        fname = src.get("file")
+        for direction, tag in (("ch0->ch2", "12"), ("ch2->ch0", "21")):
+            primary = _primary_sweep_row(spikelet_sweep_rows, fname, direction)
+            nearest = _sweep_closest_to_vm(
+                spikelet_sweep_rows, fname, direction, mode_vm, ap_rows=spikelet_rows,
+            )
+            _add_spikelet_block(row, "primary", primary, tag)
+            _add_spikelet_block(row, "near_mode_vm", nearest, tag)
         rows.append(row)
     return rows
 
@@ -5186,7 +5215,11 @@ def save_batch_excel(
 
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    compact_rows = _compact_excel_summary_rows(summary_rows or [])
+    compact_rows = _compact_excel_summary_rows(
+        summary_rows or [],
+        spikelet_sweep_rows=spikelet_sweep_rows or [],
+        spikelet_rows=spikelet_rows or [],
+    )
     sheets = (
         ("Summary_short", compact_rows),
         ("File_summary", summary_rows or []),
