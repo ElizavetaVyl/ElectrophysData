@@ -11,8 +11,8 @@ GitHub **не запускает** Jupyter. Нужно скачать файлы
 | Файл | Нужен? |
 |------|--------|
 | `cc_calc_core.py` | **да** — весь расчёт |
-| `CC calculation (master project).ipynb` | **да** — запуск |
-| `CC calculation (master project) - README.md` | нет, только описание |
+| `CC calculation.ipynb` | **да** — запуск |
+| `CC calculation - README.md` | нет, только описание |
 | `HOW_TO_RUN.md` | нет, только инструкция |
 
 ABF-файлы **не** должны лежать в этой папке. Папку с `.abf` выберете в cell 2.
@@ -50,7 +50,7 @@ pip install pyabf pandas matplotlib scipy openpyxl
 ```
 
 2. Откройте **именно** файл  
-   `electrical synapses/CC calculation (master project).ipynb`  
+   `electrical synapses/CC calculation.ipynb`  
    (не старую копию с рабочего стола / другой папки).
 
 3. **Kernel → Restart**.

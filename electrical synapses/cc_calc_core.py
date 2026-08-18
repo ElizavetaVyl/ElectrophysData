@@ -1,6 +1,6 @@
 """Core logic for coupling coefficient batch analysis (imported by notebook).
 
-Notebook: ``CC calculation (master project).ipynb`` (cells 0-3).
+Notebook: ``CC calculation.ipynb`` (cells 0-3).
 Batch loop and Excel writers live in the notebook, not here.
 """
 

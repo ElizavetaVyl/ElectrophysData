@@ -1,6 +1,6 @@
 # Coupling coefficient batch analysis — documentation
 
-Logic lives in **`cc_calc_core.py`**. The notebook **`CC calculation (master project).ipynb`** imports it, picks folders, and exports Excel.
+Logic lives in **`cc_calc_core.py`**. The notebook **`CC calculation.ipynb`** imports it, picks folders, and exports Excel.
 
 **Protocol:** Clampex `double_cciv`, 4 ADC channels — ch0/ch2 = mV (cells), ch1/ch3 = pA (stim current).
 
@@ -11,7 +11,7 @@ Logic lives in **`cc_calc_core.py`**. The notebook **`CC calculation (master pro
 | File | Role |
 |------|------|
 | `cc_calc_core.py` | All analysis: CC, Rin, Gj, QC rules |
-| `CC calculation (master project).ipynb` | UI, batch loop, optional QC plots |
+| `CC calculation.ipynb` | UI, batch loop, optional QC plots |
 | This README | Guide for future users |
 
 ---
