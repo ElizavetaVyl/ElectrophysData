@@ -28,24 +28,41 @@ Loads libraries and `cc_calc_core`.
 Shows current thresholds (channels, spike detection, Rin windows, Gj formula).  
 **Edit numbers in `cc_calc_core.py`**, not in this cell.
 
-### Cell 2 — Folder and output path
+### Cell 2 — Folder, output path, and plot folders
 
 Either:
 
-- **Option A:** set `FOLDER_PATH` and optionally `OUTPUT_EXCEL` at the top of the cell (no dialog), or
-- **Option B:** run the cell — **tkinter** dialogs pick the folder and `.xlsx` save path (same pattern as *Cell Properties for one folder*).
+- **Option A:** set `FOLDER_PATH`, `OUTPUT_EXCEL`, and optional plot parent paths at the top of the cell (no dialog), or
+- **Option B:** run the cell — **tkinter** dialogs pick the folder and `.xlsx` save path.
 
-Sets `folder_path` and `output_excel`. Default output name: `CC_results.xlsx` in the chosen folder if you cancel the save dialog.
+Sets `folder_path`, `output_excel`, and (when enabled) plot folders next to the ABFs:
 
-### Cell 3 — Batch analysis
+- `Cell_properties_plots/`
+- `CC_plots/`
+- `Spikelet_plots/`
+
+Default output name: `{folder_name}_CC_data.xlsx` if you cancel the save dialog.
+
+### Cell 3 — Analysis blocks + batch
+
+Opens an **Analysis blocks** window (it can sit behind Jupyter). Choose which blocks to run:
+
+| Block | What it computes |
+|-------|------------------|
+| `cc` | CC, CC_norm, Gj, Rin, CC plots |
+| `cell_props` | AP21 ratio, firing, FWHM, V_rest, Cell Properties Rin |
+| `tau_cm` | tau, Cm |
+| `spikelets` | spike / spikelet metrics, QC PNGs, folder spikelet plots |
 
 For each `.abf`:
 
-1. Calls `analyze_abf_file(filepath)`
-2. Appends rows to one list
-3. Writes two sheets to Excel: **`All_data`** (per sweep) and **`File_summary`** (one row per file)
+1. Calls `analyze_abf_file(...)`
+2. Appends rows to lists for Excel and folder plots
+3. Writes **five** sheets: `Summary_short`, `File_summary`, `All_data`, `Spikelets`, `Spikelet_sweeps`
 
 Errors on one file do not stop the rest.
+
+Preset blocks without the window: set `ANALYSIS_BLOCKS = {...}` in cell 2.
 
 ### Cell 4 — Visual QC (optional)
 
@@ -147,6 +164,20 @@ For each selected sweep and direction:
 
 ---
 
+### `cc_normalize_block(...)`
+
+After mean CC is computed **per file and per direction**:
+
+\[
+CC\_norm = \frac{CC_{sweep}}{mean(CC\ \text{of this file in this direction})}
+\]
+
+- stored on each sweep row in `All_data`
+- used for folder plots **CC_norm vs Vm** and CC slope-over-time
+- if mean CC is 0 or missing → `CC_norm` stays empty
+
+---
+
 ### `collect_iv_points(...)`
 
 Builds one **(I, V)** point per sweep for **Rin**:
@@ -212,29 +243,81 @@ One Excel row when the **whole file** is skipped (e.g. wrong channel count), wit
 1. Open ABF, read datetime
 2. Check 4 channels
 3. Get epoch sample indices
-4. Select CC sweeps (both directions)
-5. Run `coupling_block` for ch0→ch2 and ch2→ch0
-6. Compute Rin for ch0 and ch2
-7. Mean CC and file-level Gj per direction
-8. Build `file_fields` (Rin, Gj, means, sweep counts — repeated on every sweep row)
-9. One row per sweep per direction; per-sweep `Gj_sweep_nS`
-10. If no CC sweeps → one row with explanatory skip message
+4. Run selected analysis blocks (`cc`, `cell_props`, `tau_cm`, `spikelets`)
+5. For CC: select sweeps, run both directions, compute `CC_norm`, Rin, mean CC, Gj
+6. For cell properties: compute ch0/ch2 fields on the ≥4 AP sweep
+7. For tau/Cm: pick best sweep, export tau/Cm metadata
+8. For spikelets: per-AP rows, per-sweep rows, file-level spikelet summary, QC PNGs
+9. Build one `File_summary` row and per-sweep rows for `All_data`
 
-Returns a **list of dicts** → flattened into Excel sheet **`All_data`**.
+Returns:
+
+- per-sweep CC rows → **`All_data`**
+- one file summary row → **`File_summary`**
+- spikelet AP rows → **`Spikelets`**
+- spikelet sweep rows → **`Spikelet_sweeps`**
 
 ---
 
 ## Excel sheets
 
-### `All_data` — per sweep only
+The batch export writes **five** sheets.
 
-One row per **sweep × direction**. Columns: `file`, `recording_datetime`, `sweep`, `direction`, `cur_step_pA`, `delta_V_*`, `CC`, `CC_skip_reason`, `Gj_sweep_nS`, `Gj_sweep_skip_reason`.
+### `Summary_short` — compact overview
 
-File-level metrics (Rin, Gj means, cell properties, tau/Cm) are **not** repeated here — see `File_summary`.
+Short user-facing cut from `File_summary` plus selected spikelet sweeps.
+
+Includes:
+
+- file / recording time / `analysis_blocks`
+- main CC, Gj, Rin, cell properties, tau/Cm
+- `props_sweep_*`, `inj_current_pA_*`
+- `tau_sweep_*`, `delta_V_mV_*`, `V_post_min_mV_*`
+- folder `mode_spikelet_baseline_mV`
+- two **meantrace** spikelet column groups per direction:
+  - `primary_*` = primary / prominent sweep (≥4 AP, then fallback rules)
+  - `near_mode_vm_*` = sweep nearest the folder mode baseline
+
+Column fill colors in Excel:
+
+- `primary_*` = one color
+- `near_mode_vm_*` = another color
+
+Use this sheet for quick reading. Full detail stays in the other sheets.
 
 ### `File_summary` — one row per file
 
-All metrics computed once per recording: CC/Gj means, Rin, cell properties, tau/Cm, etc.
+All file-level metrics computed once per recording:
+
+- CC12/21, Gj12/21, Rin
+- cell properties for ch0/ch2
+- tau/Cm for ch0/ch2
+- spikelet summary fields `spikelet_*_12` and `spikelet_*_21`
+- skip reasons and notes
+
+### `All_data` — per sweep × direction only
+
+One row per **sweep × direction**. Per-sweep CC/Gj columns only:
+
+- `file`, `recording_datetime`, `sweep`, `direction`
+- `cur_step_pA`, `delta_V_active_mV`, `delta_V_passive_mV`, `Vm_active_stim_mV`
+- `CC`, **`CC_norm`**, `CC_skip_reason`
+- `Gj_sweep_nS`, `Gj_sweep_skip_reason`
+
+File-level metrics (Rin, cell properties, tau/Cm, spikelet summary) are **not** repeated here — see `File_summary`.
+
+### `Spikelets` vs `Spikelet_sweeps`
+
+| | **`Spikelets`** | **`Spikelet_sweeps`** |
+|---|-----------------|----------------------|
+| Granularity | **1 row = 1 AP** | **1 row = 1 sweep + direction** |
+| Detail level | highest | aggregated per sweep |
+| Typical use | inspect individual APs | compare sweeps, primary flag, sweep means |
+| Contains | peak times, amp spike/spikelet, ratio, delays, baseline, flags | n_AP, n_detected, sweep means, avg/meantrace metrics, `is_primary` |
+
+**`Spikelets`** is the most detailed spikelet sheet (AP level).
+
+**`Spikelet_sweeps`** is the best sheet for sweep-level spikelet results, including meantrace metrics and which sweep was primary.
 
 ---
 
@@ -273,28 +356,10 @@ One row per `.abf` file. Mean **CC** and **Gj** use only sweeps with a valid CC 
 | `hold_V_mV_*`, `inj_current_pA_*` | Hold potential and injection on ≥4 AP sweep |
 | `R2_abs_Rin_*`, `props_sweep_*`, `props_skip_reason_*` | Fit quality, analysis sweep, skip reason |
 | `tau_ms_*`, `Cm_pF_*` | Membrane time constant and capacitance (Tau Cm notebook) |
-| `V_pre_mV_*`, `V_post_mV_*`, `delta_V_mV_*` | Mean Vm in pre/post CC epochs on tau sweep |
-| `tau_sweep_*`, `tau_skip_reason_*`, `Cm_skip_reason_*` | Sweep used; skip reasons |
+| `V_pre_mV_*`, `V_post_mV_*`, `delta_V_mV_*`, `V_post_min_mV_*` | Mean Vm in pre/post epochs on tau sweep; minimum Vm in post epoch used for sweep selection |
+| `tau_sweep_*`, `tau_selection_note_*`, `tau_skip_reason_*`, `Cm_skip_reason_*` | Sweep used; selection note; skip reasons |
 
-**CC Rin** stays in `Rin1_MOhm` / `Rin2_MOhm` (and `Rin_ch0_MOhm` on `All_data`) with the existing linear-fit exceptions.
-
----
-
-## Excel sheet `All_data`
-
-One table for all files. Each row is roughly **one sweep × direction**, with file-level columns repeated on every row.
-
-| Column group | Meaning |
-|--------------|---------|
-| `file`, `recording_datetime` | File identity and ABF header time |
-| `sweep`, `direction` | Sweep index; `ch0->ch2` or `ch2->ch0` |
-| `cur_step_pA`, `delta_V_*_mV`, `CC`, `CC_skip_reason` | Per-sweep coupling |
-| `Rin_ch0_MOhm`, `R2_ch0`, `n_IV_ch0`, `Rin_ch0_skip_reason`, `Rin_vm_range_ch0` | File-level Rin cell 0 |
-| Same for `ch2` | File-level Rin cell 2 |
-| `CC_mean_*`, `n_CC_avg_*`, `Gj_*_nS`, `Gj_*_skip_reason` | File-level mean CC (valid sweeps only), Gj |
-| `Rin_ch0_note`, `Rin_ch2_note` | Single-point Rin comment when applicable |
-| `Gj_sweep_nS`, `Gj_sweep_skip_reason` | Gj from that sweep’s CC |
-| `n_CC_sweeps_ch0to2`, `n_CC_sweeps_ch2to0` | Count of sweeps used for CC |
+**CC Rin** stays in `Rin1_MOhm` / `Rin2_MOhm` on `File_summary`.
 
 ---
 
@@ -311,7 +376,7 @@ These are **in addition to** CC Rin used for Gj (`Rin_ch0_MOhm` / `Rin_ch2_MOhm`
 
 ### QC plots (saved PNGs)
 
-When `SAVE_QC_PLOTS = True`, PNGs go to **`<data_folder>/QC_plots/`** with an opaque **white** background:
+When `SAVE_QC_PLOTS = True`, cell-property QC PNGs go to **`<data_folder>/Cell_properties_plots/`** with an opaque **white** background:
 
 | Filename pattern | Content |
 |------------------|---------|
@@ -320,7 +385,8 @@ When `SAVE_QC_PLOTS = True`, PNGs go to **`<data_folder>/QC_plots/`** with an op
 | `{file}_ch0_tau_Cm.png` | tau/Cm: V_pre, V_post, 63%, tau from pre_end |
 | Same for `ch2` | |
 
-Set `SAVE_QC_PLOTS = False` in `cc_calc_core.py` to disable. Optional CC inspect plot remains in notebook cell 4.
+Set `SAVE_QC_PLOTS = False` in `cc_calc_core.py` to disable.  
+CC plots go to **`CC_plots/`**. Spikelet QC goes to **`Spikelet_plots/`**. Optional CC inspect plot remains in notebook cell 4.
 
 ### Tau / Cm
 
@@ -328,11 +394,19 @@ Set `SAVE_QC_PLOTS = False` in `cc_calc_core.py` to disable. Optional CC inspect
 
 - **V_pre** = mean Vm in pre epoch (`start10:end10` ch0, `start20:end20` ch2)
 - **V_post** = mean Vm in post epoch (`start11:end11` / `start21:end21`)
+- **V_post_min** = minimum Vm in the post epoch on the selected sweep (`V_post_min_mV_*`)
 - Select sweep where **ΔV = V_post − V_pre** is in **−35…−10 mV** (closest to zero)
-- Require **min Vm in post epoch ≥ −90 mV**
+- Prefer sweeps with **min Vm in post epoch ≥ −90 mV**
 - **v_63** = V_pre + 0.63 × (V_post − V_pre)
 - **tau** = time from **stim_start** (post epoch onset) to first Vm ≤ v_63
 - **Cm [pF]** = tau_ms / Rin_MΩ × 1000
+
+Saved metadata per channel:
+
+- `tau_sweep_*` — which sweep was used
+- `delta_V_mV_*` — ΔV on that sweep
+- `V_post_min_mV_*` — minimum Vm in post epoch
+- `inj_current_pA_*` is **not** exported for tau/Cm (that field belongs to cell properties)
 
 Config in `cc_calc_core.py`: `TCM_VMIN_LIMIT`, `TCM_DV_SEARCH_MIN/MAX`.
 
@@ -340,10 +414,90 @@ QC plot: `{file}_ch0_tau_Cm.png` — trace, pre/post epochs, V_pre, V_post, 63% 
 
 ---
 
+## Spikelet analysis
+
+Directions:
+
+- **12** = ch0 → ch2 (active ch0, passive ch2)
+- **21** = ch2 → ch0
+
+### Primary sweep selection
+
+1. first sweep with **≥ 4 APs**
+2. else first with **3 APs**
+3. else first with **2 APs**
+4. else **1-AP fallback** only if there is no multi-spike sweep
+
+This primary sweep is used for QC PNGs and the main file-level spikelet summary.
+
+### Nearest mode Vm sweep
+
+Additionally, the code picks the sweep whose spikelet baseline (passive mean 1 ms before AP start) is closest to the folder **mode baseline Vm** (KDE peak of all sweep-mean baselines). Used in extra folder plots and in `Summary_short` columns `near_mode_vm_*`.
+
+### Scheme A — original per-AP spikelets
+
+For each analyzed AP (normally AP2+, except 1-AP fallback):
+
+- baseline = passive mean in **1 ms before t = 0**
+- search window = **15 ms** after AP start
+- Gaussian smooth σ = **0.3 ms**
+- local peak with prominence **≥ 0.15 mV**
+- noise gate **OFF**
+- if `amp_spikelet / amp_spike > 1` → flagged as error; kept in Excel but omitted from ratio plots
+- negative delays are kept and marked
+
+Results: sheet **`Spikelets`** (AP level) and aggregated fields on **`Spikelet_sweeps`**.
+
+### Scheme B — meantrace (averaged signal)
+
+Parallel scheme on aligned mean traces (AP2+):
+
+- window = **15 ms** after AP start
+- smooth σ = **0.3 ms**
+- local peak with prominence **≥ 0.05 mV**
+- noise gate **OFF**
+- spikelet amplitude taken from the **smoothed mean passive trace**
+- delay = passive peak time − active mean AP peak time
+- ratio = amp_spikelet / amp_spike
+
+These values appear on **`Spikelet_sweeps`** and in file-level fields `spikelet_meantrace10_*` on **`File_summary`**.
+
+### Spikelet QC PNG (`Spikelet_plots/`)
+
+Primary sweep only: `{stem}_12_spikelets.png`, `{stem}_21_spikelets.png`
+
+Three panels:
+
+1. raw active + passive overlay
+2. aligned AP mean traces (original 15 ms scheme)
+3. meantrace panel: thin aligned traces, thick mean passive, thin smoothed passive in another color, active mean, peak markers
+
+Folder plots (in `Spikelet_plots/`, not among ABF files):
+
+- `*_spikelet_over_time.png`
+- `*_spikelet_over_time_near_<modeVm>mV.png`
+- `*_spikelet_meantrace10_over_time*.png`
+- `*_spikelet_vs_Vm.png`
+- `*_spikelet_meantrace10_vs_Vm.png`
+
+Current spikelet constants in `cc_calc_core.py`:
+
+| Constant | Value |
+|----------|-------|
+| `SPIKELET_PEAK_MS` | 15 ms |
+| `SPIKELET_PEAK_SMOOTH_MS` | 0.3 ms |
+| `SPIKELET_MIN_PROMINENCE_MV` | 0.15 mV (per-AP) |
+| `SPIKELET_MEANTRACE_PEAK_MS` | 15 ms |
+| `SPIKELET_MEANTRACE_MIN_PROMINENCE_MV` | 0.05 mV |
+| `SPIKELET_USE_NOISE_GATE` | False |
+
+---
+
 | Analysis | Which sweeps | Criterion |
 |----------|--------------|-----------|
 | **CC** | Prefix from sweep 0 until first “bad” sweep | No AP on active (post-stim) or passive (full ΔV window); then per-sweep ΔI and passive spike checks |
 | **Rin** | All sweeps in file | Mean Vm in stim window inside mV bands; linear V–I fit |
+| **Spikelets** | Sweeps with ≥2 APs from first such sweep onward; primary = rules above | per-AP local peak + meantrace on aligned mean |
 
 ---
 
