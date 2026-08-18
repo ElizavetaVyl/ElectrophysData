@@ -90,6 +90,7 @@ SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sw
 SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_MIN_APS = 2  # prefer AP2+; fall back to 1-AP sweeps if none exist
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
+SPIKELET_MEANTRACE_PEAK_MS = 10.0  # parallel scheme: average passive trace in [t0, t0+10ms]
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 SPIKELET_DIR_TAG = {"ch0->ch2": "12", "ch2->ch0": "21"}
@@ -140,6 +141,13 @@ SPIKELET_SUMMARY_SUFFIXES = (
     "avg_amp_ratio",
     "avg_delay_ms",
     "avg_delay_10_ms",
+    "meantrace10_amp_active_mV",
+    "meantrace10_amp_spikelet_mV",
+    "meantrace10_amp_ratio",
+    "meantrace10_delay_ms",
+    "meantrace10_delay_10_ms",
+    "meantrace10_detected",
+    "meantrace10_skip_reason",
     "metric_source",
     "ap1_fallback",
     "rms_noise_mV",
@@ -206,6 +214,13 @@ SPIKELET_SWEEP_KEYS = (
     "avg_amp_spikelet_mV",
     "avg_delay_ms",
     "avg_delay_10_ms",
+    "meantrace10_amp_active_mV",
+    "meantrace10_amp_spikelet_mV",
+    "meantrace10_amp_ratio",
+    "meantrace10_delay_ms",
+    "meantrace10_delay_10_ms",
+    "meantrace10_detected",
+    "meantrace10_skip_reason",
     "metric_source",
     "ap1_fallback",
     "skip_reason",
@@ -1441,6 +1456,13 @@ def _empty_spikelet_metrics(skip_reason):
         "avg_amp_ratio": None,
         "avg_delay_ms": None,
         "avg_delay_10_ms": None,
+        "meantrace10_amp_active_mV": None,
+        "meantrace10_amp_spikelet_mV": None,
+        "meantrace10_amp_ratio": None,
+        "meantrace10_delay_ms": None,
+        "meantrace10_delay_10_ms": None,
+        "meantrace10_detected": False,
+        "meantrace10_skip_reason": None,
         "metric_source": None,
         "ap1_fallback": False,
         "rms_noise_mV": None,
@@ -1639,6 +1661,63 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
     metrics["n_delay_10_negative"] = sum(1 for r in used if r.get("delay_10_negative"))
     metrics["n_ratio_gt_1"] = sum(1 for r in used if r.get("ratio_gt_1"))
     return True
+
+
+def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified):
+    """Parallel scheme on mean traces: 10 ms passive window after t=0."""
+    out = {
+        "meantrace10_amp_active_mV": None,
+        "meantrace10_amp_spikelet_mV": None,
+        "meantrace10_amp_ratio": None,
+        "meantrace10_delay_ms": None,
+        "meantrace10_delay_10_ms": None,
+        "meantrace10_detected": False,
+        "meantrace10_skip_reason": None,
+    }
+    if mean_a is None or mean_p is None or sr in (None, 0):
+        out["meantrace10_skip_reason"] = "no mean traces"
+        return out
+    n_peak = _ms_to_samples(SPIKELET_MEANTRACE_PEAK_MS, sr)
+    i1 = min(len(mean_p), n_pre + n_peak + 1)
+    if i1 <= n_pre + 2 or len(mean_a) < i1:
+        out["meantrace10_skip_reason"] = "meantrace10 window too short"
+        return out
+    seg_p = np.asarray(mean_p[n_pre:i1], dtype=float)
+    seg_a = np.asarray(mean_a[n_pre:i1], dtype=float)
+    base_p = float(np.mean(mean_p[:n_pre])) if n_pre > 0 else float(mean_p[0])
+    base_a = float(mean_a[n_pre])
+    i_rel_p = _spikelet_local_peak_index(seg_p, sr)
+    i_rel_a = _spikelet_local_peak_index(seg_a, sr)
+    if i_rel_a is None:
+        i_rel_a = int(np.argmax(seg_a)) if len(seg_a) else None
+    if i_rel_p is None:
+        out["meantrace10_skip_reason"] = "no local peak on meantrace10"
+        return out
+    if i_rel_a is None:
+        out["meantrace10_skip_reason"] = "no AP peak on meantrace10"
+        return out
+    amp_p = float(seg_p[int(i_rel_p)]) - base_p
+    amp_a = float(seg_a[int(i_rel_a)]) - base_a
+    out["meantrace10_amp_active_mV"] = _round_or_none(amp_a, 4)
+    out["meantrace10_amp_spikelet_mV"] = _round_or_none(amp_p, 4)
+    ok, why = spikelet_amp_passes(amp_p, rms_unified)
+    if not ok:
+        out["meantrace10_skip_reason"] = why
+        return out
+    out["meantrace10_detected"] = True
+    out["meantrace10_skip_reason"] = None
+    if amp_a not in (None, 0):
+        out["meantrace10_amp_ratio"] = _round_or_none(amp_p / amp_a, 4)
+    out["meantrace10_delay_ms"] = _round_or_none(
+        _samples_to_ms(int(i_rel_p) - int(i_rel_a), sr), 4
+    )
+    i_peak_a = n_pre + int(i_rel_a)
+    i_peak_p = n_pre + int(i_rel_p)
+    t10_a = _frac_rise_time_ms(mean_a, n_pre, i_peak_a, base_a, amp_a, sr)
+    t10_p = _frac_rise_time_ms(mean_p, n_pre, i_peak_p, base_p, amp_p, sr)
+    if t10_a is not None and t10_p is not None:
+        out["meantrace10_delay_10_ms"] = _round_or_none(t10_p - t10_a, 4)
+    return out
 
 
 def analyze_spikelets_direction(abf, active_ch, passive_ch, direction):
@@ -1976,6 +2055,9 @@ def _analyze_spikelets_sweep(
             else:
                 ok = True
             avg_detected = ok
+        metrics.update(
+            _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified)
+        )
         if not has_means:
             if avg_detected:
                 metrics["metric_source"] = "average"
@@ -2076,6 +2158,13 @@ def _aggregate_spikelet_sweep_metrics(sweep_metrics, primary_sn):
         "avg_amp_ratio",
         "avg_delay_ms",
         "avg_delay_10_ms",
+        "meantrace10_amp_active_mV",
+        "meantrace10_amp_spikelet_mV",
+        "meantrace10_amp_ratio",
+        "meantrace10_delay_ms",
+        "meantrace10_delay_10_ms",
+        "meantrace10_detected",
+        "meantrace10_skip_reason",
         "metric_source",
         "skip_reason",
         "n_with_amp",
@@ -2433,6 +2522,15 @@ def _print_spikelet_pipeline_status(name, direction, metrics, sweep_metrics, ap_
         f"V_base={metrics.get('mean_baseline_passive_mV')}  "
         f"ap1_fallback={metrics.get('ap1_fallback')}  "
         f"skip={metrics.get('skip_reason')}"
+    )
+    print(
+        f"    MEANTRACE10: spike={metrics.get('meantrace10_amp_active_mV')}  "
+        f"spikelet={metrics.get('meantrace10_amp_spikelet_mV')}  "
+        f"ratio={metrics.get('meantrace10_amp_ratio')}  "
+        f"delay_pk={metrics.get('meantrace10_delay_ms')}  "
+        f"delay_10={metrics.get('meantrace10_delay_10_ms')}  "
+        f"det={metrics.get('meantrace10_detected')}  "
+        f"skip={metrics.get('meantrace10_skip_reason')}"
     )
     by_sw = {}
     for r in ap_rows or []:
@@ -3532,7 +3630,7 @@ def _vm_for_channel(row, ch_tag):
 def _spikelet_file_metric(row, tag, metric):
     """File-level spikelet value (primary-sweep means stored on File_summary)."""
     keys = (f"spikelet_mean_{metric}_{tag}",)
-    if metric != "amp_ratio":
+    if not str(metric).endswith("amp_ratio"):
         keys = (
             f"spikelet_mean_{metric}_{tag}",
             f"spikelet_avg_{metric}_{tag}",
@@ -3544,7 +3642,7 @@ def _spikelet_file_metric(row, tag, metric):
         v = _finite_number(val)
         if v is None:
             continue
-        if metric == "amp_ratio":
+        if str(metric).endswith("amp_ratio"):
             v = _plottable_amp_ratio(v)
             if v is None:
                 continue
@@ -3687,7 +3785,7 @@ def _sweep_row_metric(row, metric):
         v = _finite_number(row.get(key))
         if v is None:
             continue
-        if metric == "amp_ratio":
+        if str(metric).endswith("amp_ratio"):
             v = _plottable_amp_ratio(v)
             if v is None:
                 continue
@@ -4061,7 +4159,7 @@ def file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None):
             v = _finite_number(row.get(key))
             if v is None:
                 continue
-            if y_key == "mean_amp_ratio":
+            if str(y_key).endswith("amp_ratio"):
                 v = _plottable_amp_ratio(v)
                 if v is None:
                     continue
@@ -4214,6 +4312,186 @@ def save_folder_spikelet_vs_vm_plot(
     except Exception as exc:
         print(f"  spikelet vs Vm colorbar skipped: {exc}")
 
+    return _finish_folder_fig(fig, out_path, skip_tight=used_cbar)
+
+
+def save_folder_spikelet_meantrace10_over_time_plot(
+    summary_rows, out_path, title=None, spikelet_sweep_rows=None, target_vm=None,
+):
+    """Parallel mean-trace scheme: ratio/delays vs time from mean passive trace."""
+    pairs = folder_summary_timed_rows(summary_rows)
+    use_dates = bool(pairs)
+    if pairs:
+        times = [dt for dt, _ in pairs]
+        rows = [r for _, r in pairs]
+    else:
+        rows = list(summary_rows or [])
+        rows.sort(key=lambda r: (_abf_file_number(r.get("file") or ""), str(r.get("file") or "")))
+        times = list(range(len(rows)))
+        print("  spikelet meantrace10 vs time: no recording datetime; using file order on X")
+    if not rows:
+        print("  spikelet meantrace10 vs time: skipped (no File_summary rows)")
+        return None
+    dir_12, dir_21 = "ch0->ch2", "ch2->ch0"
+    near_vm = _finite_number(target_vm)
+
+    def _pick(fname, direction):
+        if near_vm is not None:
+            return _sweep_closest_to_vm(spikelet_sweep_rows, fname, direction, near_vm)
+        picked = _primary_sweep_row(spikelet_sweep_rows, fname, direction)
+        if picked is None:
+            picked = _primary_sweep_row(spikelet_sweep_rows, str(fname or ""), direction)
+        return picked
+
+    def _val(row, direction, key):
+        fname = os.path.basename(str(row.get("file") or ""))
+        picked = _pick(fname, direction)
+        if picked is None and fname != str(row.get("file") or ""):
+            picked = _pick(str(row.get("file") or ""), direction)
+        return _sweep_row_metric(picked, key)
+
+    ratio12 = [_val(r, dir_12, "meantrace10_amp_ratio") for r in rows]
+    ratio21 = [_val(r, dir_21, "meantrace10_amp_ratio") for r in rows]
+    dpk12 = [_val(r, dir_12, "meantrace10_delay_ms") for r in rows]
+    dpk21 = [_val(r, dir_21, "meantrace10_delay_ms") for r in rows]
+    d1012 = [_val(r, dir_12, "meantrace10_delay_10_ms") for r in rows]
+    d1021 = [_val(r, dir_21, "meantrace10_delay_10_ms") for r in rows]
+    n_ratio = sum(v is not None for v in ratio12 + ratio21)
+    n_del = sum(v is not None for v in dpk12 + dpk21 + d1012 + d1021)
+    tag = "PRIMARY" if near_vm is None else f"nearest baseline {near_vm:g} mV"
+    print(
+        f"  spikelet meantrace10 vs time ({tag}): "
+        f"files={len(rows)}, amp_ratio={n_ratio}, delays={n_del}"
+    )
+
+    plt = _get_agg_plt()
+    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
+    if title:
+        suffix = (
+            "mean-trace 10 ms ratio and delays vs recording time"
+            if near_vm is None
+            else f"mean-trace 10 ms ratio and delays vs recording time (nearest {near_vm:g} mV)"
+        )
+        fig.suptitle(f"{title}  —  {suffix}", fontsize=12)
+
+    panels = (
+        (axes[0], "Amplitude ratio (meantrace10; ratio>1 omitted)",
+         ((ratio12, "o-", "C0", "12 (ch0→ch2)"), (ratio21, "s-", "C1", "21 (ch2→ch0)"))),
+        (axes[1], "Delay peak (ms)",
+         ((dpk12, "o-", "C0", "12 peak"), (dpk21, "s-", "C1", "21 peak"))),
+        (axes[2], "Delay 10% (ms)",
+         ((d1012, "o-", "C0", "12 10%"), (d1021, "s-", "C1", "21 10%"))),
+    )
+    n_total = 0
+    labeled_neg = False
+    for ax, panel_title, series in panels:
+        n = 0
+        is_delay = "Delay" in panel_title
+        for vals, style, color, label in series:
+            n += _plot_timed(ax, times, vals, style, color=color, label=label)
+            if is_delay:
+                xs, ys = _finite_xy(times, vals)
+                if _mark_negative_delay_points(ax, xs, ys, already_labeled=labeled_neg):
+                    labeled_neg = True
+        n_total += n
+        ax.set_title(panel_title)
+        ax.set_ylabel("ratio" if "ratio" in panel_title.lower() else panel_title.lower())
+        ax.grid(True, alpha=0.3)
+        if n == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", color="0.5", fontsize=9)
+        else:
+            ax.legend(loc="best", fontsize=8)
+    axes[0].set_ylabel("ratio")
+    axes[1].set_ylabel("delay peak (ms)")
+    axes[2].set_ylabel("delay 10% (ms)")
+    axes[-1].set_xlabel("Recording time" if use_dates else "File order")
+    if n_total == 0:
+        plt.close(fig)
+        return None
+    if use_dates:
+        _format_time_axes(axes[-1])
+        fig.autofmt_xdate()
+    return _finish_folder_fig(fig, out_path)
+
+
+def save_folder_spikelet_meantrace10_vs_vm_plot(
+    sweep_rows, out_path, title=None, summary_rows=None,
+):
+    """Parallel mean-trace scheme: sweep-mean ratio/delays vs spikelet baseline."""
+    from matplotlib.colors import Normalize
+
+    plt = _get_agg_plt()
+    fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex="col")
+    if title:
+        fig.suptitle(f"{title}  —  mean-trace 10 ms spikelet / spike vs mean spikelet baseline", fontsize=12)
+
+    file_pos, first_lbl, last_lbl, n_files = _cc_vm_file_color_map(
+        list(sweep_rows or []), summary_rows=summary_rows,
+    )
+    cmap = _mpl_cmap()
+    panels = (
+        ("meantrace10_amp_ratio", "meantrace10 amp spikelet / amp spike"),
+        ("meantrace10_delay_ms", "meantrace10 delay peak (ms)"),
+        ("meantrace10_delay_10_ms", "meantrace10 delay 10% (ms)"),
+    )
+    directions = (("ch0->ch2", "ch0→ch2"), ("ch2->ch0", "ch2→ch0"))
+    any_data = False
+    n_curves = 0
+    for col, (direction, dir_title) in enumerate(directions):
+        for row_i, (y_key, ylabel) in enumerate(panels):
+            ax = axes[row_i, col]
+            curves = file_spikelet_vm_curves(sweep_rows, direction, y_key, ap_rows=None)
+            n_curves += len(curves)
+            if not curves:
+                ax.set_title(f"{dir_title} — no data" if row_i == 0 else "")
+                if col == 0:
+                    ax.set_ylabel(ylabel)
+                ax.grid(True, alpha=0.3)
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", color="0.5", fontsize=9)
+                continue
+            any_data = True
+            file_xy = []
+            labeled_neg = False
+            for fname, _dt, vms, ys in curves:
+                color = cmap(float(file_pos.get(fname, file_pos.get(os.path.basename(str(fname)), 0.5))))
+                ax.scatter(vms, ys, color=[color], s=28, zorder=3, alpha=0.9)
+                if "delay" in y_key:
+                    if _mark_negative_delay_points(ax, vms, ys, already_labeled=labeled_neg):
+                        labeled_neg = True
+                if CC_VM_FIT_LINEAR:
+                    x1, y1, _s, _b, _r2 = _linear_cc_vs_vm(vms, ys)
+                    if x1 is not None:
+                        ax.plot(x1, y1, "-", color=color, lw=1.3, alpha=0.85)
+                file_xy.append((vms, ys))
+            _plot_mean_of_file_lines(ax, file_xy)
+            ax.grid(True, alpha=0.3)
+            if row_i == 0:
+                ax.set_title(f"{dir_title} — {len(curves)} file(s)")
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            if row_i == 2:
+                ax.set_xlabel("Mean spikelet baseline (passive, mV)")
+    if not any_data:
+        plt.close(fig)
+        print("  spikelet meantrace10 vs Vm: no points yet")
+        return None
+    try:
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0.0, 1.0))
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=list(axes.ravel()), fraction=0.046, pad=0.03)
+        cbar.set_label("first file  →  last file")
+        try:
+            cbar.set_ticks([0.0, 1.0], labels=[f"first\n{first_lbl}", f"last\n{last_lbl}"])
+        except TypeError:
+            cbar.set_ticks([0.0, 1.0])
+            cbar.ax.set_yticklabels([f"first  {first_lbl}", f"last  {last_lbl}"])
+        cbar.ax.tick_params(labelsize=8)
+        used_cbar = True
+    except Exception:
+        used_cbar = False
+    print(f"  spikelet meantrace10 vs Vm curves: {n_curves}")
     return _finish_folder_fig(fig, out_path, skip_tight=used_cbar)
 
 
