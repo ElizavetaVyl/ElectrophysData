@@ -29,7 +29,7 @@ ABF-файлы **не** должны лежать в этой папке. Пап
    `cursor/cc-vs-vm-linear-fit-b101`.
 3. **Code → Download ZIP**.
 4. Распакуйте архив.
-5. Откройте папку `Electrical Synapsys`.
+5. Откройте папку `electrical synapses`.
 
 ### Вариант B — git clone
 
@@ -39,7 +39,7 @@ cd ElectrophysData
 git checkout cursor/cc-vs-vm-linear-fit-b101
 ```
 
-Дальше работайте из папки `Electrical Synapsys`.
+Дальше работайте из папки `electrical synapses`.
 
 ## Как открыть notebook
 
@@ -50,7 +50,7 @@ pip install pyabf pandas matplotlib scipy openpyxl
 ```
 
 2. Откройте **именно** файл  
-   `Electrical Synapsys/CC calculation (master project).ipynb`  
+   `electrical synapses/CC calculation (master project).ipynb`  
    (не старую копию с рабочего стола / другой папки).
 
 3. **Kernel → Restart**.
@@ -58,7 +58,7 @@ pip install pyabf pandas matplotlib scipy openpyxl
 4. Запускайте ячейки по порядку: **0 → 1 → 2 → 3**.
 
 5. В cell 1 проверьте строку `cc_calc_core file:` — путь должен указывать на  
-   `Electrical Synapsys/cc_calc_core.py`.
+   `electrical synapses/cc_calc_core.py`.
 
 6. Cell 2: выберите папку с `.abf` и куда сохранить Excel.
 
@@ -67,7 +67,7 @@ pip install pyabf pandas matplotlib scipy openpyxl
 
 ## Куда пишутся результаты
 
-Рядом с папкой ABF (не обязательно внутри `Electrical Synapsys`):
+Рядом с папкой ABF (не обязательно внутри `electrical synapses`):
 
 - Excel: `{имя_папки}_CC_data.xlsx`
 - `Cell_properties_plots/`
