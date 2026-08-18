@@ -2421,6 +2421,8 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
             n_pre, sr,
             plot_meta.get("metrics"),
             plot_meta.get("rms"),
+            snips_p=plot_meta.get("snips_p"),
+            snips_a=plot_meta.get("snips_a"),
         )
         tag = dir_tag or SPIKELET_DIR_TAG.get(direction) or "na"
         fname = f"{stem}_{tag}_spikelets.png"
@@ -2660,6 +2662,8 @@ def save_spikelet_qc_plot(abf, plot_meta, plots_dir, stem, dir_tag=None):
         n_pre, sr,
         plot_meta.get("metrics"),
         plot_meta.get("rms"),
+        snips_p=plot_meta.get("snips_p"),
+        snips_a=plot_meta.get("snips_a"),
     )
 
     try:
