@@ -90,7 +90,7 @@ SPIKELET_NOISE_LOCAL_MS = 10.0  # MAD on passive in [t0-10ms, t0), pooled per sw
 SPIKELET_MIN_AMP_MV = 0.15  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_MIN_APS = 2  # prefer AP2+; fall back to 1-AP sweeps if none exist
 SPIKELET_DELAY_FRAC = 0.10  # delay_10: 10% of AP amp and 10% of spikelet amp
-SPIKELET_MEANTRACE_PEAK_MS = 10.0  # parallel scheme: average passive trace in [t0, t0+10ms]
+SPIKELET_MEANTRACE_PEAK_MS = 15.0  # parallel scheme: average passive trace in [t0, t0+15ms]
 SAVE_SPIKELET_PLOTS = True
 SPIKELET_PLOTS_SUBDIR = "Spikelet_plots"
 SPIKELET_DIR_TAG = {"ch0->ch2": "12", "ch2->ch0": "21"}
@@ -1664,7 +1664,7 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
 
 
 def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
-    """Parallel scheme on mean traces: 10 ms passive window after t=0.
+    """Parallel scheme on mean traces: 15 ms passive window after t=0.
 
     Detection = local maximum with post-peak decline (prominence on smoothed
     trace). No noise-amplitude gate.
@@ -2193,7 +2193,7 @@ def _spikelet_row(row_dict):
 
 
 def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
-    """QC subplot for parallel meantrace10 scheme (10 ms passive window after t=0)."""
+    """QC subplot for parallel meantrace10 scheme (15 ms passive window after t=0)."""
     mt = metrics or {}
     title_base = (
         f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms, local peak + prominence)"
@@ -4517,9 +4517,9 @@ def save_folder_spikelet_meantrace10_over_time_plot(
     fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
     if title:
         suffix = (
-            "mean-trace 10 ms ratio and delays vs recording time"
+            "mean-trace 15 ms ratio and delays vs recording time"
             if near_vm is None
-            else f"mean-trace 10 ms ratio and delays vs recording time (nearest {near_vm:g} mV)"
+            else f"mean-trace 15 ms ratio and delays vs recording time (nearest {near_vm:g} mV)"
         )
         fig.suptitle(f"{title}  —  {suffix}", fontsize=12)
 
@@ -4573,7 +4573,7 @@ def save_folder_spikelet_meantrace10_vs_vm_plot(
     plt = _get_agg_plt()
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex="col")
     if title:
-        fig.suptitle(f"{title}  —  mean-trace 10 ms spikelet / spike vs mean spikelet baseline", fontsize=12)
+        fig.suptitle(f"{title}  —  mean-trace 15 ms spikelet / spike vs mean spikelet baseline", fontsize=12)
 
     file_pos, first_lbl, last_lbl, n_files = _cc_vm_file_color_map(
         list(sweep_rows or []), summary_rows=summary_rows,
