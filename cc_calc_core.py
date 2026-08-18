@@ -82,7 +82,8 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
 SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search only (kills 1-sample jitter)
-SPIKELET_MIN_PROMINENCE_MV = 0.15  # peak must drop this much after the top; else no spikelet
+SPIKELET_MIN_PROMINENCE_MV = 0.15  # original per-AP scheme: drop after the top
+SPIKELET_MEANTRACE_MIN_PROMINENCE_MV = 0.05  # meantrace: looser drop than 0.15 mV
 SPIKELET_USE_NOISE_GATE = False  # amplitude vs noise; peak shape is separate (prominence)
 SPIKELET_NOISE_K = 1.0  # unused while SPIKELET_USE_NOISE_GATE is False
 SPIKELET_NOISE_K_REF = 3.0  # old prestim 3× bar, unused on QC
@@ -1295,15 +1296,16 @@ def _spikelet_smooth_for_peak(y, sr):
     return gaussian_filter1d(y, sigma=sigma, mode="nearest")
 
 
-def _spikelet_local_peak_index(seg, sr=None):
-    """Index of a peaked spikelet in the 15 ms window, or None.
+def _spikelet_local_peak_index(seg, sr=None, prominence=None):
+    """Index of a peaked spikelet in the search window, or None.
 
-    The full ``SPIKELET_PEAK_MS`` window is searched. Not ``argmax``.
+    The full search window is scanned. Not ``argmax``.
     Digitizer jitter is first smoothed (σ = SPIKELET_PEAK_SMOOTH_MS).
     A candidate must then be a real peak: the smoothed trace falls after
-    the top by at least ``SPIKELET_MIN_PROMINENCE_MV`` (scipy prominence).
-    A monotonic rise, a slow coupling envelope with no peaked event, or a
-    1-sample wiggle therefore returns None.
+    the top by at least ``prominence`` (scipy; default
+    ``SPIKELET_MIN_PROMINENCE_MV``). A monotonic rise, a slow coupling
+    envelope with no peaked event, or a 1-sample wiggle therefore returns
+    None.
 
     If several valid peaks exist, the highest smoothed one is taken.
     Amplitude is still measured on the raw trace at this index.
@@ -1311,8 +1313,10 @@ def _spikelet_local_peak_index(seg, sr=None):
     y_raw = np.asarray(seg, dtype=float).ravel()
     if y_raw.size < 5:
         return None
+    if prominence is None:
+        prominence = SPIKELET_MIN_PROMINENCE_MV
     y = _spikelet_smooth_for_peak(y_raw, sr)
-    peaks, _props = find_peaks(y, prominence=float(SPIKELET_MIN_PROMINENCE_MV))
+    peaks, _props = find_peaks(y, prominence=float(prominence))
     if peaks.size == 0:
         return None
     best_i = int(peaks[int(np.argmax(y[peaks]))])
@@ -1666,8 +1670,9 @@ def _fill_sweep_means_from_ap_rows(metrics, ap_rows):
 def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     """Parallel scheme on mean traces: 15 ms passive window after t=0.
 
-    Detection = local maximum with post-peak decline (prominence on smoothed
-    trace). No noise-amplitude gate.
+    Detection = local maximum with post-peak decline
+    (``SPIKELET_MEANTRACE_MIN_PROMINENCE_MV`` on smoothed trace).
+    No noise-amplitude gate.
     """
     out = {
         "meantrace10_amp_active_mV": None,
@@ -1690,7 +1695,9 @@ def _compute_meantrace10_metrics(mean_a, mean_p, n_pre, sr, rms_unified=None):
     seg_a = np.asarray(mean_a[n_pre:i1], dtype=float)
     base_p = float(np.mean(mean_p[:n_pre])) if n_pre > 0 else float(mean_p[0])
     base_a = float(mean_a[n_pre])
-    i_rel_p = _spikelet_local_peak_index(seg_p, sr)
+    i_rel_p = _spikelet_local_peak_index(
+        seg_p, sr, prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+    )
     i_rel_a = _spikelet_local_peak_index(seg_a, sr)
     if i_rel_a is None:
         i_rel_a = int(np.argmax(seg_a)) if len(seg_a) else None
@@ -2196,7 +2203,8 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     """QC subplot for parallel meantrace10 scheme (15 ms passive window after t=0)."""
     mt = metrics or {}
     title_base = (
-        f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms, local peak + prominence)"
+        f"Meantrace10 ({SPIKELET_MEANTRACE_PEAK_MS:g} ms, "
+        f"local peak, drop>={SPIKELET_MEANTRACE_MIN_PROMINENCE_MV:g} mV)"
     )
     ax.set_xlabel("Time from active AP start (ms)")
     ax.set_ylabel("Passive Vm (mV)", color="C1")
@@ -2239,7 +2247,9 @@ def _meantrace10_qc_panel(ax, mean_a, mean_p, n_pre, sr, metrics, rms=None):
     base_p = float(np.mean(mp[:n_pre])) if n_pre > 0 else float(mp[0])
     ax.axhline(base_p, color="0.3", ls="-", lw=0.8, alpha=0.7, label="baseline")
 
-    i_rel_p = _spikelet_local_peak_index(seg_p, sr)
+    i_rel_p = _spikelet_local_peak_index(
+        seg_p, sr, prominence=SPIKELET_MEANTRACE_MIN_PROMINENCE_MV,
+    )
     i_rel_a = _spikelet_local_peak_index(seg_a, sr)
     if i_rel_a is None and len(seg_a):
         i_rel_a = int(np.argmax(seg_a))
