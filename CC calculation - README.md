@@ -222,7 +222,7 @@ Gj [nS] = (CC / (1 − CC)) × (1000 / Rin_passive [MΩ])
 - **ch0→ch2:** uses **Rin_ch2** (passive cell in that direction)
 - **ch2→ch0:** uses **Rin_ch0**
 
-Returns `(value, skip_reason)`.
+Returns `(value, skip_reason)`. Requires **0 < CC < 1** and **Rin_passive > 0** (negative Rin from a bad I–V fit would otherwise yield unphysical negative Gj).
 
 ---
 

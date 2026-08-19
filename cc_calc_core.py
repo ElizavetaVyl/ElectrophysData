@@ -719,7 +719,7 @@ def rin_for_channel(
     n_primary = len(voltages)
     if n_primary >= RIN_MIN_POINTS:
         rin, r2 = rin_r2(currents, voltages)
-        if rin is not None:
+        if rin is not None and rin > 0:
             plot.update(
                 mode="abs_linear", rin_mohm=rin, r2=r2,
                 vm_range=f"{RIN_VMIN}:{RIN_VMAX} mV",
@@ -739,7 +739,7 @@ def rin_for_channel(
     n_fb = len(voltages_fb)
     if n_fb >= RIN_MIN_POINTS:
         rin, r2 = rin_r2(currents_fb, voltages_fb)
-        if rin is not None:
+        if rin is not None and rin > 0:
             note = (
                 f"Rin_abs extended ({RIN_VMIN_FALLBACK}...{RIN_VMAX_FALLBACK} mV, "
                 f"{n_fb} points; {sub_note})"
@@ -761,22 +761,23 @@ def rin_for_channel(
     if len(dis) >= 1:
         ratios = [dv / di for di, dv in zip(dis, dvs)]
         rin = round(statistics.mean(ratios) * 1000.0, 3)
-        note = (
-            f"Rin_rel dV/dI ({len(dis)} sweep(s), "
-            f"Vm in [{RIN_VMIN_FALLBACK}, {RIN_VMAX_FALLBACK}] mV; {sub_note})"
-        )
-        plot.update(mode="rel_delta", rin_mohm=rin, vm_range=note)
-        return (
-            rin, None, len(dis), None,
-            f"{RIN_VMIN_FALLBACK}:{RIN_VMAX_FALLBACK} mV", note, plot,
-        )
+        if rin > 0:
+            note = (
+                f"Rin_rel dV/dI ({len(dis)} sweep(s), "
+                f"Vm in [{RIN_VMIN_FALLBACK}, {RIN_VMAX_FALLBACK}] mV; {sub_note})"
+            )
+            plot.update(mode="rel_delta", rin_mohm=rin, vm_range=note)
+            return (
+                rin, None, len(dis), None,
+                f"{RIN_VMIN_FALLBACK}:{RIN_VMAX_FALLBACK} mV", note, plot,
+            )
 
     return (
         None, None, max(n_primary, n_fb),
         (
-            f"no Rin_abs (>= {RIN_MIN_POINTS} points in "
+            f"no positive Rin_abs (>= {RIN_MIN_POINTS} points in "
             f"[{RIN_VMIN},{RIN_VMAX}] or [{RIN_VMIN_FALLBACK},{RIN_VMAX_FALLBACK}] mV) "
-            f"and no Rin_rel (>=1 sweep in [{RIN_VMIN_FALLBACK},{RIN_VMAX_FALLBACK}] mV) "
+            f"and no positive Rin_rel (>=1 sweep in [{RIN_VMIN_FALLBACK},{RIN_VMAX_FALLBACK}] mV) "
             f"among {sub_note} ({stim_label})"
         ),
         None, None, plot,
@@ -3711,7 +3712,7 @@ def gj_nS(cc, rin_passive_MOhm):
 
     Rin_passive: for Gj12 (ch0→ch2) use Rin of cell 2 (ch2);
                  for Gj21 (ch2→ch0) use Rin of cell 1 (ch0).
-    Requires 0 < CC < 1.
+    Requires 0 < CC < 1 and Rin_passive > 0.
     """
     if cc is None or rin_passive_MOhm is None or rin_passive_MOhm == 0:
         return None, "missing CC or Rin"
@@ -3719,6 +3720,8 @@ def gj_nS(cc, rin_passive_MOhm):
         return None, f"CC <= 0 (got {cc})"
     if cc >= 1:
         return None, f"CC >= 1 (got {cc})"
+    if rin_passive_MOhm <= 0:
+        return None, f"Rin <= 0 (got {rin_passive_MOhm}); Gj requires positive passive Rin"
     try:
         return round((cc / (1.0 - cc)) * (1000.0 / rin_passive_MOhm), 4), None
     except (ZeroDivisionError, TypeError):
