@@ -52,6 +52,7 @@ Opens an **Analysis blocks** window (it can sit behind Jupyter). Choose which bl
 | `cc` | CC, CC_norm, Gj, Rin, CC plots using **all** sweeps before the first sweep with at least one spike |
 | `cc_last_pos` | CC, CC_norm, Gj, Rin, CC plots using the **last positive** sweep before the first sweep with at least one spike |
 | `cc_most_neg` | CC, CC_norm, Gj, Rin, CC plots using the **most negative** sweep before the first sweep with at least one spike |
+| `cc_neg_pos` | CC, CC_norm, Gj, Rin, CC plots using the **most negative** sweep and the **most positive** sweep before the first sweep with at least one spike |
 | `cell_props` | AP21 ratio, firing, FWHM, V_rest, Cell Properties Rin |
 | `tau_cm` | tau, Cm |
 | `spikelets` | spike / spikelet metrics, QC PNGs, folder spikelet plots |
@@ -61,6 +62,7 @@ Each CC block saves its results into a separate output folder under the ABF fold
 - `CC_multi_sweeps/`
 - `CC_last_positive_pre_spike/`
 - `CC_most_negative_pre_spike/`
+- `CC_most_negative_most_positive_pre_spike/`
 
 For each `.abf`:
 
@@ -251,7 +253,7 @@ One Excel row when the **whole file** is skipped (e.g. wrong channel count), wit
 1. Open ABF, read datetime
 2. Check 4 channels
 3. Get epoch sample indices
-4. Run selected analysis blocks (`cc`, `cc_last_pos`, `cc_most_neg`, `cell_props`, `tau_cm`, `spikelets`)
+4. Run selected analysis blocks (`cc`, `cc_last_pos`, `cc_most_neg`, `cc_neg_pos`, `cell_props`, `tau_cm`, `spikelets`)
 5. For CC: choose one sweep-selection mode, then run both directions and compute `CC_norm`, Rin, mean CC, Gj
 6. For cell properties: compute ch0/ch2 fields on the ≥4 AP sweep
 7. For tau/Cm: pick best sweep, export tau/Cm metadata
