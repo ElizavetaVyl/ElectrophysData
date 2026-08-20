@@ -46,7 +46,7 @@ CC_SPIKE_HEIGHT = -10  # mV; AP if find_peaks sees Vm above this
 CC_SPIKE_DISTANCE = 10  # samples; min distance between peaks
 CC_MIN_DELTA_I_PA = 10  # pA; skip CC if |stim current step| smaller
 CC_MIN_DELTA_V_MV = 10  # mV; skip CC if |delta_V_active| (pre-post) is smaller
-CC_SMOOTH_MS = 2.0  # Gaussian σ [ms] before CC pre/post means; stronger than spikelet (0.3); 0 = off
+CC_SMOOTH_MS = 10.0  # Gaussian σ [ms] for CC only (_cc_smooth_signal); does NOT affect spikelets
 
 RIN_VMIN = -80  # mV; primary I–V window (mean Vm in stim epoch)
 RIN_VMAX = -50  # mV
@@ -102,7 +102,7 @@ _SESSION_BLOCKS = None  # filled after the once-per-run chooser window
 # Spikelet coupling (AP2+ on first >=4 AP sweep, else 3, else 2; else AP1 if only 1-spike sweeps)
 SPIKELET_BASELINE_MS = 1.0  # passive mean Vm in [t_start-1ms, t_start); not used as t=0
 SPIKELET_PEAK_MS = 15.0  # search passive peak in [t_start, t_start+15ms]
-SPIKELET_PEAK_SMOOTH_MS = 0.3  # Gaussian σ for local-max search (kills 1-sample jitter)
+SPIKELET_PEAK_SMOOTH_MS = 0.3  # spikelet only (_spikelet_smooth_for_peak); independent from CC_SMOOTH_MS
 SPIKELET_MIN_PROMINENCE_MV = 0.15  # original per-AP scheme: drop after the top
 SPIKELET_MEANTRACE_MIN_PROMINENCE_MV = 0.05  # meantrace: looser drop than 0.15 mV
 SPIKELET_USE_NOISE_GATE = False  # amplitude vs noise; peak shape is separate (prominence)
@@ -3660,10 +3660,12 @@ def _cc_direction_epochs(borders, direction):
 def _cc_block_vpost(abf, block, active_ch, post_start, post_end):
     """Mean Vm in post epoch (active cell) for each row in coupling block."""
     vposts = []
+    sr = float(abf.dataRate)
     for r in block:
         sn = r["sweep"]
         abf.setSweep(sweepNumber=sn, channel=active_ch)
-        vposts.append(float(statistics.mean(abf.sweepY[post_start:post_end])))
+        y = _cc_smooth_signal(abf.sweepY, sr)
+        vposts.append(float(statistics.mean(y[post_start:post_end])))
     return vposts
 
 
