@@ -95,7 +95,7 @@ Tunable constants:
 | `CC_SPIKE_HEIGHT` | mV; `find_peaks` height threshold for APs |
 | `CC_SPIKE_DISTANCE` | samples; minimum distance between peaks |
 | `CC_MIN_DELTA_I_PA` | pA; skip CC if \|ΔI\| on stim channel is smaller |
-| `CC_SMOOTH_MS` | ms; Gaussian σ for **CC only** (default **10.0**). Does not affect spikelets |
+| `CC_SMOOTH_MS` | ms; Gaussian σ for **CC only** (default **7.0**). Does not affect spikelets |
 | `SPIKELET_PEAK_SMOOTH_MS` | ms; spikelet peak search only (default **0.3**) |
 | `RIN_VMIN`, `RIN_VMAX` | Primary Vm window for I–V points (−80…−50 mV) |
 | `RIN_VMIN_FALLBACK`, `RIN_VMAX_FALLBACK` | Wider window if too few points (−95…−50 mV) |
@@ -275,15 +275,17 @@ Returns:
 
 ## Excel sheets
 
-The batch export writes **five** sheets.
+The batch export writes **seven** sheets.
 
 ### `Summary_short` — compact overview
 
 Short user-facing cut from `File_summary` plus selected spikelet sweeps.
 
+**CC12 / CC21 here follow whichever CC mode checkbox you selected for this run** (e.g. all pre-spike sweeps, last positive only, most negative only, or mean of neg+pos). They are **not** fixed to the neg/pos pair — see `Summary_neg_pos` for that.
+
 Includes:
 
-- file / recording time / `analysis_blocks`
+- file / recording time / `analysis_blocks` / `CC_selection_mode`
 - main CC, Gj, Rin, cell properties, tau/Cm
 - `props_sweep_*`, `inj_current_pA_*`
 - `tau_sweep_*`, `delta_V_mV_*`, `V_post_min_mV_*`
@@ -298,6 +300,17 @@ Column fill colors in Excel:
 - `near_mode_vm_*` = another color
 
 Use this sheet for quick reading. Full detail stays in the other sheets.
+
+### `Summary_neg_pos` — compact overview for neg + pos CC
+
+Same layout idea as `Summary_short` (one row per file, Rin / cell props / tau / spikelet blocks), but CC columns are **always** from the **most negative** and **most positive** pre-spike sweeps — independent of which CC mode was selected for the main run.
+
+Per direction (`12` = ch0→ch2, `21` = ch2→ch0):
+
+- `most_neg_{12|21}_*` — sweep, CC, Gj, ΔI, ΔV active/passive, Vm_active_stim, skip reasons
+- `most_pos_{12|21}_*` — same for the most positive pre-spike sweep
+
+Also includes `CC_selection_mode` / `CC_selection_note` for the neg+pos rule and `CC_smooth_ms`.
 
 ### `File_summary` — one row per file
 

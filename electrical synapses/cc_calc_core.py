@@ -5424,11 +5424,16 @@ def format_excel_header_wrap(workbook, header_row=1, min_width=12, max_width=18)
             letter = get_column_letter(col)
             width = min(max_width, max(min_width, len(text) + 1))
             ws.column_dimensions[letter].width = width
-            if ws.title == "Summary_short":
+            if ws.title in ("Summary_short", "Summary_neg_pos"):
                 if text.startswith("primary_"):
                     for row_i in range(1, ws.max_row + 1):
                         ws.cell(row_i, col).fill = fill_primary
                 elif text.startswith("near_mode_vm_"):
+                    for row_i in range(1, ws.max_row + 1):
+                        ws.cell(row_i, col).fill = fill_mode
+                elif ws.title == "Summary_neg_pos" and (
+                    text.startswith("most_neg_") or text.startswith("most_pos_")
+                ):
                     for row_i in range(1, ws.max_row + 1):
                         ws.cell(row_i, col).fill = fill_mode
             chars_per_line = max(8, int(width))
@@ -5530,6 +5535,131 @@ def _compact_excel_summary_rows(summary_rows, spikelet_sweep_rows=None, spikelet
     return rows
 
 
+def _cc_neg_pos_row_pick(file_rows, direction, role):
+    for r in file_rows or []:
+        if r.get("direction") == direction and r.get("sweep_role") == role:
+            return r
+    return None
+
+
+def _add_cc_neg_pos_summary_block(dst, prefix, picked):
+    dst[f"{prefix}_sweep"] = picked.get("sweep") if picked else None
+    dst[f"{prefix}_CC"] = picked.get("CC") if picked else None
+    dst[f"{prefix}_Gj_nS"] = picked.get("Gj_nS") if picked else None
+    dst[f"{prefix}_cur_step_pA"] = picked.get("cur_step_pA") if picked else None
+    dst[f"{prefix}_delta_V_active_mV"] = picked.get("delta_V_active_mV") if picked else None
+    dst[f"{prefix}_delta_V_passive_mV"] = picked.get("delta_V_passive_mV") if picked else None
+    dst[f"{prefix}_Vm_active_stim_mV"] = picked.get("Vm_active_stim_mV") if picked else None
+    dst[f"{prefix}_CC_skip_reason"] = picked.get("CC_skip_reason") if picked else None
+    dst[f"{prefix}_Gj_skip_reason"] = picked.get("Gj_skip_reason") if picked else None
+
+
+def _compact_cc_neg_pos_summary_rows(
+    cc_neg_pos_rows,
+    summary_rows=None,
+    spikelet_sweep_rows=None,
+    spikelet_rows=None,
+):
+    """
+    Summary_short-style table with CC/Gj/delta-V from most negative and most positive
+    pre-spike sweeps (always from cc_neg_pos_detail_rows, not from the run's CC mode).
+    """
+    def _add_spikelet_block(dst, prefix, picked, tag):
+        dst[f"{prefix}_{tag}_sweep"] = picked.get("sweep") if picked else None
+        dst[f"{prefix}_{tag}_baseline_mV"] = _sweep_row_metric(picked, "baseline_mV")
+        dst[f"{prefix}_{tag}_amp_spikelet_mV"] = (
+            _finite_number(picked.get("meantrace10_amp_spikelet_mV")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_delay_peak_ms"] = (
+            _finite_number(picked.get("meantrace10_delay_ms")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_amp_ratio"] = (
+            _finite_number(picked.get("meantrace10_amp_ratio")) if picked else None
+        )
+        dst[f"{prefix}_{tag}_detected"] = picked.get("meantrace10_detected") if picked else None
+        dst[f"{prefix}_{tag}_skip_reason"] = picked.get("meantrace10_skip_reason") if picked else None
+
+    summary_by_file = {src.get("file"): src for src in (summary_rows or [])}
+    neg_pos_by_file = {}
+    for r in cc_neg_pos_rows or []:
+        neg_pos_by_file.setdefault(r.get("file"), []).append(r)
+
+    file_names = []
+    seen = set()
+    for src in summary_rows or []:
+        fname = src.get("file")
+        if fname and fname not in seen:
+            seen.add(fname)
+            file_names.append(fname)
+    for fname in neg_pos_by_file:
+        if fname and fname not in seen:
+            seen.add(fname)
+            file_names.append(fname)
+
+    mode_vm = spikelet_baseline_mode_vm(spikelet_sweep_rows, ap_rows=spikelet_rows)
+    rows = []
+    for fname in file_names:
+        src = summary_by_file.get(fname, {})
+        file_np = neg_pos_by_file.get(fname, [])
+        rec_dt = src.get("recording_datetime")
+        if rec_dt is None and file_np:
+            rec_dt = file_np[0].get("recording_datetime")
+        smooth_ms = None
+        for r in file_np:
+            if r.get("CC_smooth_ms") is not None:
+                smooth_ms = r.get("CC_smooth_ms")
+                break
+        row = {
+            "file": fname,
+            "recording_datetime": rec_dt,
+            "file_skip_reason": src.get("file_skip_reason"),
+            "analysis_blocks": src.get("analysis_blocks"),
+            "CC_selection_mode": CC_MODE_SELECTION_LABELS.get("cc_neg_pos"),
+            "CC_selection_note": CC_MODE_SELECTION_NOTES.get("cc_neg_pos"),
+            "CC_smooth_ms": smooth_ms if smooth_ms is not None else CC_SMOOTH_MS,
+            "Rin_ch0_MOhm": src.get("Rin_ch0_MOhm", src.get("Rin1_MOhm")),
+            "Rin_ch2_MOhm": src.get("Rin_ch2_MOhm", src.get("Rin2_MOhm")),
+            "V_rest_mV_ch0": src.get("V_rest_mV_ch0"),
+            "V_rest_mV_ch2": src.get("V_rest_mV_ch2"),
+            "AP21_ratio_ch0": src.get("AP21_ratio_ch0"),
+            "AP21_ratio_ch2": src.get("AP21_ratio_ch2"),
+            "FWHM_ms_ch0": src.get("FWHM_ms_ch0"),
+            "FWHM_ms_ch2": src.get("FWHM_ms_ch2"),
+            "props_sweep_ch0": src.get("props_sweep_ch0"),
+            "props_sweep_ch2": src.get("props_sweep_ch2"),
+            "inj_current_pA_ch0": src.get("inj_current_pA_ch0"),
+            "inj_current_pA_ch2": src.get("inj_current_pA_ch2"),
+            "tau_ms_ch0": src.get("tau_ms_ch0"),
+            "tau_ms_ch2": src.get("tau_ms_ch2"),
+            "Cm_pF_ch0": src.get("Cm_pF_ch0"),
+            "Cm_pF_ch2": src.get("Cm_pF_ch2"),
+            "tau_sweep_ch0": src.get("tau_sweep_ch0"),
+            "tau_sweep_ch2": src.get("tau_sweep_ch2"),
+            "delta_V_mV_ch0": src.get("delta_V_mV_ch0"),
+            "delta_V_mV_ch2": src.get("delta_V_mV_ch2"),
+            "V_post_min_mV_ch0": src.get("V_post_min_mV_ch0"),
+            "V_post_min_mV_ch2": src.get("V_post_min_mV_ch2"),
+            "mode_spikelet_baseline_mV": mode_vm,
+        }
+        for direction, tag in (("ch0->ch2", "12"), ("ch2->ch0", "21")):
+            _add_cc_neg_pos_summary_block(
+                row, f"most_neg_{tag}",
+                _cc_neg_pos_row_pick(file_np, direction, "most_negative"),
+            )
+            _add_cc_neg_pos_summary_block(
+                row, f"most_pos_{tag}",
+                _cc_neg_pos_row_pick(file_np, direction, "most_positive"),
+            )
+            primary = _primary_sweep_row(spikelet_sweep_rows, fname, direction)
+            nearest = _sweep_closest_to_vm(
+                spikelet_sweep_rows, fname, direction, mode_vm, ap_rows=spikelet_rows,
+            )
+            _add_spikelet_block(row, "primary", primary, tag)
+            _add_spikelet_block(row, "near_mode_vm", nearest, tag)
+        rows.append(row)
+    return rows
+
+
 def save_batch_excel(
     path,
     all_rows,
@@ -5549,8 +5679,15 @@ def save_batch_excel(
         spikelet_rows=spikelet_rows or [],
     )
     neg_pos_rows = cc_neg_pos_rows or []
+    neg_pos_summary_rows = _compact_cc_neg_pos_summary_rows(
+        neg_pos_rows,
+        summary_rows=summary_rows or [],
+        spikelet_sweep_rows=spikelet_sweep_rows or [],
+        spikelet_rows=spikelet_rows or [],
+    )
     sheets = (
         ("Summary_short", compact_rows),
+        ("Summary_neg_pos", neg_pos_summary_rows),
         ("File_summary", summary_rows or []),
         ("All_data", all_rows or []),
         ("CC_neg_pos", neg_pos_rows),
