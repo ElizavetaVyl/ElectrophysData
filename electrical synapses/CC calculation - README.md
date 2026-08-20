@@ -64,6 +64,8 @@ Each CC block saves its results into a separate output folder under the ABF fold
 - `CC_most_negative_pre_spike/`
 - `CC_most_negative_most_positive_pre_spike/`
 
+You can select **several CC blocks in one run**. The notebook then loops all selected modes and writes **Excel + CC folder plots** into each mode folder so you can compare graphs side by side. Cell properties / tau / spikelets still run once on the first selected CC mode.
+
 For each `.abf`:
 
 1. Calls `analyze_abf_file(...)`
@@ -93,6 +95,7 @@ Tunable constants:
 | `CC_SPIKE_HEIGHT` | mV; `find_peaks` height threshold for APs |
 | `CC_SPIKE_DISTANCE` | samples; minimum distance between peaks |
 | `CC_MIN_DELTA_I_PA` | pA; skip CC if \|ΔI\| on stim channel is smaller |
+| `CC_SMOOTH_MS` | ms; Gaussian σ applied to Vm/I before CC pre/post means (0 = off) |
 | `RIN_VMIN`, `RIN_VMAX` | Primary Vm window for I–V points (−80…−50 mV) |
 | `RIN_VMIN_FALLBACK`, `RIN_VMAX_FALLBACK` | Wider window if too few points (−95…−50 mV) |
 | `RIN_MIN_POINTS` | Minimum sweeps for Rin linear fit (≥ 2) |

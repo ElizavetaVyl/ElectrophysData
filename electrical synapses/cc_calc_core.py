@@ -46,6 +46,7 @@ CC_SPIKE_HEIGHT = -10  # mV; AP if find_peaks sees Vm above this
 CC_SPIKE_DISTANCE = 10  # samples; min distance between peaks
 CC_MIN_DELTA_I_PA = 10  # pA; skip CC if |stim current step| smaller
 CC_MIN_DELTA_V_MV = 10  # mV; skip CC if |delta_V_active| (pre-post) is smaller
+CC_SMOOTH_MS = 0.3  # Gaussian σ [ms] applied to Vm/I before CC pre/post means; 0 = off
 
 RIN_VMIN = -80  # mV; primary I–V window (mean Vm in stim epoch)
 RIN_VMAX = -50  # mV
@@ -536,9 +537,23 @@ def ensure_analysis_blocks(blocks=None, force_ask=False):
     return _SESSION_BLOCKS
 
 
-def mean_delta_voltage(sweep_y, pre_start, pre_end, post_start, post_end):
-    pre_seg = sweep_y[pre_start:pre_end]
-    post_seg = sweep_y[post_start:post_end]
+def _cc_smooth_signal(y, sr, smooth_ms=None):
+    """Light Gaussian smooth for CC mean pre/post windows (not for spike QC)."""
+    if smooth_ms is None:
+        smooth_ms = CC_SMOOTH_MS
+    y_arr = np.asarray(y, dtype=float)
+    if smooth_ms <= 0 or y_arr.size < 5 or sr in (None, 0):
+        return y_arr
+    sigma = float(smooth_ms) * float(sr) / 1000.0
+    if sigma <= 0:
+        return y_arr
+    return gaussian_filter1d(y_arr, sigma=sigma, mode="nearest")
+
+
+def mean_delta_voltage(sweep_y, pre_start, pre_end, post_start, post_end, sr=None, smooth_ms=None):
+    y = _cc_smooth_signal(sweep_y, sr, smooth_ms=smooth_ms) if sr is not None else np.asarray(sweep_y, dtype=float)
+    pre_seg = y[pre_start:pre_end]
+    post_seg = y[post_start:post_end]
     if len(pre_seg) == 0 or len(post_seg) == 0:
         raise ValueError(
             f"empty epoch window (pre {pre_start}:{pre_end}, post {post_start}:{post_end})"
@@ -588,10 +603,12 @@ def _cc_direction_step_map(
 ):
     """Map sweep -> delta_I [pA] for one CC direction."""
     out = {}
+    sr = float(abf.dataRate)
     for sn in sweeps:
         abf.setSweep(sweepNumber=sn, channel=current_ch)
-        pre = float(statistics.mean(abf.sweepY[pre_start:pre_end]))
-        post = float(statistics.mean(abf.sweepY[post_start:post_end]))
+        y = _cc_smooth_signal(abf.sweepY, sr)
+        pre = float(statistics.mean(y[pre_start:pre_end]))
+        post = float(statistics.mean(y[post_start:post_end]))
         out[sn] = post - pre
     return out
 
@@ -679,14 +696,16 @@ def cc_skip_reason(delta_i, delta_v_active, passive_sweep_y, pre_start, pre_end,
 def coupling_block(abf, sweeps, active_ch, passive_ch, cur_ch, windows):
     s10, e10, s11, e11 = windows
     rows = []
+    sr = float(abf.dataRate)
     for sn in sweeps:
         abf.setSweep(sweepNumber=sn, channel=active_ch)
-        dva = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11)
-        vm_stim = float(statistics.mean(abf.sweepY[s11:e11]))
+        dva = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11, sr=sr)
+        y_a = _cc_smooth_signal(abf.sweepY, sr)
+        vm_stim = float(statistics.mean(y_a[s11:e11]))
         abf.setSweep(sweepNumber=sn, channel=cur_ch)
-        di = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11)
+        di = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11, sr=sr)
         abf.setSweep(sweepNumber=sn, channel=passive_ch)
-        dvp = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11)
+        dvp = mean_delta_voltage(abf.sweepY, s10, e10, s11, e11, sr=sr)
         reason = cc_skip_reason(di, dva, abf.sweepY, s10, e10, s11, e11)
         cc = None if reason else round(dvp / dva, 4)
         rows.append({
