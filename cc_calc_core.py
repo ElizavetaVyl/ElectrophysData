@@ -46,7 +46,7 @@ CC_SPIKE_HEIGHT = -10  # mV; AP if find_peaks sees Vm above this
 CC_SPIKE_DISTANCE = 10  # samples; min distance between peaks
 CC_MIN_DELTA_I_PA = 10  # pA; skip CC if |stim current step| smaller
 CC_MIN_DELTA_V_MV = 10  # mV; skip CC if |delta_V_active| (pre-post) is smaller
-CC_SMOOTH_MS = 10.0  # Gaussian σ [ms] for CC only (_cc_smooth_signal); does NOT affect spikelets
+CC_SMOOTH_MS = 7.0  # Gaussian σ [ms] for CC only (_cc_smooth_signal); does NOT affect spikelets
 
 RIN_VMIN = -80  # mV; primary I–V window (mean Vm in stim epoch)
 RIN_VMAX = -50  # mV

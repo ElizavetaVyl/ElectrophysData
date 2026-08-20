@@ -95,7 +95,7 @@ Tunable constants:
 | `CC_SPIKE_HEIGHT` | mV; `find_peaks` height threshold for APs |
 | `CC_SPIKE_DISTANCE` | samples; minimum distance between peaks |
 | `CC_MIN_DELTA_I_PA` | pA; skip CC if \|ΔI\| on stim channel is smaller |
-| `CC_SMOOTH_MS` | ms; Gaussian σ for **CC only** (default **10.0**). Does not affect spikelets |
+| `CC_SMOOTH_MS` | ms; Gaussian σ for **CC only** (default **7.0**). Does not affect spikelets |
 | `SPIKELET_PEAK_SMOOTH_MS` | ms; spikelet peak search only (default **0.3**) |
 | `RIN_VMIN`, `RIN_VMAX` | Primary Vm window for I–V points (−80…−50 mV) |
 | `RIN_VMIN_FALLBACK`, `RIN_VMAX_FALLBACK` | Wider window if too few points (−95…−50 mV) |
