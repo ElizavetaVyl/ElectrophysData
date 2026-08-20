@@ -1,18 +1,18 @@
-CC_MODE_BLOCK_KEYS = ("cc", "cc_neg_last_pos", "cc_neg_pos")
+CC_MODE_BLOCK_KEYS = ("cc", "cc_last_pos", "cc_most_neg")
 CC_MODE_SELECTION_LABELS = {
     "cc": "all_pre_spike",
-    "cc_neg_last_pos": "most_negative_and_last_positive_pre_spike",
-    "cc_neg_pos": "most_negative_and_most_positive_pre_spike",
+    "cc_last_pos": "last_positive_pre_spike",
+    "cc_most_neg": "most_negative_pre_spike",
 }
 CC_MODE_SELECTION_NOTES = {
     "cc": "all sweeps before the first sweep with at least one spike",
-    "cc_neg_last_pos": "most negative sweep and last positive sweep before the first sweep with at least one spike",
-    "cc_neg_pos": "most negative sweep and most positive sweep before the first sweep with at least one spike",
+    "cc_last_pos": "last positive sweep before the first sweep with at least one spike",
+    "cc_most_neg": "most negative sweep before the first sweep with at least one spike",
 }
 CC_MODE_RUN_DIRS = {
     "cc": "CC_multi_sweeps",
-    "cc_neg_last_pos": "CC_most_negative_last_positive_pre_spike",
-    "cc_neg_pos": "CC_most_negative_most_positive_pre_spike",
+    "cc_last_pos": "CC_last_positive_pre_spike",
+    "cc_most_neg": "CC_most_negative_pre_spike",
 }
 
 """Core logic for coupling coefficient batch analysis (imported by notebook).
@@ -338,8 +338,8 @@ def resolve_analysis_blocks(blocks=None):
     """Normalized analysis flags. At least one stays on."""
     out = {
         "cc": True,
-        "cc_neg_last_pos": False,
-        "cc_neg_pos": False,
+        "cc_last_pos": False,
+        "cc_most_neg": False,
         "cell_props": True,
         "tau_cm": True,
         "spikelets": True,
@@ -404,7 +404,7 @@ def ask_analysis_blocks(initial=None):
         root,
         text=(
             "Uncheck a block to skip it (faster).\n"
-            "Choose one CC block: multi-sweeps, most negative + last positive, or most negative + most positive.\n"
+            "Choose one CC block: multi-sweeps, last positive pre-spike, or most negative pre-spike.\n"
             "Spike/spikelet AP start uses inflections (peaks + d²V) inside that block.\n"
             "The Cell properties block is not required for spikelets."
         ),
@@ -415,8 +415,8 @@ def ask_analysis_blocks(initial=None):
     vars_ = {}
     labels = (
         ("cc", "CC / Gj / Rin   (all sweeps before first spike)"),
-        ("cc_neg_last_pos", "CC / Gj / Rin   (most negative + last positive before first spike)"),
-        ("cc_neg_pos", "CC / Gj / Rin   (most negative + most positive before first spike)"),
+        ("cc_last_pos", "CC / Gj / Rin   (last positive sweep before first spike)"),
+        ("cc_most_neg", "CC / Gj / Rin   (most negative sweep before first spike)"),
         ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
         ("tau_cm", "Tau / Cm"),
         ("spikelets", "Spike / spikelet   (QC + amplitude/delays vs time and vs Vm)"),
@@ -462,14 +462,14 @@ def ask_analysis_blocks(initial=None):
 def _ask_analysis_blocks_console():
     """Fallback if the Tk window cannot open."""
     print("Tk window did not open. Press Enter for all blocks,")
-    print("or type a subset: cc, cc_neg_last_pos, cc_neg_pos, cell_props, tau_cm, spikelets")
+    print("or type a subset: cc, cc_last_pos, cc_most_neg, cell_props, tau_cm, spikelets")
     try:
         raw = input("Blocks: ").strip().lower()
     except Exception:
         raw = ""
     if not raw:
         return resolve_analysis_blocks({
-            "cc": True, "cc_neg_last_pos": False, "cc_neg_pos": False,
+            "cc": True, "cc_last_pos": False, "cc_most_neg": False,
             "cell_props": True, "tau_cm": True, "spikelets": True,
         })
     wanted = {p.strip().replace("-", "_") for p in raw.replace(";", ",").split(",") if p.strip()}
@@ -477,14 +477,14 @@ def _ask_analysis_blocks_console():
         "spikelet": "spikelets", "spikelets": "spikelets",
         "cell": "cell_props",
         "cc_multi": "cc",
-        "ccneglastpos": "cc_neg_last_pos",
-        "ccnegpos": "cc_neg_pos",
+        "cclastpos": "cc_last_pos",
+        "ccmostneg": "cc_most_neg",
     }
     wanted = {aliases.get(x, x) for x in wanted}
     return resolve_analysis_blocks({
         "cc": "cc" in wanted,
-        "cc_neg_last_pos": "cc_neg_last_pos" in wanted,
-        "cc_neg_pos": "cc_neg_pos" in wanted,
+        "cc_last_pos": "cc_last_pos" in wanted,
+        "cc_most_neg": "cc_most_neg" in wanted,
         "cell_props": "cell_props" in wanted,
         "tau_cm": "tau_cm" in wanted,
         "spikelets": "spikelets" in wanted,
@@ -599,20 +599,16 @@ def cc_select_sweeps_direction(
     negative = [sn for sn in indices if step_map.get(sn, 0.0) < 0]
     positive = [sn for sn in indices if step_map.get(sn, 0.0) > 0]
 
-    picks = []
-    if negative:
-        picks.append(min(negative, key=lambda sn: step_map[sn]))
-    elif indices:
-        picks.append(min(indices, key=lambda sn: step_map[sn]))
-
-    if mode_key == "cc_neg_last_pos":
+    if mode_key == "cc_last_pos":
         if positive:
-            picks.append(positive[-1])
-    elif mode_key == "cc_neg_pos":
-        if positive:
-            picks.append(max(positive, key=lambda sn: step_map[sn]))
+            return [positive[-1]]
+        return [max(indices, key=lambda sn: step_map[sn])] if indices else []
+    if mode_key == "cc_most_neg":
+        if negative:
+            return [min(negative, key=lambda sn: step_map[sn])]
+        return [min(indices, key=lambda sn: step_map[sn])] if indices else []
 
-    return sorted(set(picks))
+    return indices
 
 
 # backward-compatible name (single channel, given window)
