@@ -308,6 +308,23 @@ ALL_DATA_SWEEP_KEYS = (
     "Gj_sweep_skip_reason",
 )
 
+CC_NEG_POS_ROW_KEYS = (
+    "file",
+    "recording_datetime",
+    "direction",
+    "sweep_role",
+    "sweep",
+    "cur_step_pA",
+    "delta_V_active_mV",
+    "delta_V_passive_mV",
+    "Vm_active_stim_mV",
+    "CC",
+    "CC_skip_reason",
+    "Gj_nS",
+    "Gj_skip_reason",
+    "CC_smooth_ms",
+)
+
 
 def sweep_only_row(row_dict):
     return {k: row_dict.get(k) for k in ALL_DATA_SWEEP_KEYS}
@@ -650,18 +667,119 @@ def cc_select_sweeps_direction(
             return [min(negative, key=lambda sn: step_map[sn])]
         return [min(indices, key=lambda sn: step_map[sn])] if indices else []
     if mode_key == "cc_neg_pos":
-        picks = []
-        if negative:
-            picks.append(min(negative, key=lambda sn: step_map[sn]))
-        elif indices:
-            picks.append(min(indices, key=lambda sn: step_map[sn]))
-        if positive:
-            picks.append(max(positive, key=lambda sn: step_map[sn]))
-        elif indices:
-            picks.append(max(indices, key=lambda sn: step_map[sn]))
-        return sorted(set(picks))
+        return [sn for _, sn in cc_neg_pos_labeled_sweeps(
+            abf, active_ch, passive_ch, current_ch,
+            pre_start, pre_end, post_start, post_end,
+            indices=indices, step_map=step_map,
+        )]
 
     return indices
+
+
+def cc_neg_pos_labeled_sweeps(
+    abf,
+    active_ch,
+    passive_ch,
+    current_ch,
+    pre_start,
+    pre_end,
+    post_start,
+    post_end,
+    indices=None,
+    step_map=None,
+    height=CC_SPIKE_HEIGHT,
+    distance=CC_SPIKE_DISTANCE,
+):
+    """
+    Most negative and most positive pre-spike sweeps for one CC direction.
+    Returns [(role, sweep), ...] with roles 'most_negative' / 'most_positive'.
+    """
+    if indices is None:
+        indices = cc_sweep_indices_direction(
+            abf, active_ch, passive_ch, pre_start, pre_end, post_start, post_end,
+            height=height, distance=distance,
+        )
+    if not indices:
+        return []
+    if step_map is None:
+        step_map = _cc_direction_step_map(
+            abf, indices, current_ch, pre_start, pre_end, post_start, post_end,
+        )
+    negative = [sn for sn in indices if step_map.get(sn, 0.0) < 0]
+    positive = [sn for sn in indices if step_map.get(sn, 0.0) > 0]
+    picks = []
+    if negative:
+        picks.append(("most_negative", min(negative, key=lambda sn: step_map[sn])))
+    elif indices:
+        picks.append(("most_negative", min(indices, key=lambda sn: step_map[sn])))
+    if positive:
+        picks.append(("most_positive", max(positive, key=lambda sn: step_map[sn])))
+    elif indices:
+        picks.append(("most_positive", max(indices, key=lambda sn: step_map[sn])))
+    seen = set()
+    out = []
+    for role, sn in picks:
+        if sn in seen:
+            continue
+        seen.add(sn)
+        out.append((role, sn))
+    return out
+
+
+def cc_neg_pos_detail_rows(abf, name, rec_dt, rin_ch0=None, rin_ch2=None, borders=None):
+    """
+    CC and delta-V for most negative / most positive pre-spike sweeps (both directions).
+    Delta-V uses CC_SMOOTH_MS Gaussian smoothing (same as main CC pipeline).
+    """
+    if borders is None:
+        borders = time_period_borders(abf.dataRate)
+    b = borders
+    w0 = (b["start10"], b["end10"], b["start11"], b["end11"])
+    w2 = (b["start20"], b["end20"], b["start21"], b["end21"])
+    directions = (
+        ("ch0->ch2", 0, 2, 1, w0, b["start10"], b["end10"], b["start11"], b["end11"], rin_ch2),
+        ("ch2->ch0", 2, 0, 3, w2, b["start20"], b["end20"], b["start21"], b["end21"], rin_ch0),
+    )
+    rows = []
+    for direction, active_ch, passive_ch, cur_ch, windows, ps, pe, pos, poe, rin_passive in directions:
+        labeled = cc_neg_pos_labeled_sweeps(
+            abf, active_ch, passive_ch, cur_ch, ps, pe, pos, poe,
+        )
+        if not labeled:
+            rows.append({
+                k: None for k in CC_NEG_POS_ROW_KEYS
+            } | {
+                "file": name,
+                "recording_datetime": rec_dt,
+                "direction": direction,
+                "CC_skip_reason": "no subthreshold sweeps before first spike",
+                "CC_smooth_ms": CC_SMOOTH_MS,
+            })
+            continue
+        for role, sn in labeled:
+            block = coupling_block(abf, [sn], active_ch, passive_ch, cur_ch, windows)
+            r = block[0] if block else {}
+            gj, gj_skip = (
+                gj_nS(r.get("CC"), rin_passive)
+                if rin_passive is not None else (None, "Rin not available")
+            )
+            rows.append({
+                "file": name,
+                "recording_datetime": rec_dt,
+                "direction": direction,
+                "sweep_role": role,
+                "sweep": r.get("sweep", sn),
+                "cur_step_pA": r.get("cur_step_pA"),
+                "delta_V_active_mV": r.get("delta_V_active_mV"),
+                "delta_V_passive_mV": r.get("delta_V_passive_mV"),
+                "Vm_active_stim_mV": r.get("Vm_active_stim_mV"),
+                "CC": r.get("CC"),
+                "CC_skip_reason": r.get("CC_skip_reason"),
+                "Gj_nS": gj,
+                "Gj_skip_reason": gj_skip,
+                "CC_smooth_ms": CC_SMOOTH_MS,
+            })
+    return rows
 
 
 # backward-compatible name (single channel, given window)
@@ -5416,6 +5534,7 @@ def save_batch_excel(
     summary_rows,
     spikelet_rows=None,
     spikelet_sweep_rows=None,
+    cc_neg_pos_rows=None,
 ):
     """Write full sheets plus a compact summary cut for quick reading."""
     import pandas as pd
@@ -5427,10 +5546,12 @@ def save_batch_excel(
         spikelet_sweep_rows=spikelet_sweep_rows or [],
         spikelet_rows=spikelet_rows or [],
     )
+    neg_pos_rows = cc_neg_pos_rows or []
     sheets = (
         ("Summary_short", compact_rows),
         ("File_summary", summary_rows or []),
         ("All_data", all_rows or []),
+        ("CC_neg_pos", neg_pos_rows),
         ("Spikelets", spikelet_rows or []),
         ("Spikelet_sweeps", spikelet_sweep_rows or []),
     )
@@ -5438,7 +5559,12 @@ def save_batch_excel(
     def _write(out_path):
         with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
             for name, rows in sheets:
-                _excel_dataframe(rows).to_excel(writer, sheet_name=name, index=False)
+                if name == "CC_neg_pos" and not rows:
+                    pd.DataFrame(columns=list(CC_NEG_POS_ROW_KEYS)).to_excel(
+                        writer, sheet_name=name, index=False,
+                    )
+                else:
+                    _excel_dataframe(rows).to_excel(writer, sheet_name=name, index=False)
             try:
                 format_excel_header_wrap(writer.book)
             except Exception as exc:
@@ -5469,6 +5595,7 @@ def save_folder_cc_mode_outputs(
     summary_rows,
     spikelet_rows=None,
     spikelet_sweep_rows=None,
+    cc_neg_pos_rows=None,
 ):
     """Excel + folder CC comparison plots for one CC mode run."""
     saved = {"excel": None, "plots": []}
@@ -5483,6 +5610,7 @@ def save_folder_cc_mode_outputs(
             summary_rows,
             spikelet_rows=spikelet_rows or [],
             spikelet_sweep_rows=spikelet_sweep_rows or [],
+            cc_neg_pos_rows=cc_neg_pos_rows,
         )
     except Exception as exc:
         print(f"  Excel write error ({run_root}): {exc}")
@@ -5605,7 +5733,7 @@ def analyze_abf_file(
     filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_plots_dir_path=None,
     blocks=None, abf_obj=None,
 ):
-    """Return (per_sweep_rows, file_summary_row, qc_plot_paths, spikelet_ap_rows, spikelet_sweep_rows)."""
+    """Return (per_sweep_rows, file_summary_row, qc_plot_paths, spikelet_ap_rows, spikelet_sweep_rows, cc_neg_pos_rows)."""
     bsel = resolve_analysis_blocks(
         blocks if blocks is not None else ensure_analysis_blocks()
     )
@@ -5630,6 +5758,7 @@ def analyze_abf_file(
                 file_skip_reason=reason,
             ),
             plot_paths,
+            [],
             [],
             [],
         )
@@ -5886,4 +6015,27 @@ def analyze_abf_file(
             print(f"  CC plots error: {exc}")
             traceback.print_exc()
 
-    return rows, summary_row, plot_paths, spikelet_rows, spikelet_sweep_rows
+    cc_neg_pos_rows = []
+    try:
+        rin_np0, rin_np2 = rin_ch0, rin_ch2
+        if rin_np0 is None or rin_np2 is None:
+            if rin_np0 is None:
+                rin_np0, _, _, _, _, _, _ = rin_for_channel(
+                    abf, 0, 1, b["start10"], b["end10"], b["start11"], b["end11"], b["Rtime_ch0"],
+                )
+            if rin_np2 is None:
+                rin_np2, _, _, _, _, _, _ = rin_for_channel(
+                    abf, 2, 3, b["start20"], b["end20"], b["start21"], b["end21"], b["Rtime_ch2"],
+                )
+        cc_neg_pos_rows = cc_neg_pos_detail_rows(
+            abf, name, rec_dt, rin_ch0=rin_np0, rin_ch2=rin_np2, borders=b,
+        )
+    except Exception as exc:
+        cc_neg_pos_rows = [{
+            "file": name,
+            "recording_datetime": rec_dt,
+            "CC_skip_reason": str(exc),
+            "CC_smooth_ms": CC_SMOOTH_MS,
+        }]
+
+    return rows, summary_row, plot_paths, spikelet_rows, spikelet_sweep_rows, cc_neg_pos_rows

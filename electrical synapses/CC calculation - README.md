@@ -70,7 +70,7 @@ For each `.abf`:
 
 1. Calls `analyze_abf_file(...)`
 2. Appends rows to lists for Excel and folder plots
-3. Writes **five** sheets: `Summary_short`, `File_summary`, `All_data`, `Spikelets`, `Spikelet_sweeps`
+3. Writes **six** sheets: `Summary_short`, `File_summary`, `All_data`, `CC_neg_pos`, `Spikelets`, `Spikelet_sweeps`
 
 Errors on one file do not stop the rest.
 
@@ -319,6 +319,22 @@ One row per **sweep × direction**. Per-sweep CC/Gj columns only:
 - `Gj_sweep_nS`, `Gj_sweep_skip_reason`
 
 File-level metrics (Rin, cell properties, tau/Cm, spikelet summary) are **not** repeated here — see `File_summary`.
+
+### `CC_neg_pos` — most negative / most positive pre-spike sweeps
+
+One row per **file × direction × sweep role** (up to 4 rows per file). Always computed for every successfully opened ABF, independent of which CC mode checkbox is selected for the main run.
+
+| Column | Meaning |
+|--------|---------|
+| `direction` | `ch0->ch2` or `ch2->ch0` |
+| `sweep_role` | `most_negative` or `most_positive` (pre-spike subthreshold sweep by injected current step) |
+| `sweep` | Sweep index used |
+| `cur_step_pA` | ΔI in the stim current channel (smoothed, same as CC) |
+| `delta_V_active_mV`, `delta_V_passive_mV` | Pre−post mean Vm on active and passive cells (**CC_SMOOTH_MS** Gaussian smooth) |
+| `Vm_active_stim_mV` | Mean active Vm in post-stim window |
+| `CC` | `delta_V_passive / delta_V_active` |
+| `Gj_nS` | From this sweep’s CC and passive-cell Rin |
+| `CC_smooth_ms` | Smoothing σ used for delta-V (currently `CC_SMOOTH_MS`) |
 
 ### `Spikelets` vs `Spikelet_sweeps`
 
