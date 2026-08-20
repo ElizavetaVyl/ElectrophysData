@@ -46,7 +46,7 @@ CC_SPIKE_HEIGHT = -10  # mV; AP if find_peaks sees Vm above this
 CC_SPIKE_DISTANCE = 10  # samples; min distance between peaks
 CC_MIN_DELTA_I_PA = 10  # pA; skip CC if |stim current step| smaller
 CC_MIN_DELTA_V_MV = 10  # mV; skip CC if |delta_V_active| (pre-post) is smaller
-CC_SMOOTH_MS = 0.3  # Gaussian σ [ms] applied to Vm/I before CC pre/post means; 0 = off
+CC_SMOOTH_MS = 2.0  # Gaussian σ [ms] before CC pre/post means; stronger than spikelet (0.3); 0 = off
 
 RIN_VMIN = -80  # mV; primary I–V window (mean Vm in stim epoch)
 RIN_VMAX = -50  # mV
@@ -3686,17 +3686,32 @@ def _attach_gj_for_plot(block, rin_passive):
 
 
 def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
-    """Two panels: selected CC sweeps (valid vs skipped). Spike-cut sweeps omitted."""
-    plt = _get_agg_plt()
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=False)
+    """
+    CC QC traces: four panels (active / passive × two directions).
 
-    for ax, block, direction in (
-        (axes[0], block_02, "ch0->ch2"),
-        (axes[1], block_20, "ch2->ch0"),
-    ):
+    Raw Vm is thin; smoothed Vm (CC_SMOOTH_MS) is thick — same smoothing used for CC means.
+    """
+    plt = _get_agg_plt()
+    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=False)
+    sr = float(abf.dataRate)
+    smooth_note = (
+        f"smooth σ={CC_SMOOTH_MS:g} ms"
+        if CC_SMOOTH_MS and CC_SMOOTH_MS > 0 else
+        "smooth OFF"
+    )
+
+    panel_specs = (
+        (axes[0], block_02, "ch0->ch2", "active"),
+        (axes[1], block_02, "ch0->ch2", "passive"),
+        (axes[2], block_20, "ch2->ch0", "active"),
+        (axes[3], block_20, "ch2->ch0", "passive"),
+    )
+
+    for ax, block, direction, role in panel_specs:
         pre_s, pre_e, post_s, post_e, rtime, active_ch, passive_ch, label = (
             _cc_direction_epochs(borders, direction)
         )
+        ch = active_ch if role == "active" else passive_ch
         t_pre0 = abf.sweepX[pre_s]
         t_pre1 = abf.sweepX[min(pre_e, len(abf.sweepX) - 1)]
         t_post0 = abf.sweepX[post_s]
@@ -3705,9 +3720,10 @@ def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
 
         ax.axvspan(t_pre0, t_pre1, color="green", alpha=0.12, label="pre epoch")
         ax.axvspan(t_post0, t_post1, color="blue", alpha=0.12, label="post epoch")
-        ax.axvline(t_rt, color="purple", ls="--", lw=1.5, label=f"Rtime (I sample @{rtime})")
+        ax.axvline(t_rt, color="purple", ls="--", lw=1.2, label=f"Rtime (I @{rtime})")
 
-        plotted_valid = False
+        plotted_raw = False
+        plotted_sm = False
         plotted_skip = False
         view_start = pre_s
         view_end = min(post_e + int(0.1 * abf.dataRate), len(abf.sweepY))
@@ -3716,29 +3732,34 @@ def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
             sn = r["sweep"]
             cc = r["CC"]
             skipped = cc is None
-            color = "0.55" if skipped else "C0"
-            alpha = 0.55 if skipped else 0.85
-            lw = 1.0 if skipped else 1.4
-
-            abf.setSweep(sweepNumber=sn, channel=active_ch)
+            abf.setSweep(sweepNumber=sn, channel=ch)
             t = abf.sweepX[view_start:view_end]
-            y_a = abf.sweepY[view_start:view_end]
-            lbl = None
-            if skipped and not plotted_skip:
-                lbl = "skipped (no CC)"
-                plotted_skip = True
-            elif (not skipped) and not plotted_valid:
-                lbl = "valid CC"
-                plotted_valid = True
-            ax.plot(t, y_a, color=color, alpha=alpha, lw=lw, label=lbl)
+            y_raw = np.asarray(abf.sweepY[view_start:view_end], dtype=float)
+            y_sm = _cc_smooth_signal(abf.sweepY, sr)[view_start:view_end]
 
-            abf.setSweep(sweepNumber=sn, channel=passive_ch)
-            y_p = abf.sweepY[view_start:view_end]
-            ax.plot(t, y_p, color=color, alpha=alpha * 0.7, lw=0.9, ls="--")
+            raw_color = "0.55" if skipped else ("C0" if role == "active" else "C1")
+            sm_color = "0.35" if skipped else ("darkblue" if role == "active" else "darkorange")
+            alpha_raw = 0.45 if skipped else 0.55
+            alpha_sm = 0.7 if skipped else 0.95
+
+            lbl_raw = None
+            lbl_sm = None
+            if skipped and not plotted_skip:
+                lbl_raw = "skipped (raw)"
+                plotted_skip = True
+            elif not skipped:
+                if not plotted_raw:
+                    lbl_raw = "raw"
+                    plotted_raw = True
+                if not plotted_sm:
+                    lbl_sm = f"smoothed ({smooth_note})"
+                    plotted_sm = True
+
+            ax.plot(t, y_raw, color=raw_color, alpha=alpha_raw, lw=0.8, label=lbl_raw)
+            ax.plot(t, y_sm, color=sm_color, alpha=alpha_sm, lw=1.8, label=lbl_sm)
 
             mid = (post_s + post_e) // 2
-            abf.setSweep(sweepNumber=sn, channel=active_ch)
-            y_ann = float(abf.sweepY[mid])
+            y_ann = float(y_sm[mid - view_start]) if mid >= view_start else float(y_sm[0])
             if cc is None:
                 cc_txt = "skip"
             else:
@@ -3746,22 +3767,23 @@ def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
                 gj = r.get("Gj_sweep_nS")
                 if gj is not None:
                     cc_txt += f" Gj={gj:.2f}"
-            ax.annotate(
-                f"s{sn}:{cc_txt}",
-                xy=(abf.sweepX[mid], y_ann),
-                fontsize=7,
-                color=color,
-                alpha=0.9,
-            )
+            if role == "active":
+                ax.annotate(
+                    f"s{sn}:{cc_txt}",
+                    xy=(abf.sweepX[mid], y_ann),
+                    fontsize=7,
+                    color=sm_color,
+                    alpha=0.95,
+                )
 
         ax.set_ylabel("Vm (mV)")
         ax.set_title(
-            f"{stem} — {label}  |  solid=active ch{active_ch}, dashed=passive ch{passive_ch}",
+            f"{stem} — {label}  |  {role} ch{ch}  |  {smooth_note}",
             fontsize=10,
         )
         ax.legend(loc="upper right", fontsize=8)
 
-    axes[1].set_xlabel("Time (s)")
+    axes[-1].set_xlabel("Time (s)")
     fig.tight_layout()
     os.makedirs(plots_dir, exist_ok=True)
     path = os.path.join(plots_dir, f"{stem}_CC_traces.png")

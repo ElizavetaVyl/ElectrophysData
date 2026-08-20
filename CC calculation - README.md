@@ -95,7 +95,7 @@ Tunable constants:
 | `CC_SPIKE_HEIGHT` | mV; `find_peaks` height threshold for APs |
 | `CC_SPIKE_DISTANCE` | samples; minimum distance between peaks |
 | `CC_MIN_DELTA_I_PA` | pA; skip CC if \|ΔI\| on stim channel is smaller |
-| `CC_SMOOTH_MS` | ms; Gaussian σ applied to Vm/I before CC pre/post means (0 = off) |
+| `CC_SMOOTH_MS` | ms; Gaussian σ before CC pre/post means (default **2.0**; 0 = off). Same smooth is shown thick on `*_CC_traces.png` |
 | `RIN_VMIN`, `RIN_VMAX` | Primary Vm window for I–V points (−80…−50 mV) |
 | `RIN_VMIN_FALLBACK`, `RIN_VMAX_FALLBACK` | Wider window if too few points (−95…−50 mV) |
 | `RIN_MIN_POINTS` | Minimum sweeps for Rin linear fit (≥ 2) |
