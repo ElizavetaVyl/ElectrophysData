@@ -4128,6 +4128,33 @@ def _plot_timed(ax, times, values, *args, **kwargs):
     return len(xs)
 
 
+def _annotate_timed_points(ax, times, values, labels, fontsize=7, color="C0", dy=4):
+    """Label finite (time, value) points — e.g. file number on CC-over-time plots."""
+    alt = 0
+    for t, v, lab in zip(times, values, labels):
+        if lab is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(fv):
+            continue
+        yoff = dy if alt % 2 == 0 else -dy - 2
+        alt += 1
+        ax.annotate(
+            str(lab),
+            xy=(t, fv),
+            textcoords="offset points",
+            xytext=(4, yoff),
+            fontsize=fontsize,
+            color=color,
+            alpha=0.92,
+            ha="left",
+            va="bottom" if yoff >= 0 else "top",
+        )
+
+
 def _mark_negative_delay_points(ax, xs, ys, already_labeled=False):
     """Red X on delay < 0 (spikelet event before the AP event)."""
     nx, ny = [], []
@@ -4390,8 +4417,13 @@ def _format_time_axes(axes_flat):
         ax.xaxis.set_major_formatter(ConciseDateFormatter(locator))
 
 
-def _cc_gj_twin_panel(ax, times, cc_vals, gj_vals, cc_label, gj_label, panel_title):
+def _cc_gj_twin_panel(
+    ax, times, cc_vals, gj_vals, cc_label, gj_label, panel_title, file_names=None,
+):
     n_cc = _plot_timed(ax, times, cc_vals, "o-", color="C0", label=cc_label)
+    if n_cc > 0 and file_names:
+        file_labels = [_abf_file_plot_label(f) for f in file_names]
+        _annotate_timed_points(ax, times, cc_vals, file_labels, color="C0", dy=5)
     ax.set_ylabel("CC", color="C0")
     ax.tick_params(axis="y", labelcolor="C0")
     ax2 = ax.twinx()
@@ -4437,12 +4469,14 @@ def save_folder_summary_plot(summary_rows, out_path, title=None):
         [r.get("CC12") for r in rows],
         [r.get("Gj12_nS") for r in rows],
         "CC12", "Gj12", "CC12 / Gj12 (ch0→ch2)",
+        file_names=[r.get("file") for r in rows],
     )
     n += _cc_gj_twin_panel(
         axes[1], times,
         [r.get("CC21") for r in rows],
         [r.get("Gj21_nS") for r in rows],
         "CC21", "Gj21", "CC21 / Gj21 (ch2→ch0)",
+        file_names=[r.get("file") for r in rows],
     )
 
     ax_r = axes[2]
@@ -5055,6 +5089,15 @@ def _abf_file_number(fname):
     stem = os.path.splitext(os.path.basename(str(fname)))[0]
     nums = re.findall(r"\d+", stem)
     return int(nums[-1]) if nums else -1
+
+
+def _abf_file_plot_label(fname):
+    """Short point label for plots: Clampex run number, else ABF stem."""
+    num = _abf_file_number(fname)
+    if num >= 0:
+        return str(num)
+    stem = os.path.splitext(os.path.basename(str(fname or "")))[0]
+    return stem[:14] if stem else "?"
 
 
 def _cc_vm_file_color_map(all_rows, summary_rows=None):
