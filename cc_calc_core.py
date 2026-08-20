@@ -1,3 +1,20 @@
+CC_MODE_BLOCK_KEYS = ("cc", "cc_neg_last_pos", "cc_neg_pos")
+CC_MODE_SELECTION_LABELS = {
+    "cc": "all_pre_spike",
+    "cc_neg_last_pos": "most_negative_and_last_positive_pre_spike",
+    "cc_neg_pos": "most_negative_and_most_positive_pre_spike",
+}
+CC_MODE_SELECTION_NOTES = {
+    "cc": "all sweeps before the first sweep with at least one spike",
+    "cc_neg_last_pos": "most negative sweep and last positive sweep before the first sweep with at least one spike",
+    "cc_neg_pos": "most negative sweep and most positive sweep before the first sweep with at least one spike",
+}
+CC_MODE_RUN_DIRS = {
+    "cc": "CC_multi_sweeps",
+    "cc_neg_last_pos": "CC_most_negative_last_positive_pre_spike",
+    "cc_neg_pos": "CC_most_negative_most_positive_pre_spike",
+}
+
 """Core logic for coupling coefficient batch analysis (imported by notebook).
 
 Notebook: ``CC calculation.ipynb`` (cells 0-3).
@@ -321,7 +338,8 @@ def resolve_analysis_blocks(blocks=None):
     """Normalized analysis flags. At least one stays on."""
     out = {
         "cc": True,
-        "cc_test": False,
+        "cc_neg_last_pos": False,
+        "cc_neg_pos": False,
         "cell_props": True,
         "tau_cm": True,
         "spikelets": True,
@@ -331,11 +349,28 @@ def resolve_analysis_blocks(blocks=None):
         for key in out:
             if key in src:
                 out[key] = bool(src[key])
-    if out["cc_test"]:
-        out["cc"] = False
+    chosen_cc = [key for key in CC_MODE_BLOCK_KEYS if out.get(key)]
+    if len(chosen_cc) > 1:
+        keep = chosen_cc[0]
+        for key in CC_MODE_BLOCK_KEYS:
+            out[key] = (key == keep)
     if not any(out.values()):
         out["spikelets"] = True
     return out
+
+
+def selected_cc_mode(blocks=None):
+    """Return the selected CC block key, or None if no CC mode is enabled."""
+    chosen = resolve_analysis_blocks(blocks)
+    for key in CC_MODE_BLOCK_KEYS:
+        if chosen.get(key):
+            return key
+    return None
+
+
+def cc_mode_run_dir_name(mode_key):
+    """Folder name for one CC mode run."""
+    return CC_MODE_RUN_DIRS.get(mode_key)
 
 
 def ask_analysis_blocks(initial=None):
@@ -369,7 +404,7 @@ def ask_analysis_blocks(initial=None):
         root,
         text=(
             "Uncheck a block to skip it (faster).\n"
-            "CC test only = use just the first and last sweep before the first spike.\n"
+            "Choose one CC block: multi-sweeps, most negative + last positive, or most negative + most positive.\n"
             "Spike/spikelet AP start uses inflections (peaks + d²V) inside that block.\n"
             "The Cell properties block is not required for spikelets."
         ),
@@ -379,8 +414,9 @@ def ask_analysis_blocks(initial=None):
 
     vars_ = {}
     labels = (
-        ("cc", "CC / Gj / Rin   (CC QC plots, CC vs Vm)"),
-        ("cc_test", "CC / Gj / Rin TEST ONLY   (first + last sweep before first spike)"),
+        ("cc", "CC / Gj / Rin   (all sweeps before first spike)"),
+        ("cc_neg_last_pos", "CC / Gj / Rin   (most negative + last positive before first spike)"),
+        ("cc_neg_pos", "CC / Gj / Rin   (most negative + most positive before first spike)"),
         ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
         ("tau_cm", "Tau / Cm"),
         ("spikelets", "Spike / spikelet   (QC + amplitude/delays vs time and vs Vm)"),
@@ -426,24 +462,29 @@ def ask_analysis_blocks(initial=None):
 def _ask_analysis_blocks_console():
     """Fallback if the Tk window cannot open."""
     print("Tk window did not open. Press Enter for all blocks,")
-    print("or type a subset: cc, cc_test, cell_props, tau_cm, spikelets")
+    print("or type a subset: cc, cc_neg_last_pos, cc_neg_pos, cell_props, tau_cm, spikelets")
     try:
         raw = input("Blocks: ").strip().lower()
     except Exception:
         raw = ""
     if not raw:
         return resolve_analysis_blocks({
-            "cc": True, "cc_test": False, "cell_props": True, "tau_cm": True, "spikelets": True,
+            "cc": True, "cc_neg_last_pos": False, "cc_neg_pos": False,
+            "cell_props": True, "tau_cm": True, "spikelets": True,
         })
     wanted = {p.strip().replace("-", "_") for p in raw.replace(";", ",").split(",") if p.strip()}
     aliases = {
         "spikelet": "spikelets", "spikelets": "spikelets",
-        "cell": "cell_props", "cctest": "cc_test",
+        "cell": "cell_props",
+        "cc_multi": "cc",
+        "ccneglastpos": "cc_neg_last_pos",
+        "ccnegpos": "cc_neg_pos",
     }
     wanted = {aliases.get(x, x) for x in wanted}
     return resolve_analysis_blocks({
         "cc": "cc" in wanted,
-        "cc_test": "cc_test" in wanted,
+        "cc_neg_last_pos": "cc_neg_last_pos" in wanted,
+        "cc_neg_pos": "cc_neg_pos" in wanted,
         "cell_props": "cell_props" in wanted,
         "tau_cm": "tau_cm" in wanted,
         "spikelets": "spikelets" in wanted,
@@ -512,27 +553,66 @@ def cc_sweep_indices_direction(
     return indices
 
 
-def cc_test_sweep_indices_direction(
+def _cc_direction_step_map(
     abf,
-    active_ch,
-    passive_ch,
+    sweeps,
+    current_ch,
     pre_start,
     pre_end,
     post_start,
     post_end,
+):
+    """Map sweep -> delta_I [pA] for one CC direction."""
+    out = {}
+    for sn in sweeps:
+        abf.setSweep(sweepNumber=sn, channel=current_ch)
+        pre = float(statistics.mean(abf.sweepY[pre_start:pre_end]))
+        post = float(statistics.mean(abf.sweepY[post_start:post_end]))
+        out[sn] = post - pre
+    return out
+
+
+def cc_select_sweeps_direction(
+    abf,
+    active_ch,
+    passive_ch,
+    current_ch,
+    pre_start,
+    pre_end,
+    post_start,
+    post_end,
+    mode_key="cc",
     height=CC_SPIKE_HEIGHT,
     distance=CC_SPIKE_DISTANCE,
 ):
-    """Test-only CC selection: first subthreshold sweep + last one before first spike."""
+    """Pick sweeps for one CC mode and direction."""
     indices = cc_sweep_indices_direction(
         abf, active_ch, passive_ch, pre_start, pre_end, post_start, post_end,
         height=height, distance=distance,
     )
-    if not indices:
-        return []
-    if len(indices) == 1:
-        return [indices[0]]
-    return [indices[0], indices[-1]]
+    if not indices or mode_key == "cc":
+        return indices
+
+    step_map = _cc_direction_step_map(
+        abf, indices, current_ch, pre_start, pre_end, post_start, post_end,
+    )
+    negative = [sn for sn in indices if step_map.get(sn, 0.0) < 0]
+    positive = [sn for sn in indices if step_map.get(sn, 0.0) > 0]
+
+    picks = []
+    if negative:
+        picks.append(min(negative, key=lambda sn: step_map[sn]))
+    elif indices:
+        picks.append(min(indices, key=lambda sn: step_map[sn]))
+
+    if mode_key == "cc_neg_last_pos":
+        if positive:
+            picks.append(positive[-1])
+    elif mode_key == "cc_neg_pos":
+        if positive:
+            picks.append(max(positive, key=lambda sn: step_map[sn]))
+
+    return sorted(set(picks))
 
 
 # backward-compatible name (single channel, given window)
@@ -5416,13 +5496,10 @@ def analyze_abf_file(
     b = time_period_borders(abf.dataRate)
     w0 = (b["start10"], b["end10"], b["start11"], b["end11"])
     w2 = (b["start20"], b["end20"], b["start21"], b["end21"])
-    cc_enabled = bsel["cc"] or bsel["cc_test"]
-    cc_selection_mode = "first_last_pre_spike_test" if bsel["cc_test"] else "all_pre_spike"
-    cc_selection_note = (
-        "first and last sweep before the first sweep with at least one spike"
-        if bsel["cc_test"] else
-        "all sweeps before the first sweep with at least one spike"
-    )
+    cc_mode = selected_cc_mode(bsel)
+    cc_enabled = cc_mode is not None
+    cc_selection_mode = CC_MODE_SELECTION_LABELS.get(cc_mode)
+    cc_selection_note = CC_MODE_SELECTION_NOTES.get(cc_mode)
 
     sweeps_ch0, sweeps_ch2 = [], []
     block_02, block_20 = [], []
@@ -5435,9 +5512,12 @@ def analyze_abf_file(
     rin_note_0 = rin_note_2 = None
 
     if cc_enabled:
-        picker = cc_test_sweep_indices_direction if bsel["cc_test"] else cc_sweep_indices_direction
-        sweeps_ch0 = picker(abf, 0, 2, b["start10"], b["end10"], b["start11"], b["end11"])
-        sweeps_ch2 = picker(abf, 2, 0, b["start20"], b["end20"], b["start21"], b["end21"])
+        sweeps_ch0 = cc_select_sweeps_direction(
+            abf, 0, 2, 1, b["start10"], b["end10"], b["start11"], b["end11"], mode_key=cc_mode,
+        )
+        sweeps_ch2 = cc_select_sweeps_direction(
+            abf, 2, 0, 3, b["start20"], b["end20"], b["start21"], b["end21"], mode_key=cc_mode,
+        )
         block_02 = coupling_block(abf, sweeps_ch0, 0, 2, 1, w0)
         block_20 = coupling_block(abf, sweeps_ch2, 2, 0, 3, w2)
         for r in block_02:
