@@ -301,6 +301,7 @@ ALL_DATA_SWEEP_KEYS = (
     "delta_V_passive_mV",
     "Vm_active_stim_mV",
     "CC",
+    "",
     "CC_norm",
     "CC_skip_reason",
     "Gj_sweep_nS",
@@ -3762,6 +3763,9 @@ def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
 
             mid = (post_s + post_e) // 2
             y_ann = float(y_sm[mid - view_start]) if mid >= view_start else float(y_sm[0])
+            i_lab = max(len(t) - 1, 0)
+            x_lab = t[i_lab]
+            y_lab = float(y_sm[i_lab]) if len(y_sm) else y_ann
             if cc is None:
                 cc_txt = "skip"
             else:
@@ -3769,14 +3773,20 @@ def _save_cc_traces_plot(abf, borders, block_02, block_20, plots_dir, stem):
                 gj = r.get("Gj_sweep_nS")
                 if gj is not None:
                     cc_txt += f" Gj={gj:.2f}"
+            label_txt = f"s{sn}"
             if role == "active":
-                ax.annotate(
-                    f"s{sn}:{cc_txt}",
-                    xy=(abf.sweepX[mid], y_ann),
-                    fontsize=7,
-                    color=sm_color,
-                    alpha=0.95,
-                )
+                label_txt = f"s{sn}:{cc_txt}"
+            ax.annotate(
+                label_txt,
+                xy=(x_lab, y_lab),
+                textcoords="offset points",
+                xytext=(4, 0 if role == "active" else -2),
+                fontsize=7,
+                color=sm_color,
+                alpha=0.95,
+                ha="left",
+                va="center",
+            )
 
         ax.set_ylabel("Vm (mV)")
         ax.set_title(
