@@ -274,6 +274,7 @@ ALL_DATA_SWEEP_KEYS = (
     "recording_datetime",
     "sweep",
     "direction",
+    "CC_selection_mode",
     "cur_step_pA",
     "delta_V_active_mV",
     "delta_V_passive_mV",
@@ -317,9 +318,10 @@ def recording_datetime_str(abf):
 
 
 def resolve_analysis_blocks(blocks=None):
-    """Normalized {cc, cell_props, tau_cm, spikelets} flags. At least one stays on."""
+    """Normalized analysis flags. At least one stays on."""
     out = {
         "cc": True,
+        "cc_test": False,
         "cell_props": True,
         "tau_cm": True,
         "spikelets": True,
@@ -329,6 +331,8 @@ def resolve_analysis_blocks(blocks=None):
         for key in out:
             if key in src:
                 out[key] = bool(src[key])
+    if out["cc_test"]:
+        out["cc"] = False
     if not any(out.values()):
         out["spikelets"] = True
     return out
@@ -365,6 +369,7 @@ def ask_analysis_blocks(initial=None):
         root,
         text=(
             "Uncheck a block to skip it (faster).\n"
+            "CC test only = use just the first and last sweep before the first spike.\n"
             "Spike/spikelet AP start uses inflections (peaks + d²V) inside that block.\n"
             "The Cell properties block is not required for spikelets."
         ),
@@ -375,6 +380,7 @@ def ask_analysis_blocks(initial=None):
     vars_ = {}
     labels = (
         ("cc", "CC / Gj / Rin   (CC QC plots, CC vs Vm)"),
+        ("cc_test", "CC / Gj / Rin TEST ONLY   (first + last sweep before first spike)"),
         ("cell_props", "Cell properties   (V_rest, firing, AP / I–V QC plots)"),
         ("tau_cm", "Tau / Cm"),
         ("spikelets", "Spike / spikelet   (QC + amplitude/delays vs time and vs Vm)"),
@@ -420,20 +426,24 @@ def ask_analysis_blocks(initial=None):
 def _ask_analysis_blocks_console():
     """Fallback if the Tk window cannot open."""
     print("Tk window did not open. Press Enter for all blocks,")
-    print("or type a subset: cc, cell_props, tau_cm, spikelets")
+    print("or type a subset: cc, cc_test, cell_props, tau_cm, spikelets")
     try:
         raw = input("Blocks: ").strip().lower()
     except Exception:
         raw = ""
     if not raw:
         return resolve_analysis_blocks({
-            "cc": True, "cell_props": True, "tau_cm": True, "spikelets": True,
+            "cc": True, "cc_test": False, "cell_props": True, "tau_cm": True, "spikelets": True,
         })
     wanted = {p.strip().replace("-", "_") for p in raw.replace(";", ",").split(",") if p.strip()}
-    aliases = {"spikelet": "spikelets", "spikelets": "spikelets", "cell": "cell_props"}
+    aliases = {
+        "spikelet": "spikelets", "spikelets": "spikelets",
+        "cell": "cell_props", "cctest": "cc_test",
+    }
     wanted = {aliases.get(x, x) for x in wanted}
     return resolve_analysis_blocks({
         "cc": "cc" in wanted,
+        "cc_test": "cc_test" in wanted,
         "cell_props": "cell_props" in wanted,
         "tau_cm": "tau_cm" in wanted,
         "spikelets": "spikelets" in wanted,
@@ -502,6 +512,29 @@ def cc_sweep_indices_direction(
     return indices
 
 
+def cc_test_sweep_indices_direction(
+    abf,
+    active_ch,
+    passive_ch,
+    pre_start,
+    pre_end,
+    post_start,
+    post_end,
+    height=CC_SPIKE_HEIGHT,
+    distance=CC_SPIKE_DISTANCE,
+):
+    """Test-only CC selection: first subthreshold sweep + last one before first spike."""
+    indices = cc_sweep_indices_direction(
+        abf, active_ch, passive_ch, pre_start, pre_end, post_start, post_end,
+        height=height, distance=distance,
+    )
+    if not indices:
+        return []
+    if len(indices) == 1:
+        return [indices[0]]
+    return [indices[0], indices[-1]]
+
+
 # backward-compatible name (single channel, given window)
 def cc_sweep_indices(abf, channel, win_start, win_end, height=CC_SPIKE_HEIGHT, distance=CC_SPIKE_DISTANCE):
     indices = []
@@ -547,6 +580,7 @@ def coupling_block(abf, sweeps, active_ch, passive_ch, cur_ch, windows):
         cc = None if reason else round(dvp / dva, 4)
         rows.append({
             "sweep": sn,
+            "CC_selection_mode": None,
             "cur_step_pA": round(di, 1),
             "delta_V_active_mV": round(dva, 4),
             "delta_V_passive_mV": round(dvp, 4),
@@ -3712,7 +3746,7 @@ def gj_nS(cc, rin_passive_MOhm):
 
     Rin_passive: for Gj12 (ch0→ch2) use Rin of cell 2 (ch2);
                  for Gj21 (ch2→ch0) use Rin of cell 1 (ch0).
-    Requires 0 < CC < 1.
+    Requires 0 < CC < 1 and Rin_passive > 0.
     """
     if cc is None or rin_passive_MOhm is None or rin_passive_MOhm == 0:
         return None, "missing CC or Rin"
@@ -5170,6 +5204,8 @@ def _compact_excel_summary_rows(summary_rows, spikelet_sweep_rows=None, spikelet
             "recording_datetime": src.get("recording_datetime"),
             "file_skip_reason": src.get("file_skip_reason"),
             "analysis_blocks": src.get("analysis_blocks"),
+            "CC_selection_mode": src.get("CC_selection_mode"),
+            "CC_selection_note": src.get("CC_selection_note"),
             "CC12": src.get("CC12"),
             "CC21": src.get("CC21"),
             "Gj12_nS": src.get("Gj12_nS"),
@@ -5380,6 +5416,13 @@ def analyze_abf_file(
     b = time_period_borders(abf.dataRate)
     w0 = (b["start10"], b["end10"], b["start11"], b["end11"])
     w2 = (b["start20"], b["end20"], b["start21"], b["end21"])
+    cc_enabled = bsel["cc"] or bsel["cc_test"]
+    cc_selection_mode = "first_last_pre_spike_test" if bsel["cc_test"] else "all_pre_spike"
+    cc_selection_note = (
+        "first and last sweep before the first sweep with at least one spike"
+        if bsel["cc_test"] else
+        "all sweeps before the first sweep with at least one spike"
+    )
 
     sweeps_ch0, sweeps_ch2 = [], []
     block_02, block_20 = [], []
@@ -5391,15 +5434,16 @@ def analyze_abf_file(
     rin_range_0 = rin_range_2 = None
     rin_note_0 = rin_note_2 = None
 
-    if bsel["cc"]:
-        sweeps_ch0 = cc_sweep_indices_direction(
-            abf, 0, 2, b["start10"], b["end10"], b["start11"], b["end11"]
-        )
-        sweeps_ch2 = cc_sweep_indices_direction(
-            abf, 2, 0, b["start20"], b["end20"], b["start21"], b["end21"]
-        )
+    if cc_enabled:
+        picker = cc_test_sweep_indices_direction if bsel["cc_test"] else cc_sweep_indices_direction
+        sweeps_ch0 = picker(abf, 0, 2, b["start10"], b["end10"], b["start11"], b["end11"])
+        sweeps_ch2 = picker(abf, 2, 0, b["start20"], b["end20"], b["start21"], b["end21"])
         block_02 = coupling_block(abf, sweeps_ch0, 0, 2, 1, w0)
         block_20 = coupling_block(abf, sweeps_ch2, 2, 0, 3, w2)
+        for r in block_02:
+            r["CC_selection_mode"] = cc_selection_mode
+        for r in block_20:
+            r["CC_selection_mode"] = cc_selection_mode
         cc_list_02 = [r["CC"] for r in block_02]
         cc_list_20 = [r["CC"] for r in block_20]
         cc_mean_02 = mean_valid_cc(cc_list_02)
@@ -5411,14 +5455,14 @@ def analyze_abf_file(
         n_neg_02 = n_negative_cc(cc_list_02)
         n_neg_20 = n_negative_cc(cc_list_20)
 
-    if bsel["cc"] or bsel["tau_cm"]:
+    if cc_enabled or bsel["tau_cm"]:
         rin_ch0, r2_ch0, n0, rin_skip_0, rin_range_0, rin_note_0, _ = rin_for_channel(
             abf, 0, 1, b["start10"], b["end10"], b["start11"], b["end11"], b["Rtime_ch0"]
         )
         rin_ch2, r2_ch2, n2, rin_skip_2, rin_range_2, rin_note_2, _ = rin_for_channel(
             abf, 2, 3, b["start20"], b["end20"], b["start21"], b["end21"], b["Rtime_ch2"]
         )
-    elif not bsel["cc"]:
+    elif not cc_enabled:
         rin_skip_0 = rin_skip_2 = "CC / Rin block not selected"
         rin_note_0 = rin_note_2 = "CC / Rin block not selected"
 
@@ -5479,11 +5523,13 @@ def analyze_abf_file(
         "Rin_ch2_skip_reason": rin_skip_2,
         "Rin_ch2_note": rin_note_2,
         "Rin_vm_range_ch2": rin_range_2,
+        "CC_selection_mode": cc_selection_mode if cc_enabled else None,
+        "CC_selection_note": cc_selection_note if cc_enabled else None,
         "analysis_blocks": ",".join(k for k, on in bsel.items() if on),
     }
 
-    gj_02, gj_skip_02 = gj_nS(cc_mean_02, rin_ch2) if bsel["cc"] else (None, "CC block not selected")
-    gj_20, gj_skip_20 = gj_nS(cc_mean_20, rin_ch0) if bsel["cc"] else (None, "CC block not selected")
+    gj_02, gj_skip_02 = gj_nS(cc_mean_02, rin_ch2) if cc_enabled else (None, "CC block not selected")
+    gj_20, gj_skip_20 = gj_nS(cc_mean_20, rin_ch0) if cc_enabled else (None, "CC block not selected")
 
     summary_row = build_file_summary_row(
         name,
@@ -5528,7 +5574,7 @@ def analyze_abf_file(
     )
 
     rows = []
-    if bsel["cc"]:
+    if cc_enabled:
         for r in block_02:
             gj_sw, gj_sw_skip = gj_nS(r["CC"], rin_ch2)
             rows.append(sweep_only_row({
@@ -5564,7 +5610,7 @@ def analyze_abf_file(
             "CC_skip_reason": "CC block not selected",
         }))
 
-    want_qc = bsel["cell_props"] or bsel["cc"] or bsel["tau_cm"]
+    want_qc = bsel["cell_props"] or cc_enabled or bsel["tau_cm"]
     if SAVE_QC_PLOTS and want_qc:
         qc_dir = plots_dir
         if not qc_dir:
@@ -5583,14 +5629,14 @@ def analyze_abf_file(
                 rin_note_2,
                 tau_plot_meta=tau_plot_meta,
                 save_ap=bsel["cell_props"],
-                save_rin=bsel["cc"],
+                save_rin=cc_enabled,
                 save_tau=bsel["tau_cm"],
             )
             plot_paths.extend(qc_paths)
         except Exception as exc:
             print(f"  QC plots error: {exc}")
 
-    if SAVE_CC_PLOTS and bsel["cc"]:
+    if SAVE_CC_PLOTS and cc_enabled:
         cc_dir = cc_plots_dir_path
         if not cc_dir:
             cc_dir = os.path.join(os.path.dirname(os.path.abspath(filepath)), CC_PLOTS_SUBDIR)

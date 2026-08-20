@@ -50,6 +50,7 @@ Opens an **Analysis blocks** window (it can sit behind Jupyter). Choose which bl
 | Block | What it computes |
 |-------|------------------|
 | `cc` | CC, CC_norm, Gj, Rin, CC plots |
+| `cc_test` | **Test-only** CC, CC_norm, Gj, Rin, CC plots using only the **first** and **last** sweep before the first sweep with at least one spike |
 | `cell_props` | AP21 ratio, firing, FWHM, V_rest, Cell Properties Rin |
 | `tau_cm` | tau, Cm |
 | `spikelets` | spike / spikelet metrics, QC PNGs, folder spikelet plots |
@@ -243,8 +244,8 @@ One Excel row when the **whole file** is skipped (e.g. wrong channel count), wit
 1. Open ABF, read datetime
 2. Check 4 channels
 3. Get epoch sample indices
-4. Run selected analysis blocks (`cc`, `cell_props`, `tau_cm`, `spikelets`)
-5. For CC: select sweeps, run both directions, compute `CC_norm`, Rin, mean CC, Gj
+4. Run selected analysis blocks (`cc`, `cc_test`, `cell_props`, `tau_cm`, `spikelets`)
+5. For CC: either use **all** sweeps before the first spike (`cc`) or only the **first + last** such sweeps (`cc_test`), then run both directions and compute `CC_norm`, Rin, mean CC, Gj
 6. For cell properties: compute ch0/ch2 fields on the ≥4 AP sweep
 7. For tau/Cm: pick best sweep, export tau/Cm metadata
 8. For spikelets: per-AP rows, per-sweep rows, file-level spikelet summary, QC PNGs
