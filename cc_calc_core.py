@@ -353,28 +353,43 @@ def resolve_analysis_blocks(blocks=None):
         for key in out:
             if key in src:
                 out[key] = bool(src[key])
-    chosen_cc = [key for key in CC_MODE_BLOCK_KEYS if out.get(key)]
-    if len(chosen_cc) > 1:
-        keep = chosen_cc[0]
-        for key in CC_MODE_BLOCK_KEYS:
-            out[key] = (key == keep)
     if not any(out.values()):
         out["spikelets"] = True
     return out
 
 
-def selected_cc_mode(blocks=None):
-    """Return the selected CC block key, or None if no CC mode is enabled."""
+def selected_cc_modes(blocks=None):
+    """All enabled CC mode keys, in canonical order."""
     chosen = resolve_analysis_blocks(blocks)
+    return [key for key in CC_MODE_BLOCK_KEYS if chosen.get(key)]
+
+
+def selected_cc_mode(blocks=None):
+    """Return the first selected CC block key, or None if no CC mode is enabled."""
+    modes = selected_cc_modes(blocks)
+    return modes[0] if modes else None
+
+
+def blocks_for_cc_mode(base_blocks, cc_mode_key, include_non_cc=True):
+    """Copy block flags with exactly one CC mode enabled."""
+    out = dict(resolve_analysis_blocks(base_blocks))
     for key in CC_MODE_BLOCK_KEYS:
-        if chosen.get(key):
-            return key
-    return None
+        out[key] = (key == cc_mode_key)
+    if not include_non_cc:
+        out["cell_props"] = False
+        out["tau_cm"] = False
+        out["spikelets"] = False
+    return out
 
 
 def cc_mode_run_dir_name(mode_key):
     """Folder name for one CC mode run."""
     return CC_MODE_RUN_DIRS.get(mode_key)
+
+
+def cc_mode_run_root(folder_path, cc_mode_key):
+    """Absolute output folder for one CC mode under the ABF folder."""
+    return os.path.join(folder_path, cc_mode_run_dir_name(cc_mode_key))
 
 
 def ask_analysis_blocks(initial=None):
@@ -408,7 +423,8 @@ def ask_analysis_blocks(initial=None):
         root,
         text=(
             "Uncheck a block to skip it (faster).\n"
-            "Choose one CC block: multi-sweeps, last positive pre-spike, most negative pre-spike, or most negative + most positive.\n"
+            "You can select several CC blocks; each mode gets its own folder and CC plots.\n"
+            "Non-CC blocks (cell props / tau / spikelets) run once on the first selected CC mode.\n"
             "Spike/spikelet AP start uses inflections (peaks + d²V) inside that block.\n"
             "The Cell properties block is not required for spikelets."
         ),
@@ -5390,6 +5406,72 @@ def save_batch_excel(
     for name, rows in sheets:
         print(f"  {name} rows: {len(rows)}")
     return used
+
+
+def save_folder_cc_mode_outputs(
+    folder_name,
+    run_root,
+    output_excel,
+    all_rows,
+    summary_rows,
+    spikelet_rows=None,
+    spikelet_sweep_rows=None,
+):
+    """Excel + folder CC comparison plots for one CC mode run."""
+    saved = {"excel": None, "plots": []}
+    if not summary_rows:
+        return saved
+
+    attach_cc_vm_slopes(summary_rows, all_rows)
+    try:
+        saved["excel"] = save_batch_excel(
+            output_excel,
+            all_rows,
+            summary_rows,
+            spikelet_rows=spikelet_rows or [],
+            spikelet_sweep_rows=spikelet_sweep_rows or [],
+        )
+    except Exception as exc:
+        print(f"  Excel write error ({run_root}): {exc}")
+        traceback.print_exc()
+
+    if not SAVE_CC_PLOTS:
+        return saved
+
+    cc_out = cc_plots_dir(run_root)
+    os.makedirs(cc_out, exist_ok=True)
+    plot_jobs = (
+        (
+            save_folder_summary_plot,
+            os.path.join(cc_out, f"{folder_name}_CC_Gj_Rin_Vm_over_time.png"),
+            "Folder CC/Gj/Rin/Vm vs time",
+        ),
+        (
+            save_folder_cc_norm_vs_vm_plot,
+            os.path.join(cc_out, f"{folder_name}_CC_norm_vs_Vm.png"),
+            "Folder CC_norm vs Vm",
+        ),
+        (
+            save_folder_cc_vm_slope_over_time_plot,
+            os.path.join(cc_out, f"{folder_name}_CC_vs_Vm_slope_over_time.png"),
+            "Folder CC vs Vm slope over time",
+        ),
+    )
+    for fn, path, label in plot_jobs:
+        try:
+            if fn is save_folder_summary_plot:
+                out = fn(summary_rows, path, title=folder_name)
+            else:
+                out = fn(all_rows, path, title=folder_name, summary_rows=summary_rows)
+            if out:
+                saved["plots"].append(out)
+                print(f"  {label}:", out)
+            else:
+                print(f"  {label}: skipped")
+        except Exception as exc:
+            print(f"  {label} error: {exc}")
+            traceback.print_exc()
+    return saved
 
 
 def build_file_summary_row(

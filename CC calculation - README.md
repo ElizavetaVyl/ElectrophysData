@@ -64,6 +64,8 @@ Each CC block saves its results into a separate output folder under the ABF fold
 - `CC_most_negative_pre_spike/`
 - `CC_most_negative_most_positive_pre_spike/`
 
+You can select **several CC blocks in one run**. The notebook then loops all selected modes and writes **Excel + CC folder plots** into each mode folder so you can compare graphs side by side. Cell properties / tau / spikelets still run once on the first selected CC mode.
+
 For each `.abf`:
 
 1. Calls `analyze_abf_file(...)`
