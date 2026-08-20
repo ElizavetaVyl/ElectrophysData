@@ -388,7 +388,7 @@ def ask_analysis_blocks(initial=None):
 
     root = Tk()
     root.title("Analysis blocks")
-    root.geometry("620x340+120+80")
+    root.geometry("720x460+120+80")
     try:
         root.attributes("-topmost", True)
         root.lift()
@@ -458,7 +458,8 @@ def ask_analysis_blocks(initial=None):
         root.grab_set()
     except Exception:
         pass
-    root.resizable(False, False)
+    root.minsize(680, 420)
+    root.resizable(True, True)
     root.mainloop()
     print(">>> Selected blocks:", chosen)
     return chosen
