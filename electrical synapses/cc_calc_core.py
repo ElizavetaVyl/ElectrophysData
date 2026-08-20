@@ -5491,7 +5491,7 @@ def save_folder_cc_mode_outputs(
     if not SAVE_CC_PLOTS:
         return saved
 
-    cc_out = cc_plots_dir(run_root)
+    cc_out = run_root
     os.makedirs(cc_out, exist_ok=True)
     plot_jobs = (
         (
@@ -5603,14 +5603,14 @@ def _skipped_file_row(name, rec_dt, reason):
 
 def analyze_abf_file(
     filepath, plots_dir=None, cc_plots_dir_path=None, spikelet_plots_dir_path=None,
-    blocks=None,
+    blocks=None, abf_obj=None,
 ):
     """Return (per_sweep_rows, file_summary_row, qc_plot_paths, spikelet_ap_rows, spikelet_sweep_rows)."""
     bsel = resolve_analysis_blocks(
         blocks if blocks is not None else ensure_analysis_blocks()
     )
     name = os.path.basename(filepath)
-    abf = pyabf.ABF(filepath)
+    abf = abf_obj if abf_obj is not None else pyabf.ABF(filepath)
     rec_dt = recording_datetime_str(abf)
     plot_paths = []
 
