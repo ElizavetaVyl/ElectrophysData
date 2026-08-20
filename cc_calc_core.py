@@ -535,16 +535,16 @@ def _ask_analysis_blocks_console():
 
 
 def ensure_analysis_blocks(blocks=None, force_ask=False):
-    """Ask once per kernel session; reuse after that."""
+    """Ask once per call when force_ask=True; otherwise reuse session or apply preset."""
     global ANALYSIS_BLOCKS, _SESSION_BLOCKS
-    if blocks is not None:
+    if blocks is not None and not force_ask:
         _SESSION_BLOCKS = resolve_analysis_blocks(blocks)
         ANALYSIS_BLOCKS = _SESSION_BLOCKS
         return _SESSION_BLOCKS
-    if _SESSION_BLOCKS is not None and not force_ask:
+    if _SESSION_BLOCKS is not None and not force_ask and blocks is None:
         return _SESSION_BLOCKS
     try:
-        chosen = ask_analysis_blocks()
+        chosen = ask_analysis_blocks(initial=blocks if blocks is not None else _SESSION_BLOCKS)
     except Exception as exc:
         print("Analysis-block window failed:", exc)
         chosen = _ask_analysis_blocks_console()
@@ -552,6 +552,8 @@ def ensure_analysis_blocks(blocks=None, force_ask=False):
     ANALYSIS_BLOCKS = _SESSION_BLOCKS
     on = [k for k, v in _SESSION_BLOCKS.items() if v]
     print(">>> This run will compute:", ", ".join(on) if on else "(none)")
+    cc_on = [k for k in CC_MODE_BLOCK_KEYS if _SESSION_BLOCKS.get(k)]
+    print(">>> CC modes:", ", ".join(cc_on) if cc_on else "(none)")
     return _SESSION_BLOCKS
 
 
