@@ -1878,6 +1878,120 @@ def plot_distance_histogram(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# Age coverage: histogram of pairs (+ age-group counts)
+# ---------------------------------------------------------------------------
+def plot_age_histogram(df: pd.DataFrame, out_dir: Path):
+    """How many pairs at each age / in each age group (pool days 1–2)."""
+    sub = df[df["in_pool"]].copy()
+    if len(sub) == 0:
+        print("Skipping age histogram: empty pool.")
+        return
+
+    numeric = sub.loc[~sub["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
+    n_mt = int(sub["is_mt"].sum())
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.3), constrained_layout=True)
+        ax0, ax1 = axes
+
+        # Left: continuous age histogram (numeric ages only)
+        if len(numeric):
+            a_min = float(np.floor(np.min(numeric) / 5.0) * 5.0)
+            a_max = float(np.ceil(np.max(numeric) / 5.0) * 5.0)
+            if a_max <= a_min:
+                a_max = a_min + 5.0
+            edges = np.arange(a_min, a_max + 5.0, 5.0)
+            ax0.hist(
+                numeric,
+                bins=edges,
+                color="0.55",
+                edgecolor="white",
+                alpha=0.9,
+            )
+            ax0.axvline(
+                float(np.median(numeric)),
+                color="darkorange",
+                ls="--",
+                lw=1.3,
+                label=f"median = {np.median(numeric):.0f}",
+            )
+            ax0.axvline(
+                float(np.mean(numeric)),
+                color="crimson",
+                lw=1.3,
+                label=f"mean = {np.mean(numeric):.0f}",
+            )
+            ax0.axvline(
+                float(STRETCH_AGE_HI),
+                color="0.6",
+                ls=":",
+                lw=0.9,
+                label=f"P{int(STRETCH_AGE_HI)}",
+            )
+            note = f"$n$ numeric = {len(numeric)}"
+            if n_mt:
+                note += f"\nMT = {n_mt} (not in hist)"
+            ax0.text(
+                0.98,
+                0.96,
+                note,
+                transform=ax0.transAxes,
+                ha="right",
+                va="top",
+                fontsize=9,
+                color="0.25",
+            )
+            ax0.legend(frameon=False, fontsize=8, loc="upper left")
+        else:
+            ax0.text(0.5, 0.5, "no numeric ages", ha="center", va="center")
+        ax0.set_xlabel("Age [postnatal days]")
+        ax0.set_ylabel("Number of pairs")
+        ax0.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax0.set_title("by age (5-day bins)", fontsize=10, color="0.25")
+        _style_pub_ax(ax0)
+
+        # Right: the three analysis age groups (MT in P50+)
+        labels = [b[0] for b in AGE_ASYM_BINS]
+        colors = [b[4] for b in AGE_ASYM_BINS]
+        counts = []
+        for label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            counts.append(int(mask.sum()))
+        x = np.arange(len(labels))
+        ax1.bar(x, counts, color=colors, edgecolor="white", width=0.7, alpha=0.9)
+        for xi, n in zip(x, counts):
+            ax1.text(xi, n + 0.15, str(n), ha="center", va="bottom", fontsize=9, color="0.25")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(labels)
+        ax1.set_ylabel("Number of pairs")
+        ax1.set_xlabel("")
+        ax1.set_title("by age group (as in KW plots)", fontsize=10, color="0.25")
+        ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ymax = max(counts) if counts else 1
+        ax1.set_ylim(0, ymax * 1.18 + 0.5)
+        _style_pub_ax(ax1)
+
+        fig.suptitle(
+            r"Age distribution of electrically coupled pairs"
+            "\n"
+            r"pool days 1–2; one count per pair",
+            fontsize=11,
+            color="0.15",
+        )
+        print(
+            f"\nAge histogram: n_numeric={len(numeric)}, n_MT={n_mt}; "
+            + ", ".join(f"{lab}={n}" for lab, n in zip(labels, counts))
+        )
+        savefig(fig, out_dir, "12_age_histogram.png")
+
+
+# ---------------------------------------------------------------------------
 # AI_Gj (and AI_CC) vs AI_Rin — leak vs junctional asymmetry
 # ---------------------------------------------------------------------------
 def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
@@ -2245,6 +2359,7 @@ def main():
     plot_coupling_by_age_groups(df, out_dir)
     plot_coupling_vs_age_continuous(df, out_dir)
     plot_distance_histogram(df, out_dir)
+    plot_age_histogram(df, out_dir)
     plot_ai_gj_vs_ai_rin(df, out_dir)
     plot_signed_delta_gj_vs_rin(df, out_dir)
     print("Done. Figures are in:", out_dir)
