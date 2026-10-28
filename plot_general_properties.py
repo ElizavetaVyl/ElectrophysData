@@ -1161,12 +1161,14 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
             )
             if len(vals):
                 m = float(np.mean(vals))
+                med = float(np.median(vals))
                 ax.axvline(m, color="crimson", lw=1.3)
+                ax.axvline(med, color="royalblue", ls="--", lw=1.2)
                 ax.axvline(1 / 3, color="0.55", ls=":", lw=0.9)  # ≈ 2×
                 ax.text(
                     0.98,
                     0.96,
-                    f"mean = {m:.2f}",
+                    f"mean = {m:.2f}\nmedian = {med:.2f}",
                     transform=ax.transAxes,
                     ha="right",
                     va="top",
