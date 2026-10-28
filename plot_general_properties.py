@@ -800,6 +800,30 @@ def _fit_slope_through_origin(x: np.ndarray, y: np.ndarray) -> float | None:
     return float(np.dot(x, y) / np.dot(x, x))
 
 
+def _asym_axis_limits(x: np.ndarray, y: np.ndarray, name: str) -> tuple[float, float]:
+    """Axis limits for max-vs-min panels; Vm is negative and must not start at 0."""
+    vals = np.concatenate([np.asarray(x, dtype=float), np.asarray(y, dtype=float)])
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return (-80.0, -40.0) if name == "Vm" else (0.0, 1.0)
+    lo = float(np.min(vals))
+    hi = float(np.max(vals))
+    if name == "Vm":
+        span = max(hi - lo, 1.0)
+        pad = max(0.1 * span, 2.0)
+        lim_min = lo - pad
+        lim_max = hi + pad
+        # Vm is more negative than -48: keep a little room toward zero, but not to 0
+        lim_max = min(lim_max, -45.0)
+        if lim_max <= lim_min:
+            lim_max = lim_min + 5.0
+        return lim_min, lim_max
+    # positive parameters
+    lim_min = 0.0
+    lim_max = hi * 1.08 if hi > 0 else 1.0
+    return lim_min, lim_max
+
+
 def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     vmin, max_age, mt_val, has_mt = age_limits(sub)
@@ -825,8 +849,9 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
             linewidths=0.35,
             zorder=2,
         )
-        lim_max = float(np.nanmax([d[xmin_c].max(), d[xmax_c].max()]))
-        lim_min = 0.0
+        lim_min, lim_max = _asym_axis_limits(
+            d[xmin_c].to_numpy(), d[xmax_c].to_numpy(), name=name
+        )
         ax.plot(
             [lim_min, lim_max],
             [lim_min, lim_max],
@@ -840,7 +865,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
             if k is not None:
                 ax.plot(
                     [lim_min, lim_max],
-                    [lim_min, k * lim_max],
+                    [k * lim_min, k * lim_max],
                     color="crimson",
                     lw=1.2,
                     zorder=1,
@@ -859,6 +884,8 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         unit = f" [{unit_note}]" if unit_note else ""
         ax.set_xlabel(rf"{sym} min{unit}")
         ax.set_ylabel(rf"{sym} max{unit}")
+        ax.set_xlim(lim_min, lim_max)
+        ax.set_ylim(lim_min, lim_max)
         ax.set_aspect("equal", adjustable="box")
         _style_pub_ax(ax)
         return True
@@ -920,13 +947,19 @@ def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: boo
     return mask
 
 
-def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
+def plot_asymmetry_by_age_bins(
+    df: pd.DataFrame,
+    out_dir: Path,
+    rows: list[tuple[str, str]],
+    outfile: str,
+    title: str,
+):
     """
-    2x3: rows = CC, Gj; columns = age bins.
-    Fixed colors per column, no age colorbar.
+    rows x 3 age bins. Fixed colors per column, no age colorbar.
+    rows: list of (param_name, unit_note)
     """
     sub = df[df["in_pool"]].copy()
-    rows = [("CC", ""), ("Gj", "nS")]
+    n_rows = len(rows)
 
     with plt.rc_context(
         {
@@ -935,11 +968,13 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2), constrained_layout=True)
+        fig_h = 3.5 * n_rows + 0.8
+        fig, axes = plt.subplots(n_rows, 3, figsize=(11.5, fig_h), constrained_layout=True)
+        if n_rows == 1:
+            axes = np.array([axes])
 
-        # n_ec once per age column (same pairs for CC and Gj after Gj filter)
         n_by_col = []
-        for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             n_by_col.append(int(mask.sum()))
 
@@ -958,13 +993,11 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                 mask = _age_bin_mask(sub, lo, hi, include_mt)
                 d = sub.loc[mask & sub[xmin_c].notna() & sub[xmax_c].notna()]
 
-                if len(d):
-                    data_max = float(np.nanmax(d[[xmin_c, xmax_c]].to_numpy()))
-                else:
-                    data_max = 1.0
-                # pad so edge points are not clipped
-                lim_min = 0.0
-                lim_max = data_max * 1.08 if data_max > 0 else 1.0
+                lim_min, lim_max = _asym_axis_limits(
+                    d[xmin_c].to_numpy() if len(d) else np.array([]),
+                    d[xmax_c].to_numpy() if len(d) else np.array([]),
+                    name=name,
+                )
 
                 ax.plot(
                     [lim_min, lim_max],
@@ -974,36 +1007,39 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                     lw=0.9,
                     zorder=1,
                 )
-                ax.scatter(
-                    d[xmin_c],
-                    d[xmax_c],
-                    c=color,
-                    s=POINT_SIZE,
-                    alpha=POINT_ALPHA,
-                    edgecolors="white",
-                    linewidths=0.35,
-                    zorder=2,
-                    clip_on=False,
-                )
-                k = _fit_slope_through_origin(d[xmin_c].to_numpy(), d[xmax_c].to_numpy())
-                if k is not None:
-                    ax.plot(
-                        [lim_min, lim_max],
-                        [lim_min, k * lim_max],
-                        color="crimson",
-                        lw=1.2,
-                        zorder=1,
+                if len(d):
+                    ax.scatter(
+                        d[xmin_c],
+                        d[xmax_c],
+                        c=color,
+                        s=POINT_SIZE,
+                        alpha=POINT_ALPHA,
+                        edgecolors="white",
+                        linewidths=0.35,
+                        zorder=2,
+                        clip_on=False,
                     )
-                    ax.text(
-                        0.04,
-                        0.96,
-                        f"k = {k:.2f}",
-                        transform=ax.transAxes,
-                        va="top",
-                        ha="left",
-                        fontsize=8,
-                        color="0.25",
+                    k = _fit_slope_through_origin(
+                        d[xmin_c].to_numpy(), d[xmax_c].to_numpy()
                     )
+                    if k is not None:
+                        ax.plot(
+                            [lim_min, lim_max],
+                            [k * lim_min, k * lim_max],
+                            color="crimson",
+                            lw=1.2,
+                            zorder=1,
+                        )
+                        ax.text(
+                            0.04,
+                            0.96,
+                            f"k = {k:.2f}",
+                            transform=ax.transAxes,
+                            va="top",
+                            ha="left",
+                            fontsize=8,
+                            color="0.25",
+                        )
 
                 ax.set_xlim(lim_min, lim_max)
                 ax.set_ylim(lim_min, lim_max)
@@ -1023,8 +1059,8 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                     ax.set_ylabel("")
                 ax.set_xlabel(rf"{sym} min{unit}")
 
-        fig.suptitle("Asymmetry", fontsize=11, color="0.15")
-        savefig(fig, out_dir, "03b_asymmetry_CC_Gj_by_age.png")
+        fig.suptitle(title, fontsize=11, color="0.15")
+        savefig(fig, out_dir, outfile)
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1138,20 @@ def main():
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
-    plot_asymmetry_by_age_bins(df, out_dir)
+    plot_asymmetry_by_age_bins(
+        df,
+        out_dir,
+        rows=[("CC", ""), ("Gj", "nS")],
+        outfile="03b_asymmetry_CC_Gj_by_age.png",
+        title="Coupling asymmetry",
+    )
+    plot_asymmetry_by_age_bins(
+        df,
+        out_dir,
+        rows=[("Rin", r"M$\Omega$"), ("Cm", "pF"), ("Vm", "mV")],
+        outfile="04b_asymmetry_Rin_Cm_Vm_by_age.png",
+        title="Within-pair asymmetry",
+    )
     plot_ai_histograms(df, out_dir)
     print("Done. Figures are in:", out_dir)
 
