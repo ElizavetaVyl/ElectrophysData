@@ -279,6 +279,12 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
         df[f"{name}_ratio"] = ratio
         df[f"{name}_pair_mean"] = pair_mean
 
+    # Distance (µm): accept a few header spellings from Excel
+    dist_aliases = ("Distance, um", "Distance_um", "Distance", "distance", "Distance (um)")
+    dist_col = next((c for c in dist_aliases if c in df.columns), None)
+    if dist_col is not None:
+        df["Distance_um"] = _to_float(df[dist_col])
+
     df["in_pool"] = df["day"].isin(POOL_DAYS)
     return df.reset_index(drop=True)
 
@@ -1256,16 +1262,27 @@ def plot_asymmetry_by_age_bins(
             sym = PARAM_MATH.get(name, name)
             unit = f" [{unit_note}]" if unit_note else ""
 
+            # Shared X/Y range across age-group columns (same row)
+            all_x, all_y = [], []
+            for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+                mask = _age_bin_mask(sub, lo, hi, include_mt)
+                d_all = sub.loc[mask & sub[xmin_c].notna() & sub[xmax_c].notna()]
+                if len(d_all):
+                    all_x.append(d_all[xmin_c].to_numpy(dtype=float))
+                    all_y.append(d_all[xmax_c].to_numpy(dtype=float))
+            if all_x:
+                lim_min, lim_max = _asym_axis_limits(
+                    np.concatenate(all_x), np.concatenate(all_y), name=name
+                )
+            else:
+                lim_min, lim_max = _asym_axis_limits(
+                    np.array([]), np.array([]), name=name
+                )
+
             for c, (label, lo, hi, include_mt, color) in enumerate(AGE_ASYM_BINS):
                 ax = axes[r, c]
                 mask = _age_bin_mask(sub, lo, hi, include_mt)
                 d = sub.loc[mask & sub[xmin_c].notna() & sub[xmax_c].notna()]
-
-                lim_min, lim_max = _asym_axis_limits(
-                    d[xmin_c].to_numpy() if len(d) else np.array([]),
-                    d[xmax_c].to_numpy() if len(d) else np.array([]),
-                    name=name,
-                )
 
                 ax.plot(
                     [lim_min, lim_max],
@@ -1329,6 +1346,242 @@ def plot_asymmetry_by_age_bins(
 
         fig.suptitle(title, fontsize=11, color="0.15")
         savefig(fig, out_dir, outfile)
+
+
+# ---------------------------------------------------------------------------
+# Coupling vs inter-soma Distance
+# ---------------------------------------------------------------------------
+def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
+    """
+    Exploratory: pair-mean Gj, pair-mean CC, and AI_Gj vs Distance (µm).
+    Continuous age colormap; Spearman ρ annotated.
+    """
+    if "Distance_um" not in df.columns:
+        print("Skipping distance plots: no Distance column in Excel.")
+        return
+
+    sub = df[df["in_pool"] & df["Distance_um"].notna()].copy()
+    if len(sub) == 0:
+        print("Skipping distance plots: no Distance values in pool days 1–2.")
+        return
+
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
+        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+        ("AI_Gj", r"AI $G_{j}$"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.4), constrained_layout=True)
+        print("\nCoupling vs Distance (Spearman):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d["Distance_um"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 3:
+                rho, p = stats.spearmanr(d["Distance_um"], d[col])
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col}: n={len(d)} (too few for Spearman)")
+            if col == "AI_Gj":
+                ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
+                ax.set_ylim(0, 1.05)
+            ax.set_xlabel(r"Distance [$\mu$m]")
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Coupling vs inter-soma distance"
+            "\n"
+            r"pair mean $=(x_1+x_2)/2$; pool days 1–2",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "06_coupling_vs_distance.png")
+
+
+# ---------------------------------------------------------------------------
+# Pair-mean Gj / CC by age group (KW + Dunn)
+# ---------------------------------------------------------------------------
+def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
+    """Pair-mean Gj and CC across P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn."""
+    sub = df[df["in_pool"]].copy()
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    panels = [
+        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
+        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+    ]
+
+    def _panel(ax, col: str, ylabel: str):
+        if col not in sub.columns:
+            ax.set_visible(False)
+            return
+        samples = []
+        for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
+            samples.append(vals)
+            if len(vals) == 0:
+                continue
+            jitter = np.random.default_rng(abs(hash(col + label)) % (2**32)).normal(
+                0, 0.06, len(vals)
+            )
+            ax.scatter(
+                np.full(len(vals), x_pos[label]) + jitter,
+                vals,
+                c=color,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            ax.errorbar(
+                [x_pos[label]],
+                [np.mean(vals)],
+                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+                fmt="o",
+                color="crimson",
+                markersize=6,
+                capsize=3,
+                zorder=3,
+            )
+            ax.plot(
+                [x_pos[label]],
+                [np.median(vals)],
+                marker="D",
+                color="royalblue",
+                markersize=5,
+                zorder=4,
+            )
+
+        nonempty = [s for s in samples if len(s) > 0]
+        if len(nonempty) >= 2:
+            try:
+                H, p = stats.kruskal(*nonempty)
+                dunn = _dunn_posthoc(samples, group_labels)
+                dunn_bits = [
+                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                ]
+                stat_txt = f"KW {format_p(p)}"
+                if dunn_bits:
+                    stat_txt += "\nDunn: " + "; ".join(dunn_bits)
+                print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+            except Exception as exc:
+                stat_txt = "KW n/a"
+                print(f"  {col}: KW n/a ({exc})")
+        else:
+            stat_txt = "KW n/a"
+            print(f"  {col}: KW n/a")
+
+        ax.set_xticks([x_pos[l] for l in group_labels])
+        ax.set_xticklabels(group_labels)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("")
+        ax.text(
+            0.5,
+            1.02,
+            stat_txt,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color="0.25",
+        )
+        _style_pub_ax(ax)
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.8), constrained_layout=True)
+        print("\nPair-mean Gj / CC by age group — Kruskal–Wallis + Dunn (Bonferroni):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            _panel(ax, col, ylabel)
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                linestyle="None",
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                linestyle="None",
+                markersize=5,
+                label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"Pair-mean $G_{j}$ and $CC$ by age group"
+            "\n"
+            r"pair mean $=(x_1+x_2)/2$; Kruskal–Wallis; Dunn post-hoc (Bonferroni)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "07_Gj_CC_by_age_group.png")
 
 
 # ---------------------------------------------------------------------------
@@ -1468,6 +1721,8 @@ def main():
         title="Within-pair asymmetry",
     )
     plot_ai_histograms(df, out_dir)
+    plot_coupling_vs_distance(df, out_dir)
+    plot_coupling_by_age_groups(df, out_dir)
     print("Done. Figures are in:", out_dir)
 
 
