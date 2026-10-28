@@ -1121,7 +1121,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 
         fig2, axes2 = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
         for ax, name in zip(axes2, ["Rin", "Cm", "Vm"]):
-            _panel(ax, name, with_fit=False, unit_note=units[name])
+            _panel(ax, name, with_fit=True, unit_note=units[name])
         _finish(fig2, axes2, "04_asymmetry_Rin_Cm_Vm.png")
 
 
@@ -1249,13 +1249,15 @@ def plot_asymmetry_by_age_bins(
 # ---------------------------------------------------------------------------
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
-    metrics = [
-        ("AI_Gj", r"AI $G_{j}$"),
-        ("AI_CC", r"AI $CC$"),
+    # row1: coupling; row2: cell properties (Rin, Cm, Vm together)
+    row1 = [("AI_Gj", r"AI $G_{j}$"), ("AI_CC", r"AI $CC$")]
+    row2 = [
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
         ("AI_Vm", r"AI $|V_{m}|$"),
     ]
+    hist_color = "#7A1F2B"  # burgundy
+
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -1264,25 +1266,25 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(2, 3, figsize=(11, 7), constrained_layout=True)
-        axes = axes.ravel()
-        for ax, (col, title) in zip(axes, metrics):
+
+        def _hist_panel(ax, col: str, title: str):
             if col not in sub.columns:
                 ax.set_visible(False)
-                continue
+                return
             vals = sub[col].dropna().to_numpy()
             ax.hist(
                 vals,
                 bins=np.linspace(0, 1, 16),
-                color="#8E24AA",
+                color=hist_color,
                 edgecolor="white",
-                alpha=0.85,
+                alpha=0.9,
             )
             if len(vals):
                 m = float(np.mean(vals))
                 med = float(np.median(vals))
-                ax.axvline(m, color="crimson", lw=1.3)
-                ax.axvline(med, color="royalblue", ls="--", lw=1.2)
-                ax.axvline(1 / 3, color="0.55", ls=":", lw=0.9)  # ≈ 2×
+                ax.axvline(m, color="crimson", lw=1.3, label="mean")
+                ax.axvline(med, color="darkorange", ls="--", lw=1.2, label="median")
+                ax.axvline(1 / 3, color="0.45", ls=":", lw=0.9, label=r"AI$\approx$0.33 (~2×)")
                 ax.text(
                     0.98,
                     0.96,
@@ -1298,10 +1300,24 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
             ax.set_ylabel("Count")
             ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             _style_pub_ax(ax)
-        for ax in axes[len(metrics) :]:
-            ax.set_visible(False)
+
+        # top row: Gj, CC, empty
+        _hist_panel(axes[0, 0], *row1[0])
+        _hist_panel(axes[0, 1], *row1[1])
+        axes[0, 2].set_visible(False)
+
+        # bottom row: Rin, Cm, Vm
+        for ax, (col, title) in zip(axes[1], row2):
+            _hist_panel(ax, col, title)
+
+        handles = [
+            Line2D([0], [0], color="crimson", lw=1.3, label="mean"),
+            Line2D([0], [0], color="darkorange", ls="--", lw=1.2, label="median"),
+            Line2D([0], [0], color="0.45", ls=":", lw=0.9, label=r"AI$\approx$0.33 (~2×)"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         fig.suptitle(
-            f"AI (asymmetry index)\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            f"AI (asymmetry index)\n{AI_FORMULA}; dotted reference: AI≈0.33 (~2×)",
             fontsize=11,
             color="0.15",
         )
