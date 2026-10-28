@@ -1794,101 +1794,26 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Distance coverage: histogram of pairs
+# Coverage: Distance + age histograms on one figure
 # ---------------------------------------------------------------------------
-def plot_distance_histogram(df: pd.DataFrame, out_dir: Path):
-    """How many pairs fall into each Distance bin (pool days 1–2)."""
-    if "Distance_um" not in df.columns:
-        print("Skipping distance histogram: no Distance column.")
-        return
-    sub = df[df["in_pool"] & df["Distance_um"].notna()].copy()
-    if len(sub) == 0:
-        print("Skipping distance histogram: no Distance values in pool.")
-        return
-
-    dists = sub["Distance_um"].to_numpy(dtype=float)
-    d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
-    d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
-    if d_max <= d_min:
-        d_max = d_min + 10.0
-    # ~10–15 µm bins, but at least 6 bins
-    width = 15.0
-    edges = np.arange(d_min, d_max + width, width)
-    if len(edges) < 7:
-        width = 10.0
-        edges = np.arange(d_min, d_max + width, width)
-
-    with plt.rc_context(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-            "axes.unicode_minus": False,
-        }
-    ):
-        fig, ax = plt.subplots(figsize=(7.2, 4.2), constrained_layout=True)
-        counts, bin_edges, _ = ax.hist(
-            dists,
-            bins=edges,
-            color="0.55",
-            edgecolor="white",
-            alpha=0.9,
-        )
-        ax.axvline(
-            float(np.median(dists)),
-            color="darkorange",
-            ls="--",
-            lw=1.3,
-            label=f"median = {np.median(dists):.0f} µm",
-        )
-        ax.axvline(
-            float(np.mean(dists)),
-            color="crimson",
-            lw=1.3,
-            label=f"mean = {np.mean(dists):.0f} µm",
-        )
-        ax.text(
-            0.98,
-            0.96,
-            f"$n_{{ec}}$ = {len(dists)}\n"
-            f"range {np.min(dists):.0f}–{np.max(dists):.0f} µm",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize=9,
-            color="0.25",
-        )
-        ax.set_xlabel(r"Distance [$\mu$m]")
-        ax.set_ylabel("Number of pairs")
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.legend(frameon=False, fontsize=9, loc="upper left")
-        _style_pub_ax(ax)
-        fig.suptitle(
-            r"Inter-soma distance distribution"
-            "\n"
-            r"pool days 1–2; one count per electrically coupled pair",
-            fontsize=11,
-            color="0.15",
-        )
-        print(
-            f"\nDistance histogram: n={len(dists)}, "
-            f"mean={np.mean(dists):.1f}, median={np.median(dists):.1f}, "
-            f"range={np.min(dists):.1f}–{np.max(dists):.1f} µm"
-        )
-        savefig(fig, out_dir, "11_distance_histogram.png")
-
-
-# ---------------------------------------------------------------------------
-# Age coverage: histogram of pairs (+ age-group counts)
-# ---------------------------------------------------------------------------
-def plot_age_histogram(df: pd.DataFrame, out_dir: Path):
-    """How many pairs at each age / in each age group (pool days 1–2)."""
+def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
+    """
+    One figure, three panels: Distance bins | age (5-day) | age groups.
+    Pool days 1–2; one count per electrically coupled pair.
+    """
     sub = df[df["in_pool"]].copy()
     if len(sub) == 0:
-        print("Skipping age histogram: empty pool.")
+        print("Skipping coverage histograms: empty pool.")
         return
 
     numeric = sub.loc[~sub["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
     n_mt = int(sub["is_mt"].sum())
+    has_dist = "Distance_um" in sub.columns and sub["Distance_um"].notna().any()
+    dists = (
+        sub.loc[sub["Distance_um"].notna(), "Distance_um"].to_numpy(dtype=float)
+        if has_dist
+        else np.array([])
+    )
 
     with plt.rc_context(
         {
@@ -1897,37 +1822,81 @@ def plot_age_histogram(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.3), constrained_layout=True)
-        ax0, ax1 = axes
+        fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.3), constrained_layout=True)
+        ax_d, ax_a, ax_g = axes
 
-        # Left: continuous age histogram (numeric ages only)
+        # --- Distance ---
+        if len(dists):
+            d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
+            d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
+            if d_max <= d_min:
+                d_max = d_min + 10.0
+            width = 15.0
+            edges = np.arange(d_min, d_max + width, width)
+            if len(edges) < 7:
+                width = 10.0
+                edges = np.arange(d_min, d_max + width, width)
+            ax_d.hist(dists, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
+            ax_d.axvline(
+                float(np.median(dists)),
+                color="darkorange",
+                ls="--",
+                lw=1.3,
+                label=f"median = {np.median(dists):.0f} µm",
+            )
+            ax_d.axvline(
+                float(np.mean(dists)),
+                color="crimson",
+                lw=1.3,
+                label=f"mean = {np.mean(dists):.0f} µm",
+            )
+            ax_d.text(
+                0.98,
+                0.96,
+                f"$n$ = {len(dists)}\n"
+                f"{np.min(dists):.0f}–{np.max(dists):.0f} µm",
+                transform=ax_d.transAxes,
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="0.25",
+            )
+            ax_d.legend(frameon=False, fontsize=8, loc="upper left")
+            print(
+                f"\nCoverage histograms — Distance: n={len(dists)}, "
+                f"mean={np.mean(dists):.1f}, median={np.median(dists):.1f} µm"
+            )
+        else:
+            ax_d.text(0.5, 0.5, "no Distance", ha="center", va="center", color="0.4")
+            print("\nCoverage histograms — Distance: skipped (no column/values)")
+        ax_d.set_xlabel(r"Distance [$\mu$m]")
+        ax_d.set_ylabel("Number of pairs")
+        ax_d.set_title("Distance", fontsize=10, color="0.25")
+        ax_d.yaxis.set_major_locator(MaxNLocator(integer=True))
+        _style_pub_ax(ax_d)
+
+        # --- Age, 5-day bins ---
         if len(numeric):
             a_min = float(np.floor(np.min(numeric) / 5.0) * 5.0)
             a_max = float(np.ceil(np.max(numeric) / 5.0) * 5.0)
             if a_max <= a_min:
                 a_max = a_min + 5.0
             edges = np.arange(a_min, a_max + 5.0, 5.0)
-            ax0.hist(
-                numeric,
-                bins=edges,
-                color="0.55",
-                edgecolor="white",
-                alpha=0.9,
-            )
-            ax0.axvline(
+            ax_a.hist(numeric, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
+            ax_a.axvline(
                 float(np.median(numeric)),
                 color="darkorange",
                 ls="--",
                 lw=1.3,
                 label=f"median = {np.median(numeric):.0f}",
             )
-            ax0.axvline(
+            ax_a.axvline(
                 float(np.mean(numeric)),
                 color="crimson",
                 lw=1.3,
                 label=f"mean = {np.mean(numeric):.0f}",
             )
-            ax0.axvline(
+            ax_a.axvline(
                 float(STRETCH_AGE_HI),
                 color="0.6",
                 ls=":",
@@ -1937,58 +1906,60 @@ def plot_age_histogram(df: pd.DataFrame, out_dir: Path):
             note = f"$n$ numeric = {len(numeric)}"
             if n_mt:
                 note += f"\nMT = {n_mt} (not in hist)"
-            ax0.text(
+            ax_a.text(
                 0.98,
                 0.96,
                 note,
-                transform=ax0.transAxes,
+                transform=ax_a.transAxes,
                 ha="right",
                 va="top",
-                fontsize=9,
+                fontsize=8,
                 color="0.25",
             )
-            ax0.legend(frameon=False, fontsize=8, loc="upper left")
+            ax_a.legend(frameon=False, fontsize=8, loc="upper left")
         else:
-            ax0.text(0.5, 0.5, "no numeric ages", ha="center", va="center")
-        ax0.set_xlabel("Age [postnatal days]")
-        ax0.set_ylabel("Number of pairs")
-        ax0.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax0.set_title("by age (5-day bins)", fontsize=10, color="0.25")
-        _style_pub_ax(ax0)
+            ax_a.text(0.5, 0.5, "no numeric ages", ha="center", va="center", color="0.4")
+        ax_a.set_xlabel("Age [postnatal days]")
+        ax_a.set_ylabel("Number of pairs")
+        ax_a.set_title("Age (5-day bins)", fontsize=10, color="0.25")
+        ax_a.yaxis.set_major_locator(MaxNLocator(integer=True))
+        _style_pub_ax(ax_a)
 
-        # Right: the three analysis age groups (MT in P50+)
+        # --- Age groups (same as KW plots; MT in P50+) ---
         labels = [b[0] for b in AGE_ASYM_BINS]
         colors = [b[4] for b in AGE_ASYM_BINS]
         counts = []
-        for label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
+        for _label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             counts.append(int(mask.sum()))
         x = np.arange(len(labels))
-        ax1.bar(x, counts, color=colors, edgecolor="white", width=0.7, alpha=0.9)
+        ax_g.bar(x, counts, color=colors, edgecolor="white", width=0.7, alpha=0.9)
         for xi, n in zip(x, counts):
-            ax1.text(xi, n + 0.15, str(n), ha="center", va="bottom", fontsize=9, color="0.25")
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(labels)
-        ax1.set_ylabel("Number of pairs")
-        ax1.set_xlabel("")
-        ax1.set_title("by age group (as in KW plots)", fontsize=10, color="0.25")
-        ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax_g.text(
+                xi, n + 0.15, str(n), ha="center", va="bottom", fontsize=9, color="0.25"
+            )
+        ax_g.set_xticks(x)
+        ax_g.set_xticklabels(labels)
+        ax_g.set_ylabel("Number of pairs")
+        ax_g.set_xlabel("")
+        ax_g.set_title("Age groups (KW bins)", fontsize=10, color="0.25")
+        ax_g.yaxis.set_major_locator(MaxNLocator(integer=True))
         ymax = max(counts) if counts else 1
-        ax1.set_ylim(0, ymax * 1.18 + 0.5)
-        _style_pub_ax(ax1)
+        ax_g.set_ylim(0, ymax * 1.18 + 0.5)
+        _style_pub_ax(ax_g)
 
         fig.suptitle(
-            r"Age distribution of electrically coupled pairs"
+            r"Sample coverage: distance and age"
             "\n"
-            r"pool days 1–2; one count per pair",
+            r"pool days 1–2; one count per electrically coupled pair",
             fontsize=11,
             color="0.15",
         )
         print(
-            f"\nAge histogram: n_numeric={len(numeric)}, n_MT={n_mt}; "
+            f"Coverage histograms — Age: n_numeric={len(numeric)}, n_MT={n_mt}; "
             + ", ".join(f"{lab}={n}" for lab, n in zip(labels, counts))
         )
-        savefig(fig, out_dir, "12_age_histogram.png")
+        savefig(fig, out_dir, "11_distance_age_histograms.png")
 
 
 # ---------------------------------------------------------------------------
@@ -2358,8 +2329,7 @@ def main():
     plot_coupling_vs_distance(df, out_dir)
     plot_coupling_by_age_groups(df, out_dir)
     plot_coupling_vs_age_continuous(df, out_dir)
-    plot_distance_histogram(df, out_dir)
-    plot_age_histogram(df, out_dir)
+    plot_coverage_histograms(df, out_dir)
     plot_ai_gj_vs_ai_rin(df, out_dir)
     plot_signed_delta_gj_vs_rin(df, out_dir)
     print("Done. Figures are in:", out_dir)
