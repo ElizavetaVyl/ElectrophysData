@@ -454,8 +454,12 @@ def plot_day_comparison(
     params: list[tuple[str, str, str]],
     outfile: str,
     subtitle: str = "",
+    sort_sides: bool = False,
 ):
-    """Left = first column of pair, right = second (not sorted by magnitude)."""
+    """
+    Left/right = column identity by default.
+    If sort_sides=True: left = min, right = max within each pair.
+    """
     vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
 
@@ -499,10 +503,14 @@ def plot_day_comparison(
                 x1 = x0 - DAY_PAIR_OFFSET
                 x2 = x0 + DAY_PAIR_OFFSET
                 y1, y2 = float(row[c1]), float(row[c2])
-                ax.plot([x1, x2], [y1, y2], color=color, alpha=0.22, lw=0.7, zorder=1)
+                if sort_sides:
+                    y_left, y_right = (y1, y2) if y1 <= y2 else (y2, y1)
+                else:
+                    y_left, y_right = y1, y2
+                ax.plot([x1, x2], [y_left, y_right], color=color, alpha=0.22, lw=0.7, zorder=1)
                 ax.scatter(
                     [x1, x2],
-                    [y1, y2],
+                    [y_left, y_right],
                     c=[color, color],
                     s=POINT_SIZE,
                     alpha=POINT_ALPHA,
@@ -706,10 +714,11 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", "AI CC"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_m$"),
+        ("AI_Vm", r"AI $V_m$"),
     ]
     vmin, max_age, mt_val, has_mt = age_limits(sub)
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
     axes = axes.ravel()
 
     for ax, (col, title) in zip(axes, metrics):
@@ -742,14 +751,16 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
             )
             ax.legend(frameon=False, loc="upper right")
         ax.set_ylabel(title)
-        ax.set_xlabel("Age (P)")
+        ax.set_xlabel("Age [postnatal days]")
         ax.set_ylim(0, 1.05)
         ax.grid(True, alpha=0.25)
+    for ax in axes[len(metrics) :]:
+        ax.set_visible(False)
 
     fig.suptitle(f"Asymmetry index vs age (days 1–2); MT at right of dashed line\n{AI_FORMULA}")
     savefig(fig, out_dir, "02_AI_vs_age.png")
 
-    fig2, axes2 = plt.subplots(2, 2, figsize=(10, 8), sharex=True, constrained_layout=True)
+    fig2, axes2 = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
     axes2 = axes2.ravel()
     for ax, (col, title) in zip(axes2, metrics):
         if col not in sub.columns:
@@ -761,10 +772,12 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         )
         ax.scatter(d["age_num"], d[col], c=colors_num, s=22, alpha=0.85, edgecolors="none")
         ax.set_ylabel(title)
-        ax.set_xlabel("Age (P)")
+        ax.set_xlabel("Age [postnatal days]")
         ax.set_xlim(0, P50_ZOOM_MAX)
         ax.set_ylim(0, 1.05)
         ax.grid(True, alpha=0.25)
+    for ax in axes2[len(metrics) :]:
+        ax.set_visible(False)
     fig2.suptitle(f"AI vs age zoom (≤ P{P50_ZOOM_MAX}, days 1–2, MT excluded)\n{AI_FORMULA}")
     savefig(fig2, out_dir, "02b_AI_vs_age_P50_zoom.png")
 
@@ -821,7 +834,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         return True
 
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-    units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF"}
+    units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
     for ax, name, title in zip(axes, ["Gj", "CC"], ["Gj asymmetry", "CC asymmetry"]):
         _panel(ax, name, title, with_fit=True, unit_note=units[name])
     add_age_colorbar(
@@ -836,9 +849,11 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     fig.suptitle(f"Asymmetry clouds (days 1–2): max vs min\n{AI_FORMULA}")
     savefig(fig, out_dir, "03_asymmetry_Gj_CC.png")
 
-    fig2, axes2 = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+    fig2, axes2 = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
     for ax, name, title in zip(
-        axes2, ["Rin", "Cm"], [r"$R_{in}$ asymmetry", r"$C_m$ asymmetry"]
+        axes2,
+        ["Rin", "Cm", "Vm"],
+        [r"$R_{in}$ asymmetry", r"$C_m$ asymmetry", r"$V_m$ asymmetry"],
     ):
         _panel(ax, name, title, with_fit=False, unit_note=units[name])
     add_age_colorbar(
@@ -851,9 +866,9 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         has_mt=has_mt,
     )
     fig2.suptitle(
-        rf"Cell-property asymmetry (days 1–2): $R_{{in}}$ and $C_m$" + f"\n{AI_FORMULA}"
+        rf"Cell-property asymmetry (days 1–2): $R_{{in}}$, $C_m$, $V_m$" + f"\n{AI_FORMULA}"
     )
-    savefig(fig2, out_dir, "04_asymmetry_Rin_Cm.png")
+    savefig(fig2, out_dir, "04_asymmetry_Rin_Cm_Vm.png")
 
 
 # ---------------------------------------------------------------------------
@@ -866,8 +881,9 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", "AI CC"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_m$"),
+        ("AI_Vm", r"AI $V_m$"),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(9, 7), constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(11, 7), constrained_layout=True)
     axes = axes.ravel()
     for ax, (col, title) in zip(axes, metrics):
         if col not in sub.columns:
@@ -883,6 +899,8 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         ax.set_ylabel("Count")
         ax.set_title(title)
         ax.grid(True, alpha=0.25)
+    for ax in axes[len(metrics) :]:
+        ax.set_visible(False)
     fig.suptitle(f"AI distributions (days 1–2)\n{AI_FORMULA}")
     savefig(fig, out_dir, "05_AI_histograms.png")
 
@@ -909,6 +927,7 @@ def main():
     print(f"MT pairs: {int(df['is_mt'].sum())}")
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
+    # Day 1–2–3 (identity left/right)
     plot_day_comparison(
         df,
         out_dir,
@@ -923,11 +942,29 @@ def main():
         outfile="01_day_comparison_Rin_Cm_Vm.png",
         subtitle=r"$R_{in}$, $C_m$, $V_m$",
     )
+    # Same layout, but left=min / right=max within each pair
+    plot_day_comparison(
+        df,
+        out_dir,
+        params=DAY_FIG_COUPLING,
+        outfile="01_day_comparison_Gj_CC_sorted_min_max.png",
+        subtitle=r"$G_j$ and CC (left = min, right = max)",
+        sort_sides=True,
+    )
+    plot_day_comparison(
+        df,
+        out_dir,
+        params=DAY_FIG_CELL,
+        outfile="01_day_comparison_Rin_Cm_Vm_sorted_min_max.png",
+        subtitle=r"$R_{in}$, $C_m$, $V_m$ (left = min, right = max)",
+        sort_sides=True,
+    )
+
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
     plot_ai_histograms(df, out_dir)
-    print("Done.")
+    print("Done. Figures are in:", out_dir)
 
 
 if __name__ == "__main__":
