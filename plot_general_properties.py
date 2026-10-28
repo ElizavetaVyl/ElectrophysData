@@ -35,14 +35,20 @@ FIGURES_DIR_NAME = "general properties figures"
 POOL_DAYS = {1, 2}
 MT_AGE_PLACEHOLDER = 400  # x-position for MT on age plots (days)
 P50_ZOOM_MAX = 50
-DAY_PAIR_OFFSET = 0.06  # left/right shift within a day tick
-# light orange (young) -> dark purple (old / MT)
+DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
+DAY_X = {1: 1.0, 2: 1.55, 3: 2.1}  # days closer together
+POINT_SIZE = 36
+JITTER_X = 0.025
+MT_AGE_OFFSET = 50  # MT plotted darker than max age by this many "days" on color scale
+STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar
+STRETCH_FRAC = 0.72  # fraction of colorbar reserved for <= STRETCH_AGE_HI
+# saturated orange (young) -> almost-black purple (old / MT)
 AGE_CMAP = LinearSegmentedColormap.from_list(
     "age_orange_purple",
-    ["#FFE0B2", "#FF9800", "#E65100", "#8E24AA", "#4A148C"],
+    ["#FB8C00", "#EF6C00", "#D84315", "#8E24AA", "#4A148C", "#12001F"],
 )
 SHAPIRO_ALPHA = 0.05
-DAY_TICK_LABELS = {1: "день 1", 2: "день 2", 3: "день 3"}
+DAY_TICK_LABELS = {1: "Day 1", 2: "Day 2", 3: "Day 3"}
 
 PARAM_DIRS = {
     "Gj": ("Gj_12", "Gj_21"),
@@ -188,32 +194,54 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def age_scale(df: pd.DataFrame) -> tuple[float, float]:
+def age_limits(df: pd.DataFrame) -> tuple[float, float, float, bool]:
+    """Return vmin, max_numeric_age, mt_scale_value, has_mt."""
     numeric = df.loc[~df["is_mt"], "age_num"].dropna()
-    vmin = float(numeric.min()) if len(numeric) else 0.0
-    vmax = float(numeric.max()) if len(numeric) else 50.0
-    if vmin == vmax:
-        vmax = vmin + 1.0
-    return vmin, vmax
+    vmin = float(numeric.min()) if len(numeric) else 10.0
+    max_age = float(numeric.max()) if len(numeric) else float(STRETCH_AGE_HI)
+    if vmin == max_age:
+        max_age = vmin + 1.0
+    has_mt = bool(df["is_mt"].any())
+    mt_val = max_age + MT_AGE_OFFSET
+    return vmin, max_age, mt_val, has_mt
 
 
-def age_color_values(age_num: np.ndarray, is_mt: np.ndarray, vmax: float) -> np.ndarray:
-    """MT maps to vmax so it gets the darkest color on the scale."""
-    vals = []
+def age_to_unit(
+    age: float | None,
+    is_mt: bool,
+    vmin: float,
+    max_age: float,
+    mt_val: float,
+) -> float:
+    """
+    Piecewise map age -> [0, 1] for colormap:
+    - [vmin, STRETCH_AGE_HI] occupies STRETCH_FRAC of the bar (expanded)
+    - (STRETCH_AGE_HI, max_age] is compressed
+    - MT at mt_val = darkest (1.0)
+    """
+    if is_mt or age is None or (isinstance(age, float) and np.isnan(age)):
+        return 1.0
+    a = float(age)
+    stretch_hi = min(float(STRETCH_AGE_HI), max_age)
+    if a <= stretch_hi:
+        if stretch_hi <= vmin:
+            return 0.0
+        return STRETCH_FRAC * (a - vmin) / (stretch_hi - vmin)
+    if a <= max_age:
+        if max_age <= stretch_hi:
+            return STRETCH_FRAC
+        return STRETCH_FRAC + (0.92 - STRETCH_FRAC) * (a - stretch_hi) / (max_age - stretch_hi)
+    # between max_age and MT
+    return 0.92 + 0.08 * (a - max_age) / max(mt_val - max_age, 1e-9)
+
+
+def age_colors(age_num: np.ndarray, is_mt: np.ndarray, vmin: float, max_age: float, mt_val: float):
+    colors = []
     for a, mt in zip(age_num, is_mt):
-        if mt:
-            vals.append(vmax)
-        elif a is None or (isinstance(a, float) and np.isnan(a)):
-            vals.append(vmax)
-        else:
-            vals.append(float(a))
-    return np.asarray(vals, dtype=float)
-
-
-def age_colors(age_num: np.ndarray, is_mt: np.ndarray, vmin: float, vmax: float):
-    norm = Normalize(vmin=vmin, vmax=vmax)
-    color_vals = age_color_values(age_num, is_mt, vmax)
-    colors = [AGE_CMAP(norm(v)) for v in color_vals]
+        u = age_to_unit(a, bool(mt), vmin, max_age, mt_val)
+        colors.append(AGE_CMAP(u))
+    # dummy Normalize only for APIs that expect one; colorbar uses custom mapping
+    norm = Normalize(vmin=0.0, vmax=1.0)
     return colors, norm, AGE_CMAP
 
 
@@ -222,31 +250,57 @@ def unique_ages_for_colorbar(df: pd.DataFrame) -> list[float]:
     return ages
 
 
-def add_age_colorbar(fig, norm, cmap, axs, age_ticks: list[float] | None = None, has_mt: bool = False):
-    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+def add_age_colorbar(
+    fig,
+    axs,
+    vmin: float,
+    max_age: float,
+    mt_val: float,
+    age_ticks: list[float] | None = None,
+    has_mt: bool = False,
+):
+    """Colorbar with stretched young range and compressed older/MT tail."""
+    gradient = np.linspace(0, 1, 256).reshape(256, 1)
+    # Build RGBA image along unit axis, then map tick labels via age_to_unit
+    rgba = AGE_CMAP(np.linspace(0, 1, 256))
+
+    # Use a ScalarMappable on unit [0,1] and override ticks to age labels
+    sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axs, fraction=0.03, pad=0.02)
-    cbar.set_label("Age [P]" + (" (MT = darkest)" if has_mt else ""))
+    cbar = fig.colorbar(sm, ax=axs, fraction=0.035, pad=0.02)
+    cbar.set_label("Age [P]")
+
+    ticks_age: list[float] = []
+    labels: list[str] = []
     if age_ticks:
-        ticks = [t for t in age_ticks if norm.vmin <= t <= norm.vmax]
-        # de-duplicate
-        uniq = []
-        seen = set()
-        for t in ticks:
-            key = round(float(t), 6)
-            if key in seen:
-                continue
-            seen.add(key)
-            uniq.append(float(t))
-        ticklabels = [
-            str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}" for t in uniq
+        for t in age_ticks:
+            ticks_age.append(float(t))
+            lab = str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
+            labels.append(lab)
+    if has_mt:
+        ticks_age.append(mt_val)
+        labels.append("MT")
+
+    if ticks_age:
+        tick_units = [
+            age_to_unit(
+                t,
+                is_mt=(has_mt and abs(t - mt_val) < 1e-9),
+                vmin=vmin,
+                max_age=max_age,
+                mt_val=mt_val,
+            )
+            for t in ticks_age
         ]
-        if has_mt and uniq:
-            # mark oldest tick as also MT color endpoint
-            ticklabels[-1] = f"{ticklabels[-1]}/MT"
-        if uniq:
-            cbar.set_ticks(uniq)
-            cbar.set_ticklabels(ticklabels)
+        cbar.set_ticks(tick_units)
+        cbar.set_ticklabels(labels)
+
+    # visual divider between stretched and compressed zones
+    if max_age > STRETCH_AGE_HI:
+        u_div = age_to_unit(STRETCH_AGE_HI, False, vmin, max_age, mt_val)
+        cbar.ax.axhline(u_div, color="0.85", lw=0.8, ls="--")
+
+    _ = (gradient, rgba)  # kept for clarity / possible future inset bar
     return cbar
 
 
@@ -275,6 +329,15 @@ def shapiro_ok(values: np.ndarray) -> tuple[bool, float | None]:
     return bool(p >= SHAPIRO_ALPHA), float(p)
 
 
+def _mean_sem_median(v: np.ndarray) -> tuple[float, float, float]:
+    if len(v) == 0:
+        return np.nan, np.nan, np.nan
+    mean = float(np.mean(v))
+    sem = float(stats.sem(v, ddof=1)) if len(v) > 1 else 0.0
+    median = float(np.median(v))
+    return mean, sem, median
+
+
 def compare_two_groups(a: np.ndarray, b: np.ndarray) -> dict:
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
@@ -289,11 +352,17 @@ def compare_two_groups(a: np.ndarray, b: np.ndarray) -> dict:
     else:
         stat, p = stats.mannwhitneyu(a, b, alternative="two-sided")
         test_name = "Mann–Whitney U"
+    mean1, sem1, med1 = _mean_sem_median(a)
+    mean2, sem2, med2 = _mean_sem_median(b)
     return {
         "n1": len(a),
         "n2": len(b),
-        "mean1": float(np.mean(a)) if len(a) else np.nan,
-        "mean2": float(np.mean(b)) if len(b) else np.nan,
+        "mean1": mean1,
+        "mean2": mean2,
+        "sem1": sem1,
+        "sem2": sem2,
+        "median1": med1,
+        "median2": med2,
         "shapiro_p1": p_sha,
         "shapiro_p2": p_shb,
         "normal1": normal_a,
@@ -328,63 +397,111 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
         ("Rin", "Rin_1", "Rin_2"),
         ("Cm", "Cm_1", "Cm_2"),
     ]
-    vmin, vmax = age_scale(df)
+    vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
-    has_mt = bool(df["is_mt"].any())
 
-    fig, axes = plt.subplots(1, 4, figsize=(14.5, 4.2), sharex=True, constrained_layout=True)
-    norm = cmap = None
+    # n_ec is the same logic for all panels if based on Gj-filtered rows by day
+    n_parts = []
+    for day in (1, 2, 3):
+        n = int((df["day"] == day).sum())
+        n_parts.append(f"Day {day}: $n_{{ec}}$={n}")
+    n_line = "   |   ".join(n_parts)
+
+    fig, axes = plt.subplots(1, 4, figsize=(14.5, 4.4), sharex=True, constrained_layout=True)
+    rng = np.random.default_rng(42)
     for ax, (name, c1, c2) in zip(axes, params):
         if c1 not in df.columns or c2 not in df.columns:
             ax.set_visible(False)
             continue
         sub = df[df[c1].notna() & df[c2].notna() & df["day"].notna()].copy()
-        colors, norm, cmap = age_colors(
-            sub["age_num"].to_numpy(), sub["is_mt"].to_numpy(), vmin, vmax
+        colors, _, _ = age_colors(
+            sub["age_num"].to_numpy(),
+            sub["is_mt"].to_numpy(),
+            vmin,
+            max_age,
+            mt_val,
         )
         for (_, row), color in zip(sub.iterrows(), colors):
-            day = row["day"]
-            x1 = day - DAY_PAIR_OFFSET
-            x2 = day + DAY_PAIR_OFFSET
+            day = int(row["day"])
+            if day not in DAY_X:
+                continue
+            x0 = DAY_X[day]
+            j1 = float(rng.normal(0, JITTER_X))
+            j2 = float(rng.normal(0, JITTER_X))
+            x1 = x0 - DAY_PAIR_OFFSET + j1
+            x2 = x0 + DAY_PAIR_OFFSET + j2
             y1, y2 = row[c1], row[c2]
-            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.4, lw=0.8, zorder=1)
+            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.35, lw=0.8, zorder=1)
             ax.scatter(
                 [x1, x2],
                 [y1, y2],
                 c=[color, color],
-                s=20,
+                s=POINT_SIZE,
                 alpha=0.9,
                 zorder=2,
                 edgecolors="none",
             )
-        # n ec per day instead of subplot name
-        counts = []
-        for day in (1, 2, 3):
-            n = int(((sub["day"] == day).sum()))
-            counts.append(f"n ec = {n}")
-        ax.set_title("   |   ".join(counts), fontsize=9)
+        ax.set_title("")
         ax.set_ylabel(PARAM_YLABELS[name])
-        ax.set_xticks([1, 2, 3])
+        ax.set_xticks([DAY_X[1], DAY_X[2], DAY_X[3]])
         ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2], DAY_TICK_LABELS[3]])
         ax.set_xlabel("")
-        ax.set_xlim(0.7, 3.3)
-        ax.grid(True, alpha=0.25)
+        ax.set_xlim(DAY_X[1] - 0.35, DAY_X[3] + 0.35)
+        ax.grid(True, axis="x", alpha=0.35)
+        ax.grid(False, axis="y")
 
-    if norm is not None and cmap is not None:
-        add_age_colorbar(fig, norm, cmap, list(axes), age_ticks=age_ticks, has_mt=has_mt)
-    fig.suptitle("Pairs by recording day")
+    add_age_colorbar(
+        fig,
+        list(axes),
+        vmin=vmin,
+        max_age=max_age,
+        mt_val=mt_val,
+        age_ticks=age_ticks,
+        has_mt=has_mt,
+    )
+    fig.suptitle(f"Electrical couples by recording day\n{n_line}", fontsize=12)
     savefig(fig, out_dir, "01_day_comparison_Gj_CC_Rin_Cm.png")
 
 
 # ---------------------------------------------------------------------------
 # Figure 1b: day1 vs day2 statistics
 # ---------------------------------------------------------------------------
+def _plot_group_summary(ax, res: dict):
+    """Mean±SEM (crimson) and median (blue diamonds)."""
+    xs = np.array([1.0, 2.0])
+    means = np.array([res["mean1"], res["mean2"]])
+    sems = np.array([res["sem1"], res["sem2"]])
+    meds = np.array([res["median1"], res["median2"]])
+    ax.errorbar(
+        xs,
+        means,
+        yerr=sems,
+        fmt="o-",
+        color="crimson",
+        lw=1.8,
+        markersize=7,
+        capsize=4,
+        zorder=3,
+        label="mean ± SEM",
+    )
+    ax.plot(
+        xs,
+        meds,
+        linestyle="none",
+        marker="D",
+        markersize=6,
+        color="royalblue",
+        zorder=4,
+        label="median",
+    )
+
+
 def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
     """
     Two rows:
       1) pooled both sides {x1, x2} for day1 vs day2
       2) pair means (x1+x2)/2 for day1 vs day2
-    Shapiro -> Welch or Mann-Whitney. No medians on plots.
+    Shapiro -> Welch or Mann-Whitney. Show mean±SEM and median.
     """
     params = [
         ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
@@ -401,6 +518,7 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
         + PAIR_MEAN_FORMULA
         + "\n"
         + TEST_RULE
+        + r"  |  mean $\pm$ SEM, median"
     )
 
     # Row 0: pooled both sides
@@ -415,25 +533,17 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
             np.full(len(d1), 1) + np.random.default_rng(0).normal(0, 0.03, len(d1)),
             d1,
             s=14,
-            alpha=0.55,
-            color="0.35",
+            alpha=0.45,
+            color="0.45",
         )
         ax.scatter(
             np.full(len(d2), 2) + np.random.default_rng(1).normal(0, 0.03, len(d2)),
             d2,
             s=14,
-            alpha=0.55,
-            color="0.35",
+            alpha=0.45,
+            color="0.45",
         )
-        ax.plot(
-            [1, 2],
-            [res["mean1"], res["mean2"]],
-            "o-",
-            color="crimson",
-            lw=1.8,
-            markersize=7,
-            zorder=3,
-        )
+        _plot_group_summary(ax, res)
         ax.set_xticks([1, 2])
         ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2]])
         ax.set_xlabel("")
@@ -444,9 +554,13 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
             f"pooled sides\n"
             f"Shapiro D1 {sh1}, D2 {sh2}\n"
             f"{res['test']}: {format_p(res['p'])}\n"
-            f"n={res['n1']}/{res['n2']}; means {res['mean1']:.3g}, {res['mean2']:.3g}"
+            f"n={res['n1']}/{res['n2']}; "
+            f"mean {res['mean1']:.3g}±{res['sem1']:.3g}, {res['mean2']:.3g}±{res['sem2']:.3g}\n"
+            f"median {res['median1']:.3g}, {res['median2']:.3g}"
         )
-        ax.grid(True, alpha=0.25)
+        ax.grid(True, axis="x", alpha=0.3)
+        ax.grid(False, axis="y")
+        ax.legend(frameon=False, fontsize=7, loc="best")
 
     # Row 1: pair means
     for ax, (name, c1, c2, mean_col) in zip(axes[1], params):
@@ -460,25 +574,17 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
             np.full(len(s1), 1) + np.random.default_rng(2).normal(0, 0.03, len(s1)),
             s1,
             s=18,
-            alpha=0.65,
-            color="0.35",
+            alpha=0.55,
+            color="0.45",
         )
         ax.scatter(
             np.full(len(s2), 2) + np.random.default_rng(3).normal(0, 0.03, len(s2)),
             s2,
             s=18,
-            alpha=0.65,
-            color="0.35",
+            alpha=0.55,
+            color="0.45",
         )
-        ax.plot(
-            [1, 2],
-            [res["mean1"], res["mean2"]],
-            "o-",
-            color="crimson",
-            lw=1.8,
-            markersize=7,
-            zorder=3,
-        )
+        _plot_group_summary(ax, res)
         ax.set_xticks([1, 2])
         ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2]])
         ax.set_xlabel("")
@@ -489,9 +595,13 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
             f"pair mean\n"
             f"Shapiro D1 {sh1}, D2 {sh2}\n"
             f"{res['test']}: {format_p(res['p'])}\n"
-            f"n={res['n1']}/{res['n2']}; means {res['mean1']:.3g}, {res['mean2']:.3g}"
+            f"n={res['n1']}/{res['n2']}; "
+            f"mean {res['mean1']:.3g}±{res['sem1']:.3g}, {res['mean2']:.3g}±{res['sem2']:.3g}\n"
+            f"median {res['median1']:.3g}, {res['median2']:.3g}"
         )
-        ax.grid(True, alpha=0.25)
+        ax.grid(True, axis="x", alpha=0.3)
+        ax.grid(False, axis="y")
+        ax.legend(frameon=False, fontsize=7, loc="best")
 
     savefig(fig, out_dir, "01b_day1_vs_day2_stats.png")
 
@@ -525,7 +635,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_m$"),
     ]
-    vmin, vmax = age_scale(sub)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, constrained_layout=True)
     axes = axes.ravel()
@@ -536,18 +646,22 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
             continue
         d = sub[sub[col].notna()]
         d_num = d[~d["is_mt"]]
-        colors_num, norm, cmap = age_colors(
-            d_num["age_num"].to_numpy(), d_num["is_mt"].to_numpy(), vmin, vmax
+        colors_num, _, _ = age_colors(
+            d_num["age_num"].to_numpy(),
+            d_num["is_mt"].to_numpy(),
+            vmin,
+            max_age,
+            mt_val,
         )
         ax.scatter(d_num["age_num"], d_num[col], c=colors_num, s=22, alpha=0.85, edgecolors="none")
         d_mt = d[d["is_mt"]]
         if len(d_mt):
             ax.axvline(MT_AGE_PLACEHOLDER - 40, color="0.5", ls="--", lw=1)
-            mt_color = cmap(norm(vmax))
+            mt_color = AGE_CMAP(1.0)
             ax.scatter(
                 np.full(len(d_mt), MT_AGE_PLACEHOLDER),
                 d_mt[col],
-                c=[mt_color],
+                color=mt_color,
                 s=28,
                 alpha=0.9,
                 label="MT",
@@ -570,7 +684,9 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
             ax.set_visible(False)
             continue
         d = sub[sub[col].notna() & (~sub["is_mt"]) & (sub["age_num"] <= P50_ZOOM_MAX)]
-        colors_num, _, _ = age_colors(d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, vmax)
+        colors_num, _, _ = age_colors(
+            d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+        )
         ax.scatter(d["age_num"], d[col], c=colors_num, s=22, alpha=0.85, edgecolors="none")
         ax.set_ylabel(title)
         ax.set_xlabel("Age (P)")
@@ -596,16 +712,17 @@ def _fit_slope_through_origin(x: np.ndarray, y: np.ndarray) -> float | None:
 
 def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
-    vmin, vmax = age_scale(sub)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
 
     def _panel(ax, name, ylabel, with_fit: bool, unit_note: str = ""):
         xmin_c, xmax_c = f"{name}_min", f"{name}_max"
         if xmin_c not in sub.columns:
             ax.set_visible(False)
-            return
+            return False
         d = sub[sub[xmin_c].notna() & sub[xmax_c].notna()].copy()
-        colors, norm, cmap = age_colors(
-            d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, vmax
+        colors, _, _ = age_colors(
+            d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
         )
         ax.scatter(d[xmin_c], d[xmax_c], c=colors, s=28, alpha=0.85, edgecolors="none")
         lim_max = np.nanmax([d[xmin_c].max(), d[xmax_c].max()])
@@ -629,21 +746,21 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.25)
         ax.legend(frameon=False, loc="upper left")
-        return norm, cmap
+        return True
 
-    age_ticks = unique_ages_for_colorbar(sub)
-    has_mt = bool(sub["is_mt"].any())
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-    norm = cmap = None
     units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF"}
     for ax, name, title in zip(axes, ["Gj", "CC"], ["Gj asymmetry", "CC asymmetry"]):
-        out = _panel(ax, name, title, with_fit=True, unit_note=units[name])
-        if out:
-            norm, cmap = out
-    if norm is not None:
-        add_age_colorbar(
-            fig, norm, cmap, list(axes), age_ticks=age_ticks, has_mt=has_mt
-        )
+        _panel(ax, name, title, with_fit=True, unit_note=units[name])
+    add_age_colorbar(
+        fig,
+        list(axes),
+        vmin=vmin,
+        max_age=max_age,
+        mt_val=mt_val,
+        age_ticks=age_ticks,
+        has_mt=has_mt,
+    )
     fig.suptitle(f"Asymmetry clouds (days 1–2): max vs min\n{AI_FORMULA}")
     savefig(fig, out_dir, "03_asymmetry_Gj_CC.png")
 
@@ -651,13 +768,16 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     for ax, name, title in zip(
         axes2, ["Rin", "Cm"], [r"$R_{in}$ asymmetry", r"$C_m$ asymmetry"]
     ):
-        out = _panel(ax, name, title, with_fit=False, unit_note=units[name])
-        if out:
-            norm, cmap = out
-    if norm is not None:
-        add_age_colorbar(
-            fig2, norm, cmap, list(axes2), age_ticks=age_ticks, has_mt=has_mt
-        )
+        _panel(ax, name, title, with_fit=False, unit_note=units[name])
+    add_age_colorbar(
+        fig2,
+        list(axes2),
+        vmin=vmin,
+        max_age=max_age,
+        mt_val=mt_val,
+        age_ticks=age_ticks,
+        has_mt=has_mt,
+    )
     fig2.suptitle(
         rf"Cell-property asymmetry (days 1–2): $R_{{in}}$ and $C_m$" + f"\n{AI_FORMULA}"
     )
