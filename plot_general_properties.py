@@ -3,7 +3,7 @@ General properties plotting for mPFC electrical synapse pairs.
 
 PyCharm: Run this file. It will ask for the data folder path.
 Expected Excel name (in that folder):
-  General Properties FOR PLOTTING ONLY.xlsx
+  General_Properties_FOR_PLOTTING_ONLY.xlsx
 
 Figures are saved to:
   <chosen_folder>/general properties figures/
@@ -26,8 +26,11 @@ from matplotlib.lines import Line2D
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-EXCEL_NAME = "General Properties FOR PLOTTING ONLY.xlsx"
-EXCEL_NAME_LEGACY_TYPO = "Generaral Properties FOR PLOTTING ONLY.xlsx"
+EXCEL_NAME = "General_Properties_FOR_PLOTTING_ONLY.xlsx"
+EXCEL_NAME_ALIASES = (
+    "General Properties FOR PLOTTING ONLY.xlsx",
+    "Generaral Properties FOR PLOTTING ONLY.xlsx",
+)
 FIGURES_DIR_NAME = "general properties figures"
 POOL_DAYS = {1, 2}
 MT_AGE_PLACEHOLDER = 400  # x-position for MT on age plots (days)
@@ -62,17 +65,27 @@ def find_excel(folder: Path) -> Path:
     preferred = folder / EXCEL_NAME
     if preferred.is_file():
         return preferred
-    legacy = folder / EXCEL_NAME_LEGACY_TYPO
-    if legacy.is_file():
-        print(f"Using legacy filename: {legacy.name}")
-        print(f"Prefer renaming to: {EXCEL_NAME}")
-        return legacy
-    # Tolerant fallback: similar names
-    candidates = sorted(folder.glob("*.xlsx"))
+    for alias in EXCEL_NAME_ALIASES:
+        alt = folder / alias
+        if alt.is_file():
+            print(f"Using Excel: {alt.name}")
+            return alt
+    # Prefer the plotting-only workbook if several General*.xlsx exist
+    candidates = sorted(
+        p for p in folder.glob("*.xlsx") if not p.name.startswith("~$")
+    )
+    plotting = [
+        p
+        for p in candidates
+        if "plotting" in p.name.lower().replace(" ", "_")
+    ]
+    if len(plotting) == 1:
+        print(f"Using Excel: {plotting[0].name}")
+        return plotting[0]
     fuzzy = [
         p
         for p in candidates
-        if "plotting" in p.name.lower() or "general" in p.name.lower()
+        if "general" in p.name.lower() and "plotting" in p.name.lower()
     ]
     if len(fuzzy) == 1:
         print(f"Using Excel: {fuzzy[0].name}")
