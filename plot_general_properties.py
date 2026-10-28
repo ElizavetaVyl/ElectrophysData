@@ -1595,6 +1595,98 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# AI_Gj (and AI_CC) vs AI_Rin — leak vs junctional asymmetry
+# ---------------------------------------------------------------------------
+def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
+    """
+    Does Gj (or CC) asymmetry track Rin asymmetry?
+    Scatter AI_coupling vs AI_Rin; identity line; Spearman ρ.
+    """
+    sub = df[df["in_pool"]].copy()
+    if "AI_Rin" not in sub.columns or "AI_Gj" not in sub.columns:
+        print("Skipping AI_Gj vs AI_Rin: missing AI columns.")
+        return
+
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        ("AI_Gj", r"AI $G_{j}$"),
+        ("AI_CC", r"AI $CC$"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        print("\nAI coupling vs AI_Rin (Spearman):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna() & sub["AI_Rin"].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.plot([0, 1], [0, 1], color="0.35", ls="--", lw=0.9, zorder=1)
+            ax.scatter(
+                d["AI_Rin"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 3:
+                rho, p = stats.spearmanr(d["AI_Rin"], d[col])
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col} vs AI_Rin: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col} vs AI_Rin: n={len(d)} (too few)")
+            ax.set_xlim(0, 1.05)
+            ax.set_ylim(0, 1.05)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xlabel(r"AI $R_{in}$")
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Coupling asymmetry vs $R_{in}$ asymmetry"
+            "\n"
+            r"$AI=(max-min)/(max+min)$; dashed: identity; pool days 1–2",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "08_AI_Gj_CC_vs_AI_Rin.png")
+
+
+# ---------------------------------------------------------------------------
 # Figure 5: AI histograms
 # ---------------------------------------------------------------------------
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
@@ -1733,6 +1825,7 @@ def main():
     plot_ai_histograms(df, out_dir)
     plot_coupling_vs_distance(df, out_dir)
     plot_coupling_by_age_groups(df, out_dir)
+    plot_ai_gj_vs_ai_rin(df, out_dir)
     print("Done. Figures are in:", out_dir)
 
 
