@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import cm
 from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from scipy import stats
 
@@ -100,6 +101,49 @@ AI_FORMULA_VM_NOTE = r"for $V_m$: $AI$ from $|V_m|$"
 PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
+
+# Age bins for asymmetry / AI group analyses (MT → P50+)
+AGE_ASYM_BINS = [
+    ("P10–32", 10, 32, False, "#FB8C00"),  # orange
+    ("P33–50", 33, 50, False, "#8E24AA"),  # purple
+    ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
+]
+
+AI_METRICS = [
+    ("AI_Gj", r"AI $G_{j}$"),
+    ("AI_CC", r"AI $CC$"),
+    ("AI_Rin", r"AI $R_{in}$"),
+    ("AI_Cm", r"AI $C_{m}$"),
+    ("AI_Vm", r"AI $|V_{m}|$"),
+]
+
+
+def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: bool) -> pd.Series:
+    if hi is None:
+        mask = df["age_num"].notna() & (df["age_num"] > lo)
+    else:
+        mask = df["age_num"].notna() & (df["age_num"] >= lo) & (df["age_num"] <= hi)
+    if include_mt:
+        mask = mask | df["is_mt"]
+    else:
+        mask = mask & (~df["is_mt"])
+    return mask
+
+
+def _age_group_label_color(age_num, is_mt) -> tuple[str | None, str | None]:
+    for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+        if is_mt:
+            if include_mt:
+                return label, color
+            continue
+        if age_num is None or (isinstance(age_num, float) and np.isnan(age_num)):
+            return None, None
+        if hi is None:
+            if age_num > lo:
+                return label, color
+        elif lo <= age_num <= hi:
+            return label, color
+    return None, None
 
 
 def ask_data_folder(cli_folder: str | None = None) -> Path:
@@ -726,76 +770,47 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Figure 2: AI vs age (+ P50 zoom)
+# Figure 2: AI vs age (warped X, group colors) + separate group stats
 # ---------------------------------------------------------------------------
+def _warped_age_x(age_num, is_mt, vmin, max_age, mt_val) -> float:
+    return age_to_unit(age_num, bool(is_mt), vmin, max_age, mt_val)
+
+
+def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has_mt: bool):
+    majors = major_labeled_ages(age_ticks)
+    tick_u = [_warped_age_x(a, False, vmin, max_age, mt_val) for a in majors]
+    tick_lab = [_fmt_age_tick(a) for a in majors]
+    if has_mt:
+        tick_u.append(_warped_age_x(mt_val, True, vmin, max_age, mt_val))
+        tick_lab.append("MT")
+    # divider after P50
+    if max_age > STRETCH_AGE_HI:
+        u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
+        ax.axvline(u50, color="0.8", ls="--", lw=0.7, zorder=0)
+    ax.set_xticks(tick_u)
+    ax.set_xticklabels(tick_lab, fontsize=8)
+    ax.set_xlim(-0.02, 1.02)
+
+
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
+    """Scatter AI vs warped age; points colored by P10–32 / P33–50 / P50+ (MT in P50+)."""
     sub = df[df["in_pool"]].copy()
-    metrics = [
-        ("AI_Gj", r"AI $G_{j}$"),
-        ("AI_CC", r"AI $CC$"),
-        ("AI_Rin", r"AI $R_{in}$"),
-        ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $|V_{m}|$"),
-    ]
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
 
-    def _draw_ai_age(ax, d: pd.DataFrame, col: str, ylabel: str, xlim=None):
-        d_num = d[~d["is_mt"] & d[col].notna()]
-        colors_num, _, _ = age_colors(
-            d_num["age_num"].to_numpy(),
-            d_num["is_mt"].to_numpy(),
-            vmin,
-            max_age,
-            mt_val,
-        )
-        ax.scatter(
-            d_num["age_num"],
-            d_num[col],
-            c=colors_num,
-            s=POINT_SIZE,
-            alpha=POINT_ALPHA,
-            edgecolors="white",
-            linewidths=0.35,
-            zorder=2,
-        )
-        d_mt = d[d["is_mt"] & d[col].notna()]
-        if len(d_mt):
-            ax.axvline(MT_AGE_PLACEHOLDER - 40, color="0.55", ls="--", lw=0.8, zorder=0)
-            ax.scatter(
-                np.full(len(d_mt), MT_AGE_PLACEHOLDER),
-                d_mt[col],
-                color=AGE_CMAP(1.0),
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
-                edgecolors="white",
-                linewidths=0.35,
-                zorder=3,
-                label="MT",
-            )
-        vals = d[col].dropna()
-        if len(vals):
-            m = float(vals.mean())
-            ax.axhline(m, color="crimson", lw=1.1, zorder=1)
-            ax.text(
-                0.98,
-                0.96,
-                f"mean = {m:.2f}",
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                color="0.25",
-            )
-        ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)  # ≈ 2×
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel("Age [postnatal days]")
-        ax.set_ylim(0, 1.05)
-        if xlim is not None:
-            ax.set_xlim(*xlim)
-        _style_pub_ax(ax)
-        if len(d_mt):
-            ax.legend(frameon=False, loc="lower right", fontsize=8)
+    # assign group colors
+    labels, colors = [], []
+    for _, row in sub.iterrows():
+        lab, col = _age_group_label_color(row["age_num"], bool(row["is_mt"]))
+        labels.append(lab)
+        colors.append(col if col else "0.5")
+    sub = sub.copy()
+    sub["age_group"] = labels
+    sub["age_group_color"] = colors
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
 
     with plt.rc_context(
         {
@@ -806,48 +821,171 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     ):
         fig, axes = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
         axes = axes.ravel()
-        for ax, (col, title) in zip(axes, metrics):
+        for ax, (col, ylabel) in zip(axes, AI_METRICS):
             if col not in sub.columns:
                 ax.set_visible(False)
                 continue
-            _draw_ai_age(ax, sub[sub[col].notna()], col, title)
-        for ax in axes[len(metrics) :]:
+            d = sub[sub[col].notna() & sub["age_group"].notna()]
+            ax.scatter(
+                d["x_warp"],
+                d[col],
+                c=d["age_group_color"],
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            vals = d[col]
+            if len(vals):
+                m = float(vals.mean())
+                ax.axhline(m, color="crimson", lw=1.1, zorder=1)
+                ax.text(
+                    0.98,
+                    0.96,
+                    f"mean = {m:.2f}",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    color="0.25",
+                )
+            ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("Age [postnatal days]")
+            ax.set_ylim(0, 1.05)
+            _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+            _style_pub_ax(ax)
+
+        for ax in axes[len(AI_METRICS) :]:
             ax.set_visible(False)
-        cbar = add_age_colorbar(
-            fig, list(axes[: len(metrics)]), vmin, max_age, mt_val, age_ticks, has_mt
-        )
-        cbar.outline.set_linewidth(0.6)
-        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
-        cbar.set_label("Age [postnatal days]", fontsize=9)
+
+        # one legend for age groups
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor=color,
+                markersize=7,
+                label=label,
+            )
+            for label, _lo, _hi, _mt, color in AGE_ASYM_BINS
+        ]
+        fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=9)
         fig.suptitle(
-            f"AI (asymmetry index) vs age\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            "AI (asymmetry index) vs age\n"
+            f"{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; X stretched to P50; dotted: AI≈0.33 (~2×)",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "02_AI_vs_age.png")
 
-        fig2, axes2 = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
-        axes2 = axes2.ravel()
-        for ax, (col, title) in zip(axes2, metrics):
+
+def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
+    """AI by age group with Kruskal–Wallis (separate from scatter)."""
+    sub = df[df["in_pool"]].copy()
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    group_colors = {b[0]: b[4] for b in AGE_ASYM_BINS}
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8), constrained_layout=True)
+        axes = axes.ravel()
+        print("\nAI by age group — Kruskal–Wallis:")
+        for ax, (col, ylabel) in zip(axes, AI_METRICS):
             if col not in sub.columns:
                 ax.set_visible(False)
                 continue
-            d = sub[sub[col].notna() & (~sub["is_mt"]) & (sub["age_num"] <= P50_ZOOM_MAX)]
-            _draw_ai_age(ax, d, col, title, xlim=(0, P50_ZOOM_MAX))
-        for ax in axes2[len(metrics) :]:
+            samples = []
+            for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+                mask = _age_bin_mask(sub, lo, hi, include_mt)
+                vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
+                samples.append(vals)
+                if len(vals) == 0:
+                    continue
+                jitter = np.random.default_rng(abs(hash(col + label)) % (2**32)).normal(
+                    0, 0.06, len(vals)
+                )
+                ax.scatter(
+                    np.full(len(vals), x_pos[label]) + jitter,
+                    vals,
+                    c=color,
+                    s=POINT_SIZE,
+                    alpha=POINT_ALPHA,
+                    edgecolors="white",
+                    linewidths=0.35,
+                    zorder=2,
+                )
+                ax.errorbar(
+                    [x_pos[label]],
+                    [np.mean(vals)],
+                    yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+                    fmt="o",
+                    color="crimson",
+                    markersize=6,
+                    capsize=3,
+                    zorder=3,
+                )
+                ax.plot(
+                    [x_pos[label]],
+                    [np.median(vals)],
+                    marker="D",
+                    color="royalblue",
+                    markersize=5,
+                    zorder=4,
+                )
+
+            nonempty = [s for s in samples if len(s) >= 1]
+            if len(nonempty) >= 2 and all(len(s) >= 1 for s in nonempty):
+                # need at least 2 groups with data; kruskal needs n>=1 each but preferably more
+                try:
+                    H, p = stats.kruskal(*[s for s in samples if len(s) > 0])
+                    stat_txt = f"KW H={H:.2f}, {format_p(p)}"
+                    print(f"  {col}: H={H:.3f}, {format_p(p)}")
+                except Exception:
+                    stat_txt = "KW n/a"
+                    print(f"  {col}: KW n/a")
+            else:
+                stat_txt = "KW n/a"
+                print(f"  {col}: KW n/a")
+
+            ax.set_xticks([x_pos[l] for l in group_labels])
+            ax.set_xticklabels(group_labels)
+            ax.set_ylim(0, 1.05)
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("")
+            ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
+            ax.text(
+                0.5,
+                1.02,
+                stat_txt,
+                transform=ax.transAxes,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="0.25",
+            )
+            _style_pub_ax(ax)
+
+        for ax in axes[len(AI_METRICS) :]:
             ax.set_visible(False)
-        cbar2 = add_age_colorbar(
-            fig2, list(axes2[: len(metrics)]), vmin, max_age, mt_val, age_ticks, has_mt=False
-        )
-        cbar2.outline.set_linewidth(0.6)
-        cbar2.ax.tick_params(labelsize=8, length=3, width=0.7)
-        cbar2.set_label("Age [postnatal days]", fontsize=9)
-        fig2.suptitle(
-            f"AI (asymmetry index) vs age (≤ P{P50_ZOOM_MAX})\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}",
+
+        fig.suptitle(
+            "AI (asymmetry index) by age group\n"
+            f"Kruskal–Wallis across {', '.join(group_labels)}; "
+            "crimson = mean±SEM, blue = median; MT in P50+",
             fontsize=11,
             color="0.15",
         )
-        savefig(fig2, out_dir, "02b_AI_vs_age_P50_zoom.png")
+        savefig(fig, out_dir, "02b_AI_by_age_group.png")
 
 
 # ---------------------------------------------------------------------------
@@ -990,26 +1128,6 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 # Figure 3b: asymmetry by age bins (CC top, Gj bottom; columns = age groups)
 # ---------------------------------------------------------------------------
-AGE_ASYM_BINS = [
-    ("P10–32", 10, 32, False, "#FB8C00"),       # orange
-    ("P33–50", 33, 50, False, "#8E24AA"),       # purple
-    ("P50+", 50, None, True, "#2E0854"),        # dark violet; includes MT
-]
-
-
-def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: bool) -> pd.Series:
-    if hi is None:
-        # open upper end: age > lo, plus MT if requested
-        mask = df["age_num"].notna() & (df["age_num"] > lo)
-    else:
-        mask = df["age_num"].notna() & (df["age_num"] >= lo) & (df["age_num"] <= hi)
-    if include_mt:
-        mask = mask | df["is_mt"]
-    else:
-        mask = mask & (~df["is_mt"])
-    return mask
-
-
 def plot_asymmetry_by_age_bins(
     df: pd.DataFrame,
     out_dir: Path,
@@ -1230,6 +1348,7 @@ def main():
 
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
+    plot_ai_by_age_groups(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
     plot_asymmetry_by_age_bins(
         df,
