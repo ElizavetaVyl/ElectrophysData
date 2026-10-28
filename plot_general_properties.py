@@ -59,12 +59,20 @@ PARAM_DIRS = {
     "Vm": ("V_rest_mV_1", "V_rest_mV_2"),
 }
 
+PARAM_MATH = {
+    "Gj": r"$G_{j}$",
+    "CC": r"$CC$",
+    "Rin": r"$R_{in}$",
+    "Cm": r"$C_{m}$",
+    "Vm": r"$V_{m}$",
+}
+
 PARAM_YLABELS = {
-    "Gj": r"$G_j$ [nS]",
+    "Gj": r"$G_{j}$ [nS]",
     "CC": r"$CC$",
     "Rin": r"$R_{in}$ [M$\Omega$]",
-    "Cm": r"$C_m$ [pF]",
-    "Vm": r"$V_m$ [mV]",
+    "Cm": r"$C_{m}$ [pF]",
+    "Vm": r"$V_{m}$ [mV]",
 }
 
 # Day 1–2–3 figure panels (identity left/right, not sorted)
@@ -702,11 +710,11 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     metrics = [
-        ("AI_Gj", r"AI $G_j$"),
+        ("AI_Gj", r"AI $G_{j}$"),
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
-        ("AI_Cm", r"AI $C_m$"),
-        ("AI_Vm", r"AI $V_m$"),
+        ("AI_Cm", r"AI $C_{m}$"),
+        ("AI_Vm", r"AI $V_{m}$"),
     ]
     vmin, max_age, mt_val, has_mt = age_limits(sub)
 
@@ -815,10 +823,10 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
                     lw=1.5,
                     label=f"fit k={k:.2f}",
                 )
-        xlab = f"{name} min" + (f" [{unit_note}]" if unit_note else "")
-        ylab = f"{name} max" + (f" [{unit_note}]" if unit_note else "")
-        ax.set_xlabel(xlab)
-        ax.set_ylabel(ylab)
+        sym = PARAM_MATH.get(name, name)
+        unit = f" [{unit_note}]" if unit_note else ""
+        ax.set_xlabel(rf"{sym} min{unit}")
+        ax.set_ylabel(rf"{sym} max{unit}")
         ax.set_title(ylabel)
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.25)
@@ -828,7 +836,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
     units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
     for ax, name, title in zip(
-        axes, ["Gj", "CC"], [r"$G_j$ asymmetry", r"$CC$ asymmetry"]
+        axes, ["Gj", "CC"], [r"$G_{j}$ asymmetry", r"$CC$ asymmetry"]
     ):
         _panel(ax, name, title, with_fit=True, unit_note=units[name])
     add_age_colorbar(
@@ -871,11 +879,11 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     metrics = [
-        ("AI_Gj", r"AI $G_j$"),
+        ("AI_Gj", r"AI $G_{j}$"),
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
-        ("AI_Cm", r"AI $C_m$"),
-        ("AI_Vm", r"AI $V_m$"),
+        ("AI_Cm", r"AI $C_{m}$"),
+        ("AI_Vm", r"AI $V_{m}$"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(11, 7), constrained_layout=True)
     axes = axes.ravel()
@@ -927,7 +935,7 @@ def main():
         out_dir,
         params=DAY_FIG_COUPLING,
         outfile="01_day_comparison_Gj_CC.png",
-        subtitle=r"$G_j$ and $CC$",
+        subtitle=r"$G_{j}$ and $CC$",
     )
     plot_day_comparison(
         df,
