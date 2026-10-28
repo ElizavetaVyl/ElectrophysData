@@ -936,6 +936,13 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2), constrained_layout=True)
+
+        # n_ec once per age column (same pairs for CC and Gj after Gj filter)
+        n_by_col = []
+        for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            n_by_col.append(int(mask.sum()))
+
         for r, (name, unit_note) in enumerate(rows):
             xmin_c, xmax_c = f"{name}_min", f"{name}_max"
             if xmin_c not in sub.columns:
@@ -943,10 +950,6 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                     axes[r, c].set_visible(False)
                 continue
 
-            # shared limits across the row
-            all_vals = sub.loc[sub[xmin_c].notna() & sub[xmax_c].notna(), [xmin_c, xmax_c]]
-            lim_max = float(np.nanmax(all_vals.to_numpy())) if len(all_vals) else 1.0
-            lim_min = 0.0
             sym = PARAM_MATH.get(name, name)
             unit = f" [{unit_note}]" if unit_note else ""
 
@@ -954,6 +957,15 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                 ax = axes[r, c]
                 mask = _age_bin_mask(sub, lo, hi, include_mt)
                 d = sub.loc[mask & sub[xmin_c].notna() & sub[xmax_c].notna()]
+
+                if len(d):
+                    data_max = float(np.nanmax(d[[xmin_c, xmax_c]].to_numpy()))
+                else:
+                    data_max = 1.0
+                # pad so edge points are not clipped
+                lim_min = 0.0
+                lim_max = data_max * 1.08 if data_max > 0 else 1.0
+
                 ax.plot(
                     [lim_min, lim_max],
                     [lim_min, lim_max],
@@ -971,16 +983,40 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                     edgecolors="white",
                     linewidths=0.35,
                     zorder=2,
+                    clip_on=False,
                 )
-                n = len(d)
+                k = _fit_slope_through_origin(d[xmin_c].to_numpy(), d[xmax_c].to_numpy())
+                if k is not None:
+                    ax.plot(
+                        [lim_min, lim_max],
+                        [lim_min, k * lim_max],
+                        color="crimson",
+                        lw=1.2,
+                        zorder=1,
+                    )
+                    ax.text(
+                        0.04,
+                        0.96,
+                        f"k = {k:.2f}",
+                        transform=ax.transAxes,
+                        va="top",
+                        ha="left",
+                        fontsize=8,
+                        color="0.25",
+                    )
+
                 ax.set_xlim(lim_min, lim_max)
                 ax.set_ylim(lim_min, lim_max)
                 ax.set_aspect("equal", adjustable="box")
                 _style_pub_ax(ax)
                 if r == 0:
-                    ax.set_title(f"{label}\n$n_{{ec}}$={n}", fontsize=10, color="0.2")
+                    ax.set_title(
+                        f"{label}\n$n_{{ec}}$={n_by_col[c]}",
+                        fontsize=10,
+                        color="0.2",
+                    )
                 else:
-                    ax.set_title(f"$n_{{ec}}$={n}", fontsize=9, color="0.35")
+                    ax.set_title("")
                 if c == 0:
                     ax.set_ylabel(rf"{sym} max{unit}")
                 else:
@@ -988,9 +1024,6 @@ def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
                 ax.set_xlabel(rf"{sym} min{unit}")
 
         fig.suptitle("Asymmetry", fontsize=11, color="0.15")
-        # row labels on the left via fig text
-        fig.text(0.01, 0.72, r"$CC$", fontsize=11, rotation=90, va="center")
-        fig.text(0.01, 0.30, r"$G_{j}$", fontsize=11, rotation=90, va="center")
         savefig(fig, out_dir, "03b_asymmetry_CC_Gj_by_age.png")
 
 
