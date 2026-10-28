@@ -388,6 +388,43 @@ def binom_pvalue(k: int, n: int, p: float = 0.5) -> float:
     return float(stats.binom_test(k, n, p))
 
 
+def lowess_smooth(
+    x: np.ndarray, y: np.ndarray, frac: float = 0.45, n_grid: int = 80
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Lightweight LOWESS (local weighted linear) without statsmodels.
+    Returns (x_grid, y_hat) sorted along x.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) < 5:
+        order = np.argsort(x)
+        return x[order], y[order]
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    n = len(x)
+    k = max(int(np.ceil(frac * n)), 5)
+    k = min(k, n)
+    x_grid = np.linspace(float(x.min()), float(x.max()), n_grid)
+    y_hat = np.empty_like(x_grid)
+    for i, x0 in enumerate(x_grid):
+        dist = np.abs(x - x0)
+        idx = np.argpartition(dist, k - 1)[:k]
+        d = dist[idx]
+        dmax = float(np.max(d)) if len(d) else 0.0
+        if dmax <= 0:
+            y_hat[i] = float(np.mean(y[idx]))
+            continue
+        w = (1.0 - (d / dmax) ** 3) ** 3  # tricube
+        X = np.column_stack([np.ones(k), x[idx] - x0])
+        WX = X * w[:, None]
+        beta, _, _, _ = np.linalg.lstsq(WX, y[idx] * w, rcond=None)
+        y_hat[i] = float(beta[0])
+    return x_grid, y_hat
+
+
 def add_age_colorbar(
     fig,
     axs,
@@ -1650,6 +1687,197 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# Pair-mean Gj / CC vs continuous (warped) age — Spearman + LOWESS
+# ---------------------------------------------------------------------------
+def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
+    """
+    Continuous alternative to age-group KW: pair-mean Gj and CC vs warped age.
+    Annotate Spearman ρ (rank correlation, not a regression slope); overlay LOWESS.
+    """
+    sub = df[df["in_pool"]].copy()
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    sub = sub.copy()
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
+    panels = [
+        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
+        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        print("\nPair-mean Gj / CC vs warped age (Spearman + LOWESS):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d["x_warp"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 5:
+                xs, ys = lowess_smooth(
+                    d["x_warp"].to_numpy(dtype=float),
+                    d[col].to_numpy(dtype=float),
+                    frac=0.45,
+                )
+                ax.plot(xs, ys, color="crimson", lw=1.6, zorder=3, label="LOWESS")
+            if len(d) >= 3:
+                # Spearman uses chronological age ranks (MT at top), not warp units
+                age_for_rank = np.where(
+                    d["is_mt"].to_numpy(),
+                    mt_val,
+                    d["age_num"].to_numpy(dtype=float),
+                )
+                rho, p = stats.spearmanr(age_for_rank, d[col].to_numpy(dtype=float))
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col}: n={len(d)} (too few)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("Age [postnatal days]")
+            _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], color="crimson", lw=1.6, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Pair-mean $G_{j}$ and $CC$ vs age (continuous)"
+            "\n"
+            r"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; pool days 1–2",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "10_Gj_CC_vs_age_continuous.png")
+
+
+# ---------------------------------------------------------------------------
+# Distance coverage: histogram of pairs
+# ---------------------------------------------------------------------------
+def plot_distance_histogram(df: pd.DataFrame, out_dir: Path):
+    """How many pairs fall into each Distance bin (pool days 1–2)."""
+    if "Distance_um" not in df.columns:
+        print("Skipping distance histogram: no Distance column.")
+        return
+    sub = df[df["in_pool"] & df["Distance_um"].notna()].copy()
+    if len(sub) == 0:
+        print("Skipping distance histogram: no Distance values in pool.")
+        return
+
+    dists = sub["Distance_um"].to_numpy(dtype=float)
+    d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
+    d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
+    if d_max <= d_min:
+        d_max = d_min + 10.0
+    # ~10–15 µm bins, but at least 6 bins
+    width = 15.0
+    edges = np.arange(d_min, d_max + width, width)
+    if len(edges) < 7:
+        width = 10.0
+        edges = np.arange(d_min, d_max + width, width)
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.2, 4.2), constrained_layout=True)
+        counts, bin_edges, _ = ax.hist(
+            dists,
+            bins=edges,
+            color="0.55",
+            edgecolor="white",
+            alpha=0.9,
+        )
+        ax.axvline(
+            float(np.median(dists)),
+            color="darkorange",
+            ls="--",
+            lw=1.3,
+            label=f"median = {np.median(dists):.0f} µm",
+        )
+        ax.axvline(
+            float(np.mean(dists)),
+            color="crimson",
+            lw=1.3,
+            label=f"mean = {np.mean(dists):.0f} µm",
+        )
+        ax.text(
+            0.98,
+            0.96,
+            f"$n_{{ec}}$ = {len(dists)}\n"
+            f"range {np.min(dists):.0f}–{np.max(dists):.0f} µm",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="0.25",
+        )
+        ax.set_xlabel(r"Distance [$\mu$m]")
+        ax.set_ylabel("Number of pairs")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(frameon=False, fontsize=9, loc="upper left")
+        _style_pub_ax(ax)
+        fig.suptitle(
+            r"Inter-soma distance distribution"
+            "\n"
+            r"pool days 1–2; one count per electrically coupled pair",
+            fontsize=11,
+            color="0.15",
+        )
+        print(
+            f"\nDistance histogram: n={len(dists)}, "
+            f"mean={np.mean(dists):.1f}, median={np.median(dists):.1f}, "
+            f"range={np.min(dists):.1f}–{np.max(dists):.1f} µm"
+        )
+        savefig(fig, out_dir, "11_distance_histogram.png")
+
+
+# ---------------------------------------------------------------------------
 # AI_Gj (and AI_CC) vs AI_Rin — leak vs junctional asymmetry
 # ---------------------------------------------------------------------------
 def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
@@ -2015,6 +2243,8 @@ def main():
     plot_ai_histograms(df, out_dir)
     plot_coupling_vs_distance(df, out_dir)
     plot_coupling_by_age_groups(df, out_dir)
+    plot_coupling_vs_age_continuous(df, out_dir)
+    plot_distance_histogram(df, out_dir)
     plot_ai_gj_vs_ai_rin(df, out_dir)
     plot_signed_delta_gj_vs_rin(df, out_dir)
     print("Done. Figures are in:", out_dir)
