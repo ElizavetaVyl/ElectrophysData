@@ -1256,7 +1256,7 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         ("AI_Cm", r"AI $C_{m}$"),
         ("AI_Vm", r"AI $|V_{m}|$"),
     ]
-    hist_color = "#7A1F2B"  # burgundy
+    hist_color = "0.55"  # gray (no age encoding on these plots)
 
     with plt.rc_context(
         {
