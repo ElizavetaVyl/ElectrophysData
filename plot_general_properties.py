@@ -876,7 +876,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         cbar.outline.set_linewidth(0.6)
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
         cbar.set_label("Age [postnatal days]", fontsize=9)
-        fig.suptitle("Asymmetry", fontsize=11, color="0.15")
+        fig.suptitle("Coupling asymmetry", fontsize=11, color="0.15")
         savefig(fig, out_dir, outfile)
 
     with plt.rc_context(
