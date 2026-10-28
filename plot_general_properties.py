@@ -440,8 +440,8 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Figure 1: day comparison (X=day; pair left/right = channel identity)
 # ---------------------------------------------------------------------------
-def _style_day_ax(ax):
-    """Publication-like axis: no top/right frame, light spines, no y-grid."""
+def _style_pub_ax(ax):
+    """Publication-like axis: no top/right frame, light spines, no grid."""
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_linewidth(0.8)
@@ -449,9 +449,14 @@ def _style_day_ax(ax):
     ax.spines["left"].set_color("0.2")
     ax.spines["bottom"].set_color("0.2")
     ax.tick_params(axis="both", which="major", length=3.5, width=0.8, colors="0.2", labelsize=9)
+    ax.xaxis.label.set_size(10)
     ax.yaxis.label.set_size(10)
     ax.grid(False)
-    # soft vertical guides at day centers only
+
+
+def _style_day_ax(ax):
+    """Day-figure axis: publication style + soft vertical day guides."""
+    _style_pub_ax(ax)
     for x in (DAY_X[1], DAY_X[2], DAY_X[3]):
         ax.axvline(x, color="0.85", lw=0.7, zorder=0)
 
@@ -799,8 +804,9 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
+    units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
 
-    def _panel(ax, name, ylabel, with_fit: bool, unit_note: str = ""):
+    def _panel(ax, name, with_fit: bool, unit_note: str = ""):
         xmin_c, xmax_c = f"{name}_min", f"{name}_max"
         if xmin_c not in sub.columns:
             ax.set_visible(False)
@@ -809,10 +815,27 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         colors, _, _ = age_colors(
             d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
         )
-        ax.scatter(d[xmin_c], d[xmax_c], c=colors, s=28, alpha=0.85, edgecolors="none")
-        lim_max = np.nanmax([d[xmin_c].max(), d[xmax_c].max()])
+        ax.scatter(
+            d[xmin_c],
+            d[xmax_c],
+            c=colors,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=2,
+        )
+        lim_max = float(np.nanmax([d[xmin_c].max(), d[xmax_c].max()]))
         lim_min = 0.0
-        ax.plot([lim_min, lim_max], [lim_min, lim_max], "k--", lw=1, label="y = x")
+        ax.plot(
+            [lim_min, lim_max],
+            [lim_min, lim_max],
+            color="0.35",
+            ls="--",
+            lw=0.9,
+            zorder=1,
+            label="y = x",
+        )
         if with_fit:
             k = _fit_slope_through_origin(d[xmin_c].to_numpy(), d[xmax_c].to_numpy())
             if k is not None:
@@ -820,57 +843,52 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
                     [lim_min, lim_max],
                     [lim_min, k * lim_max],
                     color="crimson",
-                    lw=1.5,
-                    label=f"fit k={k:.2f}",
+                    lw=1.2,
+                    zorder=1,
+                    label=f"k = {k:.2f}",
                 )
         sym = PARAM_MATH.get(name, name)
         unit = f" [{unit_note}]" if unit_note else ""
         ax.set_xlabel(rf"{sym} min{unit}")
         ax.set_ylabel(rf"{sym} max{unit}")
-        ax.set_title(ylabel)
+        ax.set_title("")
         ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.25)
-        ax.legend(frameon=False, loc="upper left")
+        _style_pub_ax(ax)
+        ax.legend(frameon=False, loc="upper left", fontsize=8)
         return True
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-    units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
-    for ax, name, title in zip(
-        axes, ["Gj", "CC"], [r"$G_{j}$ asymmetry", r"$CC$ asymmetry"]
-    ):
-        _panel(ax, name, title, with_fit=True, unit_note=units[name])
-    add_age_colorbar(
-        fig,
-        list(axes),
-        vmin=vmin,
-        max_age=max_age,
-        mt_val=mt_val,
-        age_ticks=age_ticks,
-        has_mt=has_mt,
-    )
-    fig.suptitle(f"Asymmetry clouds (days 1–2): max vs min\n{AI_FORMULA}")
-    savefig(fig, out_dir, "03_asymmetry_Gj_CC.png")
+    def _finish(fig, axes, outfile: str):
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle("Asymmetry", fontsize=11, color="0.15")
+        savefig(fig, out_dir, outfile)
 
-    fig2, axes2 = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
-    for ax, name, title in zip(
-        axes2,
-        ["Rin", "Cm", "Vm"],
-        [r"$R_{in}$ asymmetry", r"$C_m$ asymmetry", r"$V_m$ asymmetry"],
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
     ):
-        _panel(ax, name, title, with_fit=False, unit_note=units[name])
-    add_age_colorbar(
-        fig2,
-        list(axes2),
-        vmin=vmin,
-        max_age=max_age,
-        mt_val=mt_val,
-        age_ticks=age_ticks,
-        has_mt=has_mt,
-    )
-    fig2.suptitle(
-        rf"Cell-property asymmetry (days 1–2): $R_{{in}}$, $C_m$, $V_m$" + f"\n{AI_FORMULA}"
-    )
-    savefig(fig2, out_dir, "04_asymmetry_Rin_Cm_Vm.png")
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        for ax, name in zip(axes, ["Gj", "CC"]):
+            _panel(ax, name, with_fit=True, unit_note=units[name])
+        _finish(fig, axes, "03_asymmetry_Gj_CC.png")
+
+        fig2, axes2 = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
+        for ax, name in zip(axes2, ["Rin", "Cm", "Vm"]):
+            _panel(ax, name, with_fit=False, unit_note=units[name])
+        _finish(fig2, axes2, "04_asymmetry_Rin_Cm_Vm.png")
 
 
 # ---------------------------------------------------------------------------
