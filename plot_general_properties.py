@@ -3,7 +3,7 @@ General properties plotting for mPFC electrical synapse pairs.
 
 PyCharm: Run this file. It will ask for the data folder path.
 Expected Excel name (in that folder):
-  Generaral Properties FOR PLOTTING ONLY.xlsx
+  General Properties FOR PLOTTING ONLY.xlsx
 
 Figures are saved to:
   <chosen_folder>/general properties figures/
@@ -26,7 +26,8 @@ from matplotlib.lines import Line2D
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-EXCEL_NAME = "Generaral Properties FOR PLOTTING ONLY.xlsx"
+EXCEL_NAME = "General Properties FOR PLOTTING ONLY.xlsx"
+EXCEL_NAME_LEGACY_TYPO = "Generaral Properties FOR PLOTTING ONLY.xlsx"
 FIGURES_DIR_NAME = "general properties figures"
 POOL_DAYS = {1, 2}
 MT_AGE_PLACEHOLDER = 400  # x-position for MT on age plots (days)
@@ -61,24 +62,27 @@ def find_excel(folder: Path) -> Path:
     preferred = folder / EXCEL_NAME
     if preferred.is_file():
         return preferred
+    legacy = folder / EXCEL_NAME_LEGACY_TYPO
+    if legacy.is_file():
+        print(f"Using legacy filename: {legacy.name}")
+        print(f"Prefer renaming to: {EXCEL_NAME}")
+        return legacy
     # Tolerant fallback: similar names
     candidates = sorted(folder.glob("*.xlsx"))
     fuzzy = [
         p
         for p in candidates
-        if "plotting" in p.name.lower() or "generaral" in p.name.lower() or "general" in p.name.lower()
+        if "plotting" in p.name.lower() or "general" in p.name.lower()
     ]
     if len(fuzzy) == 1:
         print(f"Using Excel: {fuzzy[0].name}")
         return fuzzy[0]
-    if preferred.exists() is False:
-        print(f"Excel not found: {preferred}")
-        if candidates:
-            print("xlsx files in folder:")
-            for p in candidates:
-                print(f"  - {p.name}")
-        sys.exit(1)
-    return preferred
+    print(f"Excel not found: {preferred}")
+    if candidates:
+        print("xlsx files in folder:")
+        for p in candidates:
+            print(f"  - {p.name}")
+    sys.exit(1)
 
 
 def _to_float(series: pd.Series) -> pd.Series:
