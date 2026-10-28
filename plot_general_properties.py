@@ -1472,30 +1472,51 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Pair-mean Gj / CC by age group (KW + Dunn)
+# Gj / CC by age group: pooled sides + pair mean (KW + Dunn)
 # ---------------------------------------------------------------------------
 def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
-    """Pair-mean Gj and CC across P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn."""
+    """
+    2×2: top = pooled {x1, x2} for Gj and CC; bottom = pair means.
+    Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    """
     sub = df[df["in_pool"]].copy()
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
-    panels = [
-        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
-        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+
+    # (mode, col_or_pair, ylabel) — mode "pair" uses one column; "pool" uses (c1, c2)
+    row_pooled = [
+        ("pool", ("Gj_12", "Gj_21"), rf"{PARAM_MATH['Gj']} pooled [nS]"),
+        ("pool", ("CC_12", "CC_21"), rf"{PARAM_MATH['CC']} pooled"),
+    ]
+    row_mean = [
+        ("pair", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
+        ("pair", "CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
     ]
 
-    def _panel(ax, col: str, ylabel: str):
-        if col not in sub.columns:
-            ax.set_visible(False)
-            return
+    def _samples_for(mode: str, spec) -> list[np.ndarray]:
         samples = []
-        for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
-            vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
+            g = sub.loc[mask]
+            if mode == "pair":
+                vals = g[spec].dropna().to_numpy(dtype=float) if spec in g.columns else np.array([])
+            else:
+                c1, c2 = spec
+                if c1 not in g.columns or c2 not in g.columns:
+                    vals = np.array([])
+                else:
+                    vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
+                        dtype=float
+                    )
             samples.append(vals)
+        return samples
+
+    def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
+        samples = _samples_for(mode, spec)
+        for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
             if len(vals) == 0:
                 continue
-            jitter = np.random.default_rng(abs(hash(col + label)) % (2**32)).normal(
+            jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
                 0, 0.06, len(vals)
             )
             ax.scatter(
@@ -1538,13 +1559,19 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 stat_txt = f"KW {format_p(p)}"
                 if dunn_bits:
                     stat_txt += "\nDunn: " + "; ".join(dunn_bits)
-                print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+                n_bits = ", ".join(
+                    f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+                )
+                print(
+                    f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
             except Exception as exc:
                 stat_txt = "KW n/a"
-                print(f"  {col}: KW n/a ({exc})")
+                print(f"  {seed_key}: KW n/a ({exc})")
         else:
             stat_txt = "KW n/a"
-            print(f"  {col}: KW n/a")
+            print(f"  {seed_key}: KW n/a")
 
         ax.set_xticks([x_pos[l] for l in group_labels])
         ax.set_xticklabels(group_labels)
@@ -1569,10 +1596,21 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.8), constrained_layout=True)
-        print("\nPair-mean Gj / CC by age group — Kruskal–Wallis + Dunn (Bonferroni):")
-        for ax, (col, ylabel) in zip(axes, panels):
-            _panel(ax, col, ylabel)
+        fig, axes = plt.subplots(2, 2, figsize=(10.0, 8.2), constrained_layout=True)
+        print(
+            "\nGj / CC by age group — pooled sides & pair mean — "
+            "Kruskal–Wallis + Dunn (Bonferroni):"
+        )
+        for ax, (mode, spec, ylabel) in zip(axes[0], row_pooled):
+            key = f"pooled_{spec[0]}"
+            _panel(ax, mode, spec, ylabel, key)
+        for ax, (mode, spec, ylabel) in zip(axes[1], row_mean):
+            _panel(ax, mode, spec, ylabel, spec)
+
+        axes[0, 0].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
+        axes[0, 1].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
 
         legend_handles = [
             Line2D(
@@ -1602,9 +1640,9 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
             fontsize=9,
         )
         fig.suptitle(
-            r"Pair-mean $G_{j}$ and $CC$ by age group"
+            r"$G_{j}$ and $CC$ by age group"
             "\n"
-            r"pair mean $=(x_1+x_2)/2$; Kruskal–Wallis; Dunn post-hoc (Bonferroni)",
+            r"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni)",
             fontsize=11,
             color="0.15",
         )
