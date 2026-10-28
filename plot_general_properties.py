@@ -1353,7 +1353,7 @@ def plot_asymmetry_by_age_bins(
 # ---------------------------------------------------------------------------
 def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
     """
-    Exploratory: pair-mean Gj, pair-mean CC, and AI_Gj vs Distance (µm).
+    Exploratory: pair-mean Gj/CC and AI_Gj/AI_CC vs Distance (µm).
     Continuous age colormap; Spearman ρ annotated.
     """
     if "Distance_um" not in df.columns:
@@ -1367,10 +1367,14 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
 
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
-    panels = [
+    # top: means; bottom: asymmetry indices
+    row1 = [
         ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
         ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+    ]
+    row2 = [
         ("AI_Gj", r"AI $G_{j}$"),
+        ("AI_CC", r"AI $CC$"),
     ]
 
     with plt.rc_context(
@@ -1380,12 +1384,13 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.4), constrained_layout=True)
+        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8), constrained_layout=True)
         print("\nCoupling vs Distance (Spearman):")
-        for ax, (col, ylabel) in zip(axes, panels):
+
+        def _dist_panel(ax, col: str, ylabel: str):
             if col not in sub.columns:
                 ax.set_visible(False)
-                continue
+                return
             d = sub[sub[col].notna()].copy()
             colors, _, _ = age_colors(
                 d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
@@ -1415,16 +1420,21 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
             else:
                 print(f"  {col}: n={len(d)} (too few for Spearman)")
-            if col == "AI_Gj":
+            if col.startswith("AI_"):
                 ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
                 ax.set_ylim(0, 1.05)
             ax.set_xlabel(r"Distance [$\mu$m]")
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
+        for ax, (col, ylabel) in zip(axes[0], row1):
+            _dist_panel(ax, col, ylabel)
+        for ax, (col, ylabel) in zip(axes[1], row2):
+            _dist_panel(ax, col, ylabel)
+
         cbar = add_age_colorbar(
             fig,
-            list(axes),
+            list(axes.ravel()),
             vmin=vmin,
             max_age=max_age,
             mt_val=mt_val,
