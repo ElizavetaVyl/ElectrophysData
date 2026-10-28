@@ -56,6 +56,7 @@ PARAM_DIRS = {
     "CC": ("CC_12", "CC_21"),
     "Rin": ("Rin_1", "Rin_2"),
     "Cm": ("Cm_1", "Cm_2"),
+    "Vm": ("V_rest_mV_ch0", "V_rest_mV_ch2"),
 }
 
 PARAM_YLABELS = {
@@ -63,7 +64,26 @@ PARAM_YLABELS = {
     "CC": "CC",
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_m$ [pF]",
+    "Vm": r"$V_m$ [mV]",
 }
+
+# Day 1–2–3 figure panels (identity left/right, not sorted)
+DAY_FIG_COUPLING = [
+    ("Gj", "Gj_12", "Gj_21"),
+    ("CC", "CC_12", "CC_21"),
+]
+DAY_FIG_CELL = [
+    ("Rin", "Rin_1", "Rin_2"),
+    ("Cm", "Cm_1", "Cm_2"),
+    ("Vm", "V_rest_mV_ch0", "V_rest_mV_ch2"),
+]
+STAT_PARAMS = [
+    ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
+    ("CC", "CC_12", "CC_21", "CC_pair_mean"),
+    ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
+    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
+    ("Vm", "V_rest_mV_ch0", "V_rest_mV_ch2", "Vm_pair_mean"),
+]
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
 PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
@@ -410,19 +430,16 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Figure 1: day comparison (X=day; pair left/right)
+# Figure 1: day comparison (X=day; pair left/right = channel identity)
 # ---------------------------------------------------------------------------
-def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = False):
-    """
-    sort_sides=False: left = side 1, right = side 2 (original identity).
-    sort_sides=True:  left = min, right = max within each pair.
-    """
-    params = [
-        ("Gj", "Gj_12", "Gj_21"),
-        ("CC", "CC_12", "CC_21"),
-        ("Rin", "Rin_1", "Rin_2"),
-        ("Cm", "Cm_1", "Cm_2"),
-    ]
+def plot_day_comparison(
+    df: pd.DataFrame,
+    out_dir: Path,
+    params: list[tuple[str, str, str]],
+    outfile: str,
+    subtitle: str = "",
+):
+    """Left = first column of pair, right = second (not sorted by magnitude)."""
     vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
 
@@ -432,7 +449,11 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = Fals
         n_parts.append(f"Day {day}: $n_{{ec}}$={n}")
     n_line = "   |   ".join(n_parts)
 
-    fig, axes = plt.subplots(1, 4, figsize=(14.5, 4.4), sharex=True, constrained_layout=True)
+    n_panels = len(params)
+    fig_w = 4.0 * n_panels + 1.5
+    fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, 4.4), sharex=True, constrained_layout=True)
+    if n_panels == 1:
+        axes = [axes]
     for ax, (name, c1, c2) in zip(axes, params):
         if c1 not in df.columns or c2 not in df.columns:
             ax.set_visible(False)
@@ -453,14 +474,10 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = Fals
             x1 = x0 - DAY_PAIR_OFFSET
             x2 = x0 + DAY_PAIR_OFFSET
             y1, y2 = float(row[c1]), float(row[c2])
-            if sort_sides:
-                y_left, y_right = (y1, y2) if y1 <= y2 else (y2, y1)
-            else:
-                y_left, y_right = y1, y2
-            ax.plot([x1, x2], [y_left, y_right], color=color, alpha=0.25, lw=0.8, zorder=1)
+            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.25, lw=0.8, zorder=1)
             ax.scatter(
                 [x1, x2],
-                [y_left, y_right],
+                [y1, y2],
                 c=[color, color],
                 s=POINT_SIZE,
                 alpha=POINT_ALPHA,
@@ -468,7 +485,7 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = Fals
                 edgecolors="none",
             )
         ax.set_title("")
-        ax.set_ylabel(PARAM_YLABELS[name])
+        ax.set_ylabel(PARAM_YLABELS.get(name, name))
         ax.set_xticks([DAY_X[1], DAY_X[2], DAY_X[3]])
         ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2], DAY_TICK_LABELS[3]])
         ax.set_xlabel("")
@@ -485,12 +502,9 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = Fals
         age_ticks=age_ticks,
         has_mt=has_mt,
     )
-    if sort_sides:
-        title = "Electrical couples by recording day (left = min, right = max)"
-        outfile = "01_day_comparison_sorted_min_max.png"
-    else:
-        title = "Electrical couples by recording day"
-        outfile = "01_day_comparison_Gj_CC_Rin_Cm.png"
+    title = "Electrical couples by recording day"
+    if subtitle:
+        title = f"{title} — {subtitle}"
     fig.suptitle(f"{title}\n{n_line}", fontsize=12)
     savefig(fig, out_dir, outfile)
 
@@ -534,15 +548,12 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
       1) pooled both sides {x1, x2} for day1 vs day2
       2) pair means (x1+x2)/2 for day1 vs day2
     Shapiro -> Welch or Mann-Whitney. Show mean±SEM and median.
+    Includes Gj, CC, Rin, Cm, Vm on one figure.
     """
-    params = [
-        ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
-        ("CC", "CC_12", "CC_21", "CC_pair_mean"),
-        ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
-        ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
-    ]
+    params = list(STAT_PARAMS)
+    n = len(params)
 
-    fig, axes = plt.subplots(2, 4, figsize=(15, 7.5), constrained_layout=True)
+    fig, axes = plt.subplots(2, n, figsize=(3.2 * n + 1.5, 7.5), constrained_layout=True)
     fig.suptitle(
         "Day 1 vs Day 2\n"
         + POOL_FORMULA
@@ -869,8 +880,20 @@ def main():
     print(f"MT pairs: {int(df['is_mt'].sum())}")
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
-    plot_day_comparison(df, out_dir, sort_sides=False)
-    plot_day_comparison(df, out_dir, sort_sides=True)
+    plot_day_comparison(
+        df,
+        out_dir,
+        params=DAY_FIG_COUPLING,
+        outfile="01_day_comparison_Gj_CC.png",
+        subtitle=r"$G_j$ and CC",
+    )
+    plot_day_comparison(
+        df,
+        out_dir,
+        params=DAY_FIG_CELL,
+        outfile="01_day_comparison_Rin_Cm_Vm.png",
+        subtitle=r"$R_{in}$, $C_m$, $V_m$",
+    )
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
