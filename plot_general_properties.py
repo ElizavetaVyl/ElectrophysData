@@ -61,7 +61,7 @@ PARAM_DIRS = {
 
 PARAM_YLABELS = {
     "Gj": r"$G_j$ [nS]",
-    "CC": "CC",
+    "CC": r"$CC$",
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_m$ [pF]",
     "Vm": r"$V_m$ [mV]",
@@ -454,12 +454,8 @@ def plot_day_comparison(
     params: list[tuple[str, str, str]],
     outfile: str,
     subtitle: str = "",
-    sort_sides: bool = False,
 ):
-    """
-    Left/right = column identity by default.
-    If sort_sides=True: left = min, right = max within each pair.
-    """
+    """Left/right = column identity (side 1 / side 2), not sorted by magnitude."""
     vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
 
@@ -503,14 +499,10 @@ def plot_day_comparison(
                 x1 = x0 - DAY_PAIR_OFFSET
                 x2 = x0 + DAY_PAIR_OFFSET
                 y1, y2 = float(row[c1]), float(row[c2])
-                if sort_sides:
-                    y_left, y_right = (y1, y2) if y1 <= y2 else (y2, y1)
-                else:
-                    y_left, y_right = y1, y2
-                ax.plot([x1, x2], [y_left, y_right], color=color, alpha=0.22, lw=0.7, zorder=1)
+                ax.plot([x1, x2], [y1, y2], color=color, alpha=0.22, lw=0.7, zorder=1)
                 ax.scatter(
                     [x1, x2],
-                    [y_left, y_right],
+                    [y1, y2],
                     c=[color, color],
                     s=POINT_SIZE,
                     alpha=POINT_ALPHA,
@@ -709,9 +701,9 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
-    metrics = [
-        ("AI_Gj", "AI Gj"),
-        ("AI_CC", "AI CC"),
+        metrics = [
+        ("AI_Gj", r"AI $G_j$"),
+        ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_m$"),
         ("AI_Vm", r"AI $V_m$"),
@@ -835,7 +827,9 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
     units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
-    for ax, name, title in zip(axes, ["Gj", "CC"], ["Gj asymmetry", "CC asymmetry"]):
+    for ax, name, title in zip(
+        axes, ["Gj", "CC"], [r"$G_j$ asymmetry", r"$CC$ asymmetry"]
+    ):
         _panel(ax, name, title, with_fit=True, unit_note=units[name])
     add_age_colorbar(
         fig,
@@ -877,8 +871,8 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     metrics = [
-        ("AI_Gj", "AI Gj"),
-        ("AI_CC", "AI CC"),
+        ("AI_Gj", r"AI $G_j$"),
+        ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_m$"),
         ("AI_Vm", r"AI $V_m$"),
@@ -927,13 +921,13 @@ def main():
     print(f"MT pairs: {int(df['is_mt'].sum())}")
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
-    # Day 1–2–3 (identity left/right)
+    # Day 1–2–3 (identity left/right only)
     plot_day_comparison(
         df,
         out_dir,
         params=DAY_FIG_COUPLING,
         outfile="01_day_comparison_Gj_CC.png",
-        subtitle=r"$G_j$ and CC",
+        subtitle=r"$G_j$ and $CC$",
     )
     plot_day_comparison(
         df,
@@ -941,23 +935,6 @@ def main():
         params=DAY_FIG_CELL,
         outfile="01_day_comparison_Rin_Cm_Vm.png",
         subtitle=r"$R_{in}$, $C_m$, $V_m$",
-    )
-    # Same layout, but left=min / right=max within each pair
-    plot_day_comparison(
-        df,
-        out_dir,
-        params=DAY_FIG_COUPLING,
-        outfile="01_day_comparison_Gj_CC_sorted_min_max.png",
-        subtitle=r"$G_j$ and CC (left = min, right = max)",
-        sort_sides=True,
-    )
-    plot_day_comparison(
-        df,
-        out_dir,
-        params=DAY_FIG_CELL,
-        outfile="01_day_comparison_Rin_Cm_Vm_sorted_min_max.png",
-        subtitle=r"$R_{in}$, $C_m$, $V_m$ (left = min, right = max)",
-        sort_sides=True,
     )
 
     plot_day12_statistics(df, out_dir)
