@@ -56,7 +56,7 @@ PARAM_DIRS = {
     "CC": ("CC_12", "CC_21"),
     "Rin": ("Rin_1", "Rin_2"),
     "Cm": ("Cm_1", "Cm_2"),
-    "Vm": ("V_rest_mV_ch0", "V_rest_mV_ch2"),
+    "Vm": ("V_rest_mV_1", "V_rest_mV_2"),
 }
 
 PARAM_YLABELS = {
@@ -75,14 +75,14 @@ DAY_FIG_COUPLING = [
 DAY_FIG_CELL = [
     ("Rin", "Rin_1", "Rin_2"),
     ("Cm", "Cm_1", "Cm_2"),
-    ("Vm", "V_rest_mV_ch0", "V_rest_mV_ch2"),
+    ("Vm", "V_rest_mV_1", "V_rest_mV_2"),
 ]
 STAT_PARAMS = [
     ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
     ("CC", "CC_12", "CC_21", "CC_pair_mean"),
     ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
     ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
-    ("Vm", "V_rest_mV_ch0", "V_rest_mV_ch2", "Vm_pair_mean"),
+    ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
 ]
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
@@ -313,7 +313,7 @@ def add_age_colorbar(
     sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axs, fraction=0.035, pad=0.02)
-    cbar.set_label("Age [P]")
+    cbar.set_label("Age [postnatal days]")
 
     ages = list(age_ticks or [])
     major_ages = major_labeled_ages(ages)
@@ -529,7 +529,7 @@ def plot_day_comparison(
         )
         cbar.outline.set_linewidth(0.6)
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
-        cbar.set_label("Age [P]", fontsize=9)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
 
         title = "Electrical couples by recording day"
         if subtitle:
