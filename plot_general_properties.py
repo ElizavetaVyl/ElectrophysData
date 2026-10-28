@@ -898,6 +898,103 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# Figure 3b: asymmetry by age bins (CC top, Gj bottom; columns = age groups)
+# ---------------------------------------------------------------------------
+AGE_ASYM_BINS = [
+    ("P10–32", 10, 32, False, "#FB8C00"),       # orange
+    ("P33–50", 33, 50, False, "#8E24AA"),       # purple
+    ("P50+", 50, None, True, "#2E0854"),        # dark violet; includes MT
+]
+
+
+def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: bool) -> pd.Series:
+    if hi is None:
+        # open upper end: age > lo, plus MT if requested
+        mask = df["age_num"].notna() & (df["age_num"] > lo)
+    else:
+        mask = df["age_num"].notna() & (df["age_num"] >= lo) & (df["age_num"] <= hi)
+    if include_mt:
+        mask = mask | df["is_mt"]
+    else:
+        mask = mask & (~df["is_mt"])
+    return mask
+
+
+def plot_asymmetry_by_age_bins(df: pd.DataFrame, out_dir: Path):
+    """
+    2x3: rows = CC, Gj; columns = age bins.
+    Fixed colors per column, no age colorbar.
+    """
+    sub = df[df["in_pool"]].copy()
+    rows = [("CC", ""), ("Gj", "nS")]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2), constrained_layout=True)
+        for r, (name, unit_note) in enumerate(rows):
+            xmin_c, xmax_c = f"{name}_min", f"{name}_max"
+            if xmin_c not in sub.columns:
+                for c in range(3):
+                    axes[r, c].set_visible(False)
+                continue
+
+            # shared limits across the row
+            all_vals = sub.loc[sub[xmin_c].notna() & sub[xmax_c].notna(), [xmin_c, xmax_c]]
+            lim_max = float(np.nanmax(all_vals.to_numpy())) if len(all_vals) else 1.0
+            lim_min = 0.0
+            sym = PARAM_MATH.get(name, name)
+            unit = f" [{unit_note}]" if unit_note else ""
+
+            for c, (label, lo, hi, include_mt, color) in enumerate(AGE_ASYM_BINS):
+                ax = axes[r, c]
+                mask = _age_bin_mask(sub, lo, hi, include_mt)
+                d = sub.loc[mask & sub[xmin_c].notna() & sub[xmax_c].notna()]
+                ax.plot(
+                    [lim_min, lim_max],
+                    [lim_min, lim_max],
+                    color="0.35",
+                    ls="--",
+                    lw=0.9,
+                    zorder=1,
+                )
+                ax.scatter(
+                    d[xmin_c],
+                    d[xmax_c],
+                    c=color,
+                    s=POINT_SIZE,
+                    alpha=POINT_ALPHA,
+                    edgecolors="white",
+                    linewidths=0.35,
+                    zorder=2,
+                )
+                n = len(d)
+                ax.set_xlim(lim_min, lim_max)
+                ax.set_ylim(lim_min, lim_max)
+                ax.set_aspect("equal", adjustable="box")
+                _style_pub_ax(ax)
+                if r == 0:
+                    ax.set_title(f"{label}\n$n_{{ec}}$={n}", fontsize=10, color="0.2")
+                else:
+                    ax.set_title(f"$n_{{ec}}$={n}", fontsize=9, color="0.35")
+                if c == 0:
+                    ax.set_ylabel(rf"{sym} max{unit}")
+                else:
+                    ax.set_ylabel("")
+                ax.set_xlabel(rf"{sym} min{unit}")
+
+        fig.suptitle("Asymmetry", fontsize=11, color="0.15")
+        # row labels on the left via fig text
+        fig.text(0.01, 0.72, r"$CC$", fontsize=11, rotation=90, va="center")
+        fig.text(0.01, 0.30, r"$G_{j}$", fontsize=11, rotation=90, va="center")
+        savefig(fig, out_dir, "03b_asymmetry_CC_Gj_by_age.png")
+
+
+# ---------------------------------------------------------------------------
 # Figure 5: AI histograms
 # ---------------------------------------------------------------------------
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
@@ -972,6 +1069,7 @@ def main():
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
+    plot_asymmetry_by_age_bins(df, out_dir)
     plot_ai_histograms(df, out_dir)
     print("Done. Figures are in:", out_dir)
 
