@@ -820,7 +820,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
         cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
-            f"Asymmetry index vs age\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            f"AI (asymmetry index) vs age\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
             fontsize=11,
             color="0.15",
         )
@@ -843,7 +843,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         cbar2.ax.tick_params(labelsize=8, length=3, width=0.7)
         cbar2.set_label("Age [postnatal days]", fontsize=9)
         fig2.suptitle(
-            f"Asymmetry index vs age (≤ P{P50_ZOOM_MAX})\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}",
+            f"AI (asymmetry index) vs age (≤ P{P50_ZOOM_MAX})\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1181,7 +1181,7 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         for ax in axes[len(metrics) :]:
             ax.set_visible(False)
         fig.suptitle(
-            f"Asymmetry index\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            f"AI (asymmetry index)\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
             fontsize=11,
             color="0.15",
         )
