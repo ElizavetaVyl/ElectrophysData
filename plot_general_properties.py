@@ -258,18 +258,21 @@ def _fmt_age_tick(t: float) -> str:
 def major_labeled_ages(ages: list[float]) -> list[float]:
     """
     Labels: minimum age, nearest available to 20/30/40/50,
-    then all ages >50 (e.g. 83, 160).
+    then ages >50 except the numeric maximum (max keeps a tick only;
+    MT is labeled separately).
     """
     if not ages:
         return []
     ages = sorted(float(a) for a in ages)
+    max_age = ages[-1]
     out: list[float] = [ages[0]]
     for target in MAJOR_AGE_TARGETS:
         nearest = min(ages, key=lambda a: abs(a - target))
         if nearest not in out:
             out.append(nearest)
     for a in ages:
-        if a > STRETCH_AGE_HI and a not in out:
+        # keep tick for max age, but do not label it (e.g. 166)
+        if a > STRETCH_AGE_HI and a < max_age and a not in out:
             out.append(a)
     return sorted(out)
 
@@ -409,7 +412,11 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Figure 1: day comparison (X=day; pair left/right)
 # ---------------------------------------------------------------------------
-def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
+def plot_day_comparison(df: pd.DataFrame, out_dir: Path, sort_sides: bool = False):
+    """
+    sort_sides=False: left = side 1, right = side 2 (original identity).
+    sort_sides=True:  left = min, right = max within each pair.
+    """
     params = [
         ("Gj", "Gj_12", "Gj_21"),
         ("CC", "CC_12", "CC_21"),
@@ -419,7 +426,6 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
     vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
 
-    # n_ec is the same logic for all panels if based on Gj-filtered rows by day
     n_parts = []
     for day in (1, 2, 3):
         n = int((df["day"] == day).sum())
@@ -446,11 +452,15 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
             x0 = DAY_X[day]
             x1 = x0 - DAY_PAIR_OFFSET
             x2 = x0 + DAY_PAIR_OFFSET
-            y1, y2 = row[c1], row[c2]
-            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.25, lw=0.8, zorder=1)
+            y1, y2 = float(row[c1]), float(row[c2])
+            if sort_sides:
+                y_left, y_right = (y1, y2) if y1 <= y2 else (y2, y1)
+            else:
+                y_left, y_right = y1, y2
+            ax.plot([x1, x2], [y_left, y_right], color=color, alpha=0.25, lw=0.8, zorder=1)
             ax.scatter(
                 [x1, x2],
-                [y1, y2],
+                [y_left, y_right],
                 c=[color, color],
                 s=POINT_SIZE,
                 alpha=POINT_ALPHA,
@@ -475,8 +485,14 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
         age_ticks=age_ticks,
         has_mt=has_mt,
     )
-    fig.suptitle(f"Electrical couples by recording day\n{n_line}", fontsize=12)
-    savefig(fig, out_dir, "01_day_comparison_Gj_CC_Rin_Cm.png")
+    if sort_sides:
+        title = "Electrical couples by recording day (left = min, right = max)"
+        outfile = "01_day_comparison_sorted_min_max.png"
+    else:
+        title = "Electrical couples by recording day"
+        outfile = "01_day_comparison_Gj_CC_Rin_Cm.png"
+    fig.suptitle(f"{title}\n{n_line}", fontsize=12)
+    savefig(fig, out_dir, outfile)
 
 
 # ---------------------------------------------------------------------------
@@ -853,7 +869,8 @@ def main():
     print(f"MT pairs: {int(df['is_mt'].sum())}")
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
-    plot_day_comparison(df, out_dir)
+    plot_day_comparison(df, out_dir, sort_sides=False)
+    plot_day_comparison(df, out_dir, sort_sides=True)
     plot_day12_statistics(df, out_dir)
     plot_ai_vs_age(df, out_dir)
     plot_asymmetry_clouds(df, out_dir)
