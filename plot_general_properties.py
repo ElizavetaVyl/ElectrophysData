@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import cm
 from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.ticker import MaxNLocator
 from scipy import stats
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,8 @@ STAT_PARAMS = [
 ]
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
+AI_FORMULA_VM_NOTE = r"for $V_m$: $AI$ from $|V_m|$"
+# AI=0 equal; AI≈0.33 ≈ 2×; 0–0.33 = up to ~2-fold
 PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
@@ -207,11 +210,24 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
         ai = pd.Series(np.nan, index=df.index, dtype=float)
         ratio = pd.Series(np.nan, index=df.index, dtype=float)
         pair_mean = pd.Series(np.nan, index=df.index, dtype=float)
+        # algebraic min/max (keep signed Vm for scatter plots)
         mx[both] = np.maximum(a[both], b[both])
         mn[both] = np.minimum(a[both], b[both])
-        denom = mx + mn
-        ai[both] = np.where(denom[both] != 0, (mx[both] - mn[both]) / denom[both], np.nan)
-        ratio[both] = np.where(mn[both] != 0, mx[both] / mn[both], np.nan)
+        # AI: for Vm use absolute values so index stays in [0, 1]
+        if name == "Vm":
+            a_ai = a.abs()
+            b_ai = b.abs()
+            mx_ai = pd.Series(np.nan, index=df.index, dtype=float)
+            mn_ai = pd.Series(np.nan, index=df.index, dtype=float)
+            mx_ai[both] = np.maximum(a_ai[both], b_ai[both])
+            mn_ai[both] = np.minimum(a_ai[both], b_ai[both])
+        else:
+            mx_ai, mn_ai = mx, mn
+        denom = mx_ai + mn_ai
+        ai[both] = np.where(
+            denom[both] != 0, (mx_ai[both] - mn_ai[both]) / denom[both], np.nan
+        )
+        ratio[both] = np.where(mn_ai[both] != 0, mx_ai[both] / mn_ai[both], np.nan)
         pair_mean[both] = (a[both] + b[both]) / 2.0
         df[f"{name}_max"] = mx
         df[f"{name}_min"] = mn
@@ -719,19 +735,13 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $V_{m}$"),
+        ("AI_Vm", r"AI $|V_{m}|$"),
     ]
     vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
 
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
-    axes = axes.ravel()
-
-    for ax, (col, title) in zip(axes, metrics):
-        if col not in sub.columns:
-            ax.set_visible(False)
-            continue
-        d = sub[sub[col].notna()]
-        d_num = d[~d["is_mt"]]
+    def _draw_ai_age(ax, d: pd.DataFrame, col: str, ylabel: str, xlim=None):
+        d_num = d[~d["is_mt"] & d[col].notna()]
         colors_num, _, _ = age_colors(
             d_num["age_num"].to_numpy(),
             d_num["is_mt"].to_numpy(),
@@ -739,52 +749,105 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
             max_age,
             mt_val,
         )
-        ax.scatter(d_num["age_num"], d_num[col], c=colors_num, s=22, alpha=0.85, edgecolors="none")
-        d_mt = d[d["is_mt"]]
+        ax.scatter(
+            d_num["age_num"],
+            d_num[col],
+            c=colors_num,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=2,
+        )
+        d_mt = d[d["is_mt"] & d[col].notna()]
         if len(d_mt):
-            ax.axvline(MT_AGE_PLACEHOLDER - 40, color="0.5", ls="--", lw=1)
-            mt_color = AGE_CMAP(1.0)
+            ax.axvline(MT_AGE_PLACEHOLDER - 40, color="0.55", ls="--", lw=0.8, zorder=0)
             ax.scatter(
                 np.full(len(d_mt), MT_AGE_PLACEHOLDER),
                 d_mt[col],
-                color=mt_color,
-                s=28,
-                alpha=0.9,
-                label="MT",
+                color=AGE_CMAP(1.0),
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
                 zorder=3,
-                edgecolors="none",
+                label="MT",
             )
-            ax.legend(frameon=False, loc="upper right")
-        ax.set_ylabel(title)
+        vals = d[col].dropna()
+        if len(vals):
+            m = float(vals.mean())
+            ax.axhline(m, color="crimson", lw=1.1, zorder=1)
+            ax.text(
+                0.98,
+                0.96,
+                f"mean = {m:.2f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="0.25",
+            )
+        ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)  # ≈ 2×
+        ax.set_ylabel(ylabel)
         ax.set_xlabel("Age [postnatal days]")
         ax.set_ylim(0, 1.05)
-        ax.grid(True, alpha=0.25)
-    for ax in axes[len(metrics) :]:
-        ax.set_visible(False)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        _style_pub_ax(ax)
+        if len(d_mt):
+            ax.legend(frameon=False, loc="lower right", fontsize=8)
 
-    fig.suptitle(f"Asymmetry index vs age (days 1–2); MT at right of dashed line\n{AI_FORMULA}")
-    savefig(fig, out_dir, "02_AI_vs_age.png")
-
-    fig2, axes2 = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
-    axes2 = axes2.ravel()
-    for ax, (col, title) in zip(axes2, metrics):
-        if col not in sub.columns:
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
+        axes = axes.ravel()
+        for ax, (col, title) in zip(axes, metrics):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            _draw_ai_age(ax, sub[sub[col].notna()], col, title)
+        for ax in axes[len(metrics) :]:
             ax.set_visible(False)
-            continue
-        d = sub[sub[col].notna() & (~sub["is_mt"]) & (sub["age_num"] <= P50_ZOOM_MAX)]
-        colors_num, _, _ = age_colors(
-            d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+        cbar = add_age_colorbar(
+            fig, list(axes[: len(metrics)]), vmin, max_age, mt_val, age_ticks, has_mt
         )
-        ax.scatter(d["age_num"], d[col], c=colors_num, s=22, alpha=0.85, edgecolors="none")
-        ax.set_ylabel(title)
-        ax.set_xlabel("Age [postnatal days]")
-        ax.set_xlim(0, P50_ZOOM_MAX)
-        ax.set_ylim(0, 1.05)
-        ax.grid(True, alpha=0.25)
-    for ax in axes2[len(metrics) :]:
-        ax.set_visible(False)
-    fig2.suptitle(f"AI vs age zoom (≤ P{P50_ZOOM_MAX}, days 1–2, MT excluded)\n{AI_FORMULA}")
-    savefig(fig2, out_dir, "02b_AI_vs_age_P50_zoom.png")
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            f"Asymmetry index vs age\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "02_AI_vs_age.png")
+
+        fig2, axes2 = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
+        axes2 = axes2.ravel()
+        for ax, (col, title) in zip(axes2, metrics):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna() & (~sub["is_mt"]) & (sub["age_num"] <= P50_ZOOM_MAX)]
+            _draw_ai_age(ax, d, col, title, xlim=(0, P50_ZOOM_MAX))
+        for ax in axes2[len(metrics) :]:
+            ax.set_visible(False)
+        cbar2 = add_age_colorbar(
+            fig2, list(axes2[: len(metrics)]), vmin, max_age, mt_val, age_ticks, has_mt=False
+        )
+        cbar2.outline.set_linewidth(0.6)
+        cbar2.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar2.set_label("Age [postnatal days]", fontsize=9)
+        fig2.suptitle(
+            f"Asymmetry index vs age (≤ P{P50_ZOOM_MAX})\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig2, out_dir, "02b_AI_vs_age_P50_zoom.png")
 
 
 # ---------------------------------------------------------------------------
@@ -1073,28 +1136,56 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $V_{m}$"),
+        ("AI_Vm", r"AI $|V_{m}|$"),
     ]
-    fig, axes = plt.subplots(2, 3, figsize=(11, 7), constrained_layout=True)
-    axes = axes.ravel()
-    for ax, (col, title) in zip(axes, metrics):
-        if col not in sub.columns:
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(11, 7), constrained_layout=True)
+        axes = axes.ravel()
+        for ax, (col, title) in zip(axes, metrics):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            vals = sub[col].dropna().to_numpy()
+            ax.hist(
+                vals,
+                bins=np.linspace(0, 1, 16),
+                color="#8E24AA",
+                edgecolor="white",
+                alpha=0.85,
+            )
+            if len(vals):
+                m = float(np.mean(vals))
+                ax.axvline(m, color="crimson", lw=1.3)
+                ax.axvline(1 / 3, color="0.55", ls=":", lw=0.9)  # ≈ 2×
+                ax.text(
+                    0.98,
+                    0.96,
+                    f"mean = {m:.2f}",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    color="0.25",
+                )
+            ax.set_xlim(0, 1)
+            ax.set_xlabel(title)
+            ax.set_ylabel("Count")
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+            _style_pub_ax(ax)
+        for ax in axes[len(metrics) :]:
             ax.set_visible(False)
-            continue
-        vals = sub[col].dropna().to_numpy()
-        ax.hist(vals, bins=np.linspace(0, 1, 16), color="steelblue", edgecolor="white", alpha=0.9)
-        if len(vals):
-            ax.axvline(np.mean(vals), color="crimson", lw=1.5, label=f"mean={np.mean(vals):.2f}")
-            ax.legend(frameon=False, fontsize=8)
-        ax.set_xlim(0, 1)
-        ax.set_xlabel(title)
-        ax.set_ylabel("Count")
-        ax.set_title(title)
-        ax.grid(True, alpha=0.25)
-    for ax in axes[len(metrics) :]:
-        ax.set_visible(False)
-    fig.suptitle(f"AI distributions (days 1–2)\n{AI_FORMULA}")
-    savefig(fig, out_dir, "05_AI_histograms.png")
+        fig.suptitle(
+            f"Asymmetry index\n{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; dotted: AI≈0.33 (~2×)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "05_AI_histograms.png")
 
 
 def parse_args():
