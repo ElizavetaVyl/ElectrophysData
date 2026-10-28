@@ -883,11 +883,69 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "02_AI_vs_age.png")
 
 
+def _dunn_posthoc(
+    samples: list[np.ndarray], labels: list[str]
+) -> list[tuple[str, str, float]]:
+    """
+    Dunn's test (Bonferroni-adjusted two-sided p) after Kruskal–Wallis.
+    samples/labels aligned; empty groups are skipped.
+    """
+    from itertools import combinations
+
+    groups = [
+        (lab, np.asarray(s, dtype=float))
+        for lab, s in zip(labels, samples)
+        if len(s) > 0
+    ]
+    if len(groups) < 2:
+        return []
+    data = np.concatenate([s for _, s in groups])
+    ranks = stats.rankdata(data)
+    n_total = len(data)
+    mean_ranks: dict[str, float] = {}
+    ns: dict[str, int] = {}
+    idx = 0
+    for lab, s in groups:
+        n = len(s)
+        mean_ranks[lab] = float(np.mean(ranks[idx : idx + n]))
+        ns[lab] = n
+        idx += n
+    # tie correction
+    _, counts = np.unique(ranks, return_counts=True)
+    tie_sum = float(np.sum(counts**3 - counts))
+    tie_factor = 1.0 - tie_sum / (n_total**3 - n_total) if n_total > 1 else 1.0
+
+    pairs = []
+    raw_p = []
+    for (lab_i, _), (lab_j, _) in combinations(groups, 2):
+        se = np.sqrt(
+            (n_total * (n_total + 1) / 12.0)
+            * (1.0 / ns[lab_i] + 1.0 / ns[lab_j])
+            * tie_factor
+        )
+        if se == 0:
+            p = 1.0
+        else:
+            z = abs(mean_ranks[lab_i] - mean_ranks[lab_j]) / se
+            p = float(2 * (1 - stats.norm.cdf(z)))
+        pairs.append((lab_i, lab_j))
+        raw_p.append(p)
+    raw_p = np.asarray(raw_p, dtype=float)
+    adj = np.minimum(raw_p * len(raw_p), 1.0)  # Bonferroni
+    return [(a, b, float(p)) for (a, b), p in zip(pairs, adj)]
+
+
+def _short_age_pair(a: str, b: str) -> str:
+    def _short(lab: str) -> str:
+        return lab.replace("P", "").replace("–", "-")
+
+    return f"{_short(a)} vs {_short(b)}"
+
+
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
-    """AI by age group with Kruskal–Wallis (separate from scatter)."""
+    """AI by age group: Kruskal–Wallis + Dunn post-hoc (Bonferroni)."""
     sub = df[df["in_pool"]].copy()
     group_labels = [b[0] for b in AGE_ASYM_BINS]
-    group_colors = {b[0]: b[4] for b in AGE_ASYM_BINS}
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
 
     with plt.rc_context(
@@ -897,9 +955,9 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8), constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=(12.5, 8), constrained_layout=True)
         axes = axes.ravel()
-        print("\nAI by age group — Kruskal–Wallis:")
+        print("\nAI by age group — Kruskal–Wallis + Dunn (Bonferroni):")
         for ax, (col, ylabel) in zip(axes, AI_METRICS):
             if col not in sub.columns:
                 ax.set_visible(False)
@@ -943,16 +1001,21 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                     zorder=4,
                 )
 
-            nonempty = [s for s in samples if len(s) >= 1]
-            if len(nonempty) >= 2 and all(len(s) >= 1 for s in nonempty):
-                # need at least 2 groups with data; kruskal needs n>=1 each but preferably more
+            nonempty = [s for s in samples if len(s) > 0]
+            if len(nonempty) >= 2:
                 try:
-                    H, p = stats.kruskal(*[s for s in samples if len(s) > 0])
-                    stat_txt = f"KW H={H:.2f}, {format_p(p)}"
-                    print(f"  {col}: H={H:.3f}, {format_p(p)}")
-                except Exception:
+                    H, p = stats.kruskal(*nonempty)
+                    dunn = _dunn_posthoc(samples, group_labels)
+                    dunn_bits = [
+                        f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                    ]
+                    stat_txt = f"KW {format_p(p)}"
+                    if dunn_bits:
+                        stat_txt += "\nDunn: " + "; ".join(dunn_bits)
+                    print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+                except Exception as exc:
                     stat_txt = "KW n/a"
-                    print(f"  {col}: KW n/a")
+                    print(f"  {col}: KW n/a ({exc})")
             else:
                 stat_txt = "KW n/a"
                 print(f"  {col}: KW n/a")
@@ -970,7 +1033,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 transform=ax.transAxes,
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=7,
                 color="0.25",
             )
             _style_pub_ax(ax)
@@ -978,10 +1041,35 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         for ax in axes[len(AI_METRICS) :]:
             ax.set_visible(False)
 
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                linestyle="None",
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                linestyle="None",
+                markersize=5,
+                label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+            frameon=False,
+            fontsize=9,
+        )
         fig.suptitle(
-            "AI (asymmetry index) by age group\n"
-            f"Kruskal–Wallis across {', '.join(group_labels)}; "
-            "crimson = mean±SEM, blue = median; MT in P50+",
+            "AI (asymmetry index) by age group\nKruskal–Wallis; Dunn post-hoc (Bonferroni)",
             fontsize=11,
             color="0.15",
         )
