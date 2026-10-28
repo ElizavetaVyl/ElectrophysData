@@ -38,10 +38,11 @@ P50_ZOOM_MAX = 50
 DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
 DAY_X = {1: 1.0, 2: 1.55, 3: 2.1}  # days closer together
 POINT_SIZE = 36
-JITTER_X = 0.025
-MT_AGE_OFFSET = 50  # MT plotted darker than max age by this many "days" on color scale
-STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar
-STRETCH_FRAC = 0.72  # fraction of colorbar reserved for <= STRETCH_AGE_HI
+POINT_ALPHA = 0.55
+MT_AGE_OFFSET = 50  # MT darker than max age by this many "days" on color scale
+STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar (linear ruler)
+STRETCH_FRAC = 0.75  # fraction of colorbar reserved for <= STRETCH_AGE_HI
+MAJOR_AGE_TARGETS = (20, 30, 40, 50)
 # saturated orange (young) -> almost-black purple (old / MT)
 AGE_CMAP = LinearSegmentedColormap.from_list(
     "age_orange_purple",
@@ -250,6 +251,29 @@ def unique_ages_for_colorbar(df: pd.DataFrame) -> list[float]:
     return ages
 
 
+def _fmt_age_tick(t: float) -> str:
+    return str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
+
+
+def major_labeled_ages(ages: list[float]) -> list[float]:
+    """
+    Labels: minimum age, nearest available to 20/30/40/50,
+    then all ages >50 (e.g. 83, 160).
+    """
+    if not ages:
+        return []
+    ages = sorted(float(a) for a in ages)
+    out: list[float] = [ages[0]]
+    for target in MAJOR_AGE_TARGETS:
+        nearest = min(ages, key=lambda a: abs(a - target))
+        if nearest not in out:
+            out.append(nearest)
+    for a in ages:
+        if a > STRETCH_AGE_HI and a not in out:
+            out.append(a)
+    return sorted(out)
+
+
 def add_age_colorbar(
     fig,
     axs,
@@ -259,48 +283,43 @@ def add_age_colorbar(
     age_ticks: list[float] | None = None,
     has_mt: bool = False,
 ):
-    """Colorbar with stretched young range and compressed older/MT tail."""
-    gradient = np.linspace(0, 1, 256).reshape(256, 1)
-    # Build RGBA image along unit axis, then map tick labels via age_to_unit
-    rgba = AGE_CMAP(np.linspace(0, 1, 256))
-
-    # Use a ScalarMappable on unit [0,1] and override ticks to age labels
+    """
+    Colorbar: linear-stretched ruler to P50, compressed older tail.
+    Minor ticks = all ages present; major labels = min, ~20/30/40/50, >50, MT.
+    """
     sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axs, fraction=0.035, pad=0.02)
     cbar.set_label("Age [P]")
 
-    ticks_age: list[float] = []
-    labels: list[str] = []
-    if age_ticks:
-        for t in age_ticks:
-            ticks_age.append(float(t))
-            lab = str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
-            labels.append(lab)
+    ages = list(age_ticks or [])
+    major_ages = major_labeled_ages(ages)
+
+    def _unit(t: float, is_mt: bool = False) -> float:
+        return age_to_unit(t, is_mt, vmin, max_age, mt_val)
+
+    # minor ticks: every observed age (+ MT mark without label duplication)
+    minor_ages = list(ages)
+    minor_units = [_unit(a) for a in minor_ages]
     if has_mt:
-        ticks_age.append(mt_val)
-        labels.append("MT")
+        minor_units.append(_unit(mt_val, is_mt=True))
+    if minor_units:
+        cbar.ax.yaxis.set_ticks(sorted(set(minor_units)), minor=True)
+        cbar.ax.tick_params(which="minor", length=3, width=0.8)
 
-    if ticks_age:
-        tick_units = [
-            age_to_unit(
-                t,
-                is_mt=(has_mt and abs(t - mt_val) < 1e-9),
-                vmin=vmin,
-                max_age=max_age,
-                mt_val=mt_val,
-            )
-            for t in ticks_age
-        ]
-        cbar.set_ticks(tick_units)
-        cbar.set_ticklabels(labels)
+    major_units = [_unit(a) for a in major_ages]
+    major_labels = [_fmt_age_tick(a) for a in major_ages]
+    if has_mt:
+        major_units.append(_unit(mt_val, is_mt=True))
+        major_labels.append("MT")
+    if major_units:
+        cbar.set_ticks(major_units)
+        cbar.set_ticklabels(major_labels)
+        cbar.ax.tick_params(which="major", length=6, width=1.0)
 
-    # visual divider between stretched and compressed zones
     if max_age > STRETCH_AGE_HI:
-        u_div = age_to_unit(STRETCH_AGE_HI, False, vmin, max_age, mt_val)
-        cbar.ax.axhline(u_div, color="0.85", lw=0.8, ls="--")
-
-    _ = (gradient, rgba)  # kept for clarity / possible future inset bar
+        u_div = _unit(float(STRETCH_AGE_HI))
+        cbar.ax.axhline(u_div, color="0.75", lw=0.8, ls="--")
     return cbar
 
 
@@ -408,7 +427,6 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
     n_line = "   |   ".join(n_parts)
 
     fig, axes = plt.subplots(1, 4, figsize=(14.5, 4.4), sharex=True, constrained_layout=True)
-    rng = np.random.default_rng(42)
     for ax, (name, c1, c2) in zip(axes, params):
         if c1 not in df.columns or c2 not in df.columns:
             ax.set_visible(False)
@@ -426,18 +444,16 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
             if day not in DAY_X:
                 continue
             x0 = DAY_X[day]
-            j1 = float(rng.normal(0, JITTER_X))
-            j2 = float(rng.normal(0, JITTER_X))
-            x1 = x0 - DAY_PAIR_OFFSET + j1
-            x2 = x0 + DAY_PAIR_OFFSET + j2
+            x1 = x0 - DAY_PAIR_OFFSET
+            x2 = x0 + DAY_PAIR_OFFSET
             y1, y2 = row[c1], row[c2]
-            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.35, lw=0.8, zorder=1)
+            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.25, lw=0.8, zorder=1)
             ax.scatter(
                 [x1, x2],
                 [y1, y2],
                 c=[color, color],
                 s=POINT_SIZE,
-                alpha=0.9,
+                alpha=POINT_ALPHA,
                 zorder=2,
                 edgecolors="none",
             )
