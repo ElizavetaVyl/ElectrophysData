@@ -349,11 +349,12 @@ def _fmt_age_tick(t: float) -> str:
     return str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
 
 
-def major_labeled_ages(ages: list[float]) -> list[float]:
+def major_labeled_ages(ages: list[float], min_gap: float = 8.0) -> list[float]:
     """
-    Labels: minimum age, nearest available to 20/30/40/50,
-    then ages >50 except the numeric maximum (max keeps a tick only;
-    MT is labeled separately).
+    Labels: minimum age, nearest available to 20/30/40/50 (always keep
+    the age nearest to P50, e.g. 49), then sparsely ages >50.
+    Avoid crowding (49+51+53) that makes the ~P50 mark unreadable.
+    Numeric maximum is not labeled (MT is labeled separately on the colorbar).
     """
     if not ages:
         return []
@@ -364,11 +365,27 @@ def major_labeled_ages(ages: list[float]) -> list[float]:
         nearest = min(ages, key=lambda a: abs(a - target))
         if nearest not in out:
             out.append(nearest)
+    # Always keep the observed age closest to the P50 stretch boundary
+    nearest_p50 = min(ages, key=lambda a: abs(a - float(STRETCH_AGE_HI)))
+    if nearest_p50 not in out:
+        out.append(nearest_p50)
+    # Older ages: only if far enough from already chosen majors
     for a in ages:
-        # keep tick for max age, but do not label it (e.g. 166)
-        if a > STRETCH_AGE_HI and a < max_age and a not in out:
+        if a <= float(STRETCH_AGE_HI) or a >= max_age:
+            continue
+        if all(abs(a - o) >= min_gap for o in out):
             out.append(a)
     return sorted(out)
+
+
+def binom_pvalue(k: int, n: int, p: float = 0.5) -> float:
+    """Two-sided binomial p; works on SciPy <1.7 (binom_test) and >=1.7 (binomtest)."""
+    if n <= 0:
+        return float("nan")
+    if hasattr(stats, "binomtest"):
+        return float(stats.binomtest(k, n, p).pvalue)
+    # SciPy < 1.7
+    return float(stats.binom_test(k, n, p))
 
 
 def add_age_colorbar(
@@ -1761,7 +1778,7 @@ def plot_signed_delta_gj_vs_rin(df: pd.DataFrame, out_dir: Path):
             frac = n_same / n_nz if n_nz else np.nan
             # two-sided binomial vs 50%
             if n_nz >= 5:
-                binom_p = float(stats.binomtest(n_same, n_nz, 0.5).pvalue)
+                binom_p = binom_pvalue(n_same, n_nz, 0.5)
             else:
                 binom_p = np.nan
 
