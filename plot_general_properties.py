@@ -701,7 +701,7 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
-        metrics = [
+    metrics = [
         ("AI_Gj", r"AI $G_j$"),
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
