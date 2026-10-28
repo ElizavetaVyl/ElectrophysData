@@ -432,6 +432,22 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Figure 1: day comparison (X=day; pair left/right = channel identity)
 # ---------------------------------------------------------------------------
+def _style_day_ax(ax):
+    """Publication-like axis: no top/right frame, light spines, no y-grid."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(0.8)
+    ax.spines["bottom"].set_linewidth(0.8)
+    ax.spines["left"].set_color("0.2")
+    ax.spines["bottom"].set_color("0.2")
+    ax.tick_params(axis="both", which="major", length=3.5, width=0.8, colors="0.2", labelsize=9)
+    ax.yaxis.label.set_size(10)
+    ax.grid(False)
+    # soft vertical guides at day centers only
+    for x in (DAY_X[1], DAY_X[2], DAY_X[3]):
+        ax.axvline(x, color="0.85", lw=0.7, zorder=0)
+
+
 def plot_day_comparison(
     df: pd.DataFrame,
     out_dir: Path,
@@ -451,62 +467,75 @@ def plot_day_comparison(
 
     n_panels = len(params)
     fig_w = 4.0 * n_panels + 1.5
-    fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, 4.4), sharex=True, constrained_layout=True)
-    if n_panels == 1:
-        axes = [axes]
-    for ax, (name, c1, c2) in zip(axes, params):
-        if c1 not in df.columns or c2 not in df.columns:
-            ax.set_visible(False)
-            continue
-        sub = df[df[c1].notna() & df[c2].notna() & df["day"].notna()].copy()
-        colors, _, _ = age_colors(
-            sub["age_num"].to_numpy(),
-            sub["is_mt"].to_numpy(),
-            vmin,
-            max_age,
-            mt_val,
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1, n_panels, figsize=(fig_w, 4.4), sharex=True, constrained_layout=True
         )
-        for (_, row), color in zip(sub.iterrows(), colors):
-            day = int(row["day"])
-            if day not in DAY_X:
+        if n_panels == 1:
+            axes = [axes]
+        for ax, (name, c1, c2) in zip(axes, params):
+            if c1 not in df.columns or c2 not in df.columns:
+                ax.set_visible(False)
                 continue
-            x0 = DAY_X[day]
-            x1 = x0 - DAY_PAIR_OFFSET
-            x2 = x0 + DAY_PAIR_OFFSET
-            y1, y2 = float(row[c1]), float(row[c2])
-            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.25, lw=0.8, zorder=1)
-            ax.scatter(
-                [x1, x2],
-                [y1, y2],
-                c=[color, color],
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
-                zorder=2,
-                edgecolors="none",
+            sub = df[df[c1].notna() & df[c2].notna() & df["day"].notna()].copy()
+            colors, _, _ = age_colors(
+                sub["age_num"].to_numpy(),
+                sub["is_mt"].to_numpy(),
+                vmin,
+                max_age,
+                mt_val,
             )
-        ax.set_title("")
-        ax.set_ylabel(PARAM_YLABELS.get(name, name))
-        ax.set_xticks([DAY_X[1], DAY_X[2], DAY_X[3]])
-        ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2], DAY_TICK_LABELS[3]])
-        ax.set_xlabel("")
-        ax.set_xlim(DAY_X[1] - 0.35, DAY_X[3] + 0.35)
-        ax.grid(True, axis="x", alpha=0.35)
-        ax.grid(False, axis="y")
+            for (_, row), color in zip(sub.iterrows(), colors):
+                day = int(row["day"])
+                if day not in DAY_X:
+                    continue
+                x0 = DAY_X[day]
+                x1 = x0 - DAY_PAIR_OFFSET
+                x2 = x0 + DAY_PAIR_OFFSET
+                y1, y2 = float(row[c1]), float(row[c2])
+                ax.plot([x1, x2], [y1, y2], color=color, alpha=0.22, lw=0.7, zorder=1)
+                ax.scatter(
+                    [x1, x2],
+                    [y1, y2],
+                    c=[color, color],
+                    s=POINT_SIZE,
+                    alpha=POINT_ALPHA,
+                    zorder=2,
+                    edgecolors="white",
+                    linewidths=0.35,
+                )
+            ax.set_title("")
+            ax.set_ylabel(PARAM_YLABELS.get(name, name))
+            ax.set_xticks([DAY_X[1], DAY_X[2], DAY_X[3]])
+            ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2], DAY_TICK_LABELS[3]])
+            ax.set_xlabel("")
+            ax.set_xlim(DAY_X[1] - 0.35, DAY_X[3] + 0.35)
+            _style_day_ax(ax)
 
-    add_age_colorbar(
-        fig,
-        list(axes),
-        vmin=vmin,
-        max_age=max_age,
-        mt_val=mt_val,
-        age_ticks=age_ticks,
-        has_mt=has_mt,
-    )
-    title = "Electrical couples by recording day"
-    if subtitle:
-        title = f"{title} — {subtitle}"
-    fig.suptitle(f"{title}\n{n_line}", fontsize=12)
-    savefig(fig, out_dir, outfile)
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [P]", fontsize=9)
+
+        title = "Electrical couples by recording day"
+        if subtitle:
+            title = f"{title} — {subtitle}"
+        fig.suptitle(f"{title}\n{n_line}", fontsize=11, color="0.15")
+        savefig(fig, out_dir, outfile)
 
 
 # ---------------------------------------------------------------------------
