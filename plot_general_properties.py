@@ -820,11 +820,17 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(2, 3, figsize=(12, 8), sharex=True, constrained_layout=True)
-        axes = axes.ravel()
-        for ax, (col, ylabel) in zip(axes, AI_METRICS):
+        row1 = [("AI_Gj", r"AI $G_{j}$"), ("AI_CC", r"AI $CC$")]
+        row2 = [
+            ("AI_Rin", r"AI $R_{in}$"),
+            ("AI_Cm", r"AI $C_{m}$"),
+            ("AI_Vm", r"AI $|V_{m}|$"),
+        ]
+
+        def _ai_age_panel(ax, col: str, ylabel: str):
             if col not in sub.columns:
                 ax.set_visible(False)
-                continue
+                return
             d = sub[sub[col].notna() & sub["age_group"].notna()]
             ax.scatter(
                 d["x_warp"],
@@ -857,8 +863,12 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
             _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
             _style_pub_ax(ax)
 
-        for ax in axes[len(AI_METRICS) :]:
-            ax.set_visible(False)
+        # top: Gj, CC; bottom: Rin, Cm, Vm
+        _ai_age_panel(axes[0, 0], *row1[0])
+        _ai_age_panel(axes[0, 1], *row1[1])
+        axes[0, 2].set_visible(False)
+        for ax, (col, ylabel) in zip(axes[1], row2):
+            _ai_age_panel(ax, col, ylabel)
 
         # one legend for age groups
         handles = [
@@ -947,6 +957,92 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     sub = df[df["in_pool"]].copy()
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    row1 = [("AI_Gj", r"AI $G_{j}$"), ("AI_CC", r"AI $CC$")]
+    row2 = [
+        ("AI_Rin", r"AI $R_{in}$"),
+        ("AI_Cm", r"AI $C_{m}$"),
+        ("AI_Vm", r"AI $|V_{m}|$"),
+    ]
+
+    def _panel(ax, col: str, ylabel: str):
+        if col not in sub.columns:
+            ax.set_visible(False)
+            return
+        samples = []
+        for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
+            samples.append(vals)
+            if len(vals) == 0:
+                continue
+            jitter = np.random.default_rng(abs(hash(col + label)) % (2**32)).normal(
+                0, 0.06, len(vals)
+            )
+            ax.scatter(
+                np.full(len(vals), x_pos[label]) + jitter,
+                vals,
+                c=color,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            ax.errorbar(
+                [x_pos[label]],
+                [np.mean(vals)],
+                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+                fmt="o",
+                color="crimson",
+                markersize=6,
+                capsize=3,
+                zorder=3,
+            )
+            ax.plot(
+                [x_pos[label]],
+                [np.median(vals)],
+                marker="D",
+                color="royalblue",
+                markersize=5,
+                zorder=4,
+            )
+
+        nonempty = [s for s in samples if len(s) > 0]
+        if len(nonempty) >= 2:
+            try:
+                H, p = stats.kruskal(*nonempty)
+                dunn = _dunn_posthoc(samples, group_labels)
+                dunn_bits = [
+                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                ]
+                stat_txt = f"KW {format_p(p)}"
+                if dunn_bits:
+                    stat_txt += "\nDunn: " + "; ".join(dunn_bits)
+                print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+            except Exception as exc:
+                stat_txt = "KW n/a"
+                print(f"  {col}: KW n/a ({exc})")
+        else:
+            stat_txt = "KW n/a"
+            print(f"  {col}: KW n/a")
+
+        ax.set_xticks([x_pos[l] for l in group_labels])
+        ax.set_xticklabels(group_labels)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("")
+        ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
+        ax.text(
+            0.5,
+            1.02,
+            stat_txt,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color="0.25",
+        )
+        _style_pub_ax(ax)
 
     with plt.rc_context(
         {
@@ -956,90 +1052,14 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(2, 3, figsize=(12.5, 8), constrained_layout=True)
-        axes = axes.ravel()
         print("\nAI by age group — Kruskal–Wallis + Dunn (Bonferroni):")
-        for ax, (col, ylabel) in zip(axes, AI_METRICS):
-            if col not in sub.columns:
-                ax.set_visible(False)
-                continue
-            samples = []
-            for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
-                mask = _age_bin_mask(sub, lo, hi, include_mt)
-                vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
-                samples.append(vals)
-                if len(vals) == 0:
-                    continue
-                jitter = np.random.default_rng(abs(hash(col + label)) % (2**32)).normal(
-                    0, 0.06, len(vals)
-                )
-                ax.scatter(
-                    np.full(len(vals), x_pos[label]) + jitter,
-                    vals,
-                    c=color,
-                    s=POINT_SIZE,
-                    alpha=POINT_ALPHA,
-                    edgecolors="white",
-                    linewidths=0.35,
-                    zorder=2,
-                )
-                ax.errorbar(
-                    [x_pos[label]],
-                    [np.mean(vals)],
-                    yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
-                    fmt="o",
-                    color="crimson",
-                    markersize=6,
-                    capsize=3,
-                    zorder=3,
-                )
-                ax.plot(
-                    [x_pos[label]],
-                    [np.median(vals)],
-                    marker="D",
-                    color="royalblue",
-                    markersize=5,
-                    zorder=4,
-                )
 
-            nonempty = [s for s in samples if len(s) > 0]
-            if len(nonempty) >= 2:
-                try:
-                    H, p = stats.kruskal(*nonempty)
-                    dunn = _dunn_posthoc(samples, group_labels)
-                    dunn_bits = [
-                        f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-                    ]
-                    stat_txt = f"KW {format_p(p)}"
-                    if dunn_bits:
-                        stat_txt += "\nDunn: " + "; ".join(dunn_bits)
-                    print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
-                except Exception as exc:
-                    stat_txt = "KW n/a"
-                    print(f"  {col}: KW n/a ({exc})")
-            else:
-                stat_txt = "KW n/a"
-                print(f"  {col}: KW n/a")
-
-            ax.set_xticks([x_pos[l] for l in group_labels])
-            ax.set_xticklabels(group_labels)
-            ax.set_ylim(0, 1.05)
-            ax.set_ylabel(ylabel)
-            ax.set_xlabel("")
-            ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
-            ax.text(
-                0.5,
-                1.02,
-                stat_txt,
-                transform=ax.transAxes,
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                color="0.25",
-            )
-            _style_pub_ax(ax)
-
-        for ax in axes[len(AI_METRICS) :]:
-            ax.set_visible(False)
+        # top: Gj, CC; bottom: Rin, Cm, Vm
+        _panel(axes[0, 0], *row1[0])
+        _panel(axes[0, 1], *row1[1])
+        axes[0, 2].set_visible(False)
+        for ax, (col, ylabel) in zip(axes[1], row2):
+            _panel(ax, col, ylabel)
 
         legend_handles = [
             Line2D(
