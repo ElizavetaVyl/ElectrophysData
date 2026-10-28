@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import cm
-from matplotlib.colors import Normalize
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from scipy import stats
 
 # ---------------------------------------------------------------------------
@@ -35,9 +35,14 @@ FIGURES_DIR_NAME = "general properties figures"
 POOL_DAYS = {1, 2}
 MT_AGE_PLACEHOLDER = 400  # x-position for MT on age plots (days)
 P50_ZOOM_MAX = 50
-DAY_PAIR_OFFSET = 0.15  # left/right shift within a day tick
-AGE_CMAP = cm.Greys  # light (young) -> dark (old / MT)
+DAY_PAIR_OFFSET = 0.06  # left/right shift within a day tick
+# light orange (young) -> dark purple (old / MT)
+AGE_CMAP = LinearSegmentedColormap.from_list(
+    "age_orange_purple",
+    ["#FFE0B2", "#FF9800", "#E65100", "#8E24AA", "#4A148C"],
+)
 SHAPIRO_ALPHA = 0.05
+DAY_TICK_LABELS = {1: "день 1", 2: "день 2", 3: "день 3"}
 
 PARAM_DIRS = {
     "Gj": ("Gj_12", "Gj_21"),
@@ -47,10 +52,10 @@ PARAM_DIRS = {
 }
 
 PARAM_YLABELS = {
-    "Gj": r"$G_j$ (nS)",
+    "Gj": r"$G_j$ [nS]",
     "CC": "CC",
-    "Rin": r"$R_{in}$ (M$\Omega$)",
-    "Cm": r"$C_m$ (pF)",
+    "Rin": r"$R_{in}$ [M$\Omega$]",
+    "Cm": r"$C_m$ [pF]",
 }
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
@@ -212,11 +217,36 @@ def age_colors(age_num: np.ndarray, is_mt: np.ndarray, vmin: float, vmax: float)
     return colors, norm, AGE_CMAP
 
 
-def add_age_colorbar(fig, norm, cmap, axs):
+def unique_ages_for_colorbar(df: pd.DataFrame) -> list[float]:
+    ages = sorted({float(a) for a in df.loc[~df["is_mt"], "age_num"].dropna().unique()})
+    return ages
+
+
+def add_age_colorbar(fig, norm, cmap, axs, age_ticks: list[float] | None = None, has_mt: bool = False):
     sm = cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axs, fraction=0.03, pad=0.02)
-    cbar.set_label("Age (postnatal day); MT = darkest")
+    cbar.set_label("Age [P]" + (" (MT = darkest)" if has_mt else ""))
+    if age_ticks:
+        ticks = [t for t in age_ticks if norm.vmin <= t <= norm.vmax]
+        # de-duplicate
+        uniq = []
+        seen = set()
+        for t in ticks:
+            key = round(float(t), 6)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(float(t))
+        ticklabels = [
+            str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}" for t in uniq
+        ]
+        if has_mt and uniq:
+            # mark oldest tick as also MT color endpoint
+            ticklabels[-1] = f"{ticklabels[-1]}/MT"
+        if uniq:
+            cbar.set_ticks(uniq)
+            cbar.set_ticklabels(ticklabels)
     return cbar
 
 
@@ -299,6 +329,8 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
         ("Cm", "Cm_1", "Cm_2"),
     ]
     vmin, vmax = age_scale(df)
+    age_ticks = unique_ages_for_colorbar(df)
+    has_mt = bool(df["is_mt"].any())
 
     fig, axes = plt.subplots(1, 4, figsize=(14.5, 4.2), sharex=True, constrained_layout=True)
     norm = cmap = None
@@ -315,17 +347,32 @@ def plot_day_comparison(df: pd.DataFrame, out_dir: Path):
             x1 = day - DAY_PAIR_OFFSET
             x2 = day + DAY_PAIR_OFFSET
             y1, y2 = row[c1], row[c2]
-            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.35, lw=0.8, zorder=1)
-            ax.scatter([x1, x2], [y1, y2], c=[color, color], s=18, alpha=0.85, zorder=2, edgecolors="none")
-        ax.set_xlabel("Recording day after slice prep")
+            ax.plot([x1, x2], [y1, y2], color=color, alpha=0.4, lw=0.8, zorder=1)
+            ax.scatter(
+                [x1, x2],
+                [y1, y2],
+                c=[color, color],
+                s=20,
+                alpha=0.9,
+                zorder=2,
+                edgecolors="none",
+            )
+        # n ec per day instead of subplot name
+        counts = []
+        for day in (1, 2, 3):
+            n = int(((sub["day"] == day).sum()))
+            counts.append(f"n ec = {n}")
+        ax.set_title("   |   ".join(counts), fontsize=9)
         ax.set_ylabel(PARAM_YLABELS[name])
         ax.set_xticks([1, 2, 3])
-        ax.set_title(f"{name}\nleft = side 1, right = side 2")
+        ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2], DAY_TICK_LABELS[3]])
+        ax.set_xlabel("")
+        ax.set_xlim(0.7, 3.3)
         ax.grid(True, alpha=0.25)
 
     if norm is not None and cmap is not None:
-        add_age_colorbar(fig, norm, cmap, list(axes))
-    fig.suptitle("Within-pair values by recording day (color = animal age; MT = darkest)")
+        add_age_colorbar(fig, norm, cmap, list(axes), age_ticks=age_ticks, has_mt=has_mt)
+    fig.suptitle("Pairs by recording day")
     savefig(fig, out_dir, "01_day_comparison_Gj_CC_Rin_Cm.png")
 
 
@@ -343,9 +390,10 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
         ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
         ("CC", "CC_12", "CC_21", "CC_pair_mean"),
         ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
+        ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(12.5, 7.5), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(15, 7.5), constrained_layout=True)
     fig.suptitle(
         "Day 1 vs Day 2\n"
         + POOL_FORMULA
@@ -363,16 +411,37 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
         d1 = pool_both_sides(df, 1, c1, c2)
         d2 = pool_both_sides(df, 2, c1, c2)
         res = compare_two_groups(d1, d2)
-        ax.scatter(np.full(len(d1), 1) + np.random.default_rng(0).normal(0, 0.03, len(d1)), d1, s=14, alpha=0.55, color="0.35")
-        ax.scatter(np.full(len(d2), 2) + np.random.default_rng(1).normal(0, 0.03, len(d2)), d2, s=14, alpha=0.55, color="0.35")
-        ax.plot([1, 2], [res["mean1"], res["mean2"]], "o-", color="crimson", lw=1.8, markersize=7, zorder=3)
+        ax.scatter(
+            np.full(len(d1), 1) + np.random.default_rng(0).normal(0, 0.03, len(d1)),
+            d1,
+            s=14,
+            alpha=0.55,
+            color="0.35",
+        )
+        ax.scatter(
+            np.full(len(d2), 2) + np.random.default_rng(1).normal(0, 0.03, len(d2)),
+            d2,
+            s=14,
+            alpha=0.55,
+            color="0.35",
+        )
+        ax.plot(
+            [1, 2],
+            [res["mean1"], res["mean2"]],
+            "o-",
+            color="crimson",
+            lw=1.8,
+            markersize=7,
+            zorder=3,
+        )
         ax.set_xticks([1, 2])
-        ax.set_xlabel("Day")
+        ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2]])
+        ax.set_xlabel("")
         ax.set_ylabel(PARAM_YLABELS[name])
         sh1 = format_p(res["shapiro_p1"])
         sh2 = format_p(res["shapiro_p2"])
         ax.set_title(
-            f"{name} pooled sides\n"
+            f"pooled sides\n"
             f"Shapiro D1 {sh1}, D2 {sh2}\n"
             f"{res['test']}: {format_p(res['p'])}\n"
             f"n={res['n1']}/{res['n2']}; means {res['mean1']:.3g}, {res['mean2']:.3g}"
@@ -387,16 +456,37 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
         s1 = df.loc[df["day"] == 1, mean_col].dropna().to_numpy(dtype=float)
         s2 = df.loc[df["day"] == 2, mean_col].dropna().to_numpy(dtype=float)
         res = compare_two_groups(s1, s2)
-        ax.scatter(np.full(len(s1), 1) + np.random.default_rng(2).normal(0, 0.03, len(s1)), s1, s=18, alpha=0.65, color="0.35")
-        ax.scatter(np.full(len(s2), 2) + np.random.default_rng(3).normal(0, 0.03, len(s2)), s2, s=18, alpha=0.65, color="0.35")
-        ax.plot([1, 2], [res["mean1"], res["mean2"]], "o-", color="crimson", lw=1.8, markersize=7, zorder=3)
+        ax.scatter(
+            np.full(len(s1), 1) + np.random.default_rng(2).normal(0, 0.03, len(s1)),
+            s1,
+            s=18,
+            alpha=0.65,
+            color="0.35",
+        )
+        ax.scatter(
+            np.full(len(s2), 2) + np.random.default_rng(3).normal(0, 0.03, len(s2)),
+            s2,
+            s=18,
+            alpha=0.65,
+            color="0.35",
+        )
+        ax.plot(
+            [1, 2],
+            [res["mean1"], res["mean2"]],
+            "o-",
+            color="crimson",
+            lw=1.8,
+            markersize=7,
+            zorder=3,
+        )
         ax.set_xticks([1, 2])
-        ax.set_xlabel("Day")
+        ax.set_xticklabels([DAY_TICK_LABELS[1], DAY_TICK_LABELS[2]])
+        ax.set_xlabel("")
         ax.set_ylabel(PARAM_YLABELS[name])
         sh1 = format_p(res["shapiro_p1"])
         sh2 = format_p(res["shapiro_p2"])
         ax.set_title(
-            f"{name} pair mean\n"
+            f"pair mean\n"
             f"Shapiro D1 {sh1}, D2 {sh2}\n"
             f"{res['test']}: {format_p(res['p'])}\n"
             f"n={res['n1']}/{res['n2']}; means {res['mean1']:.3g}, {res['mean2']:.3g}"
@@ -531,8 +621,8 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
                     lw=1.5,
                     label=f"fit k={k:.2f}",
                 )
-        xlab = f"{name} min" + (f" ({unit_note})" if unit_note else "")
-        ylab = f"{name} max" + (f" ({unit_note})" if unit_note else "")
+        xlab = f"{name} min" + (f" [{unit_note}]" if unit_note else "")
+        ylab = f"{name} max" + (f" [{unit_note}]" if unit_note else "")
         ax.set_xlabel(xlab)
         ax.set_ylabel(ylab)
         ax.set_title(ylabel)
@@ -541,6 +631,8 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         ax.legend(frameon=False, loc="upper left")
         return norm, cmap
 
+    age_ticks = unique_ages_for_colorbar(sub)
+    has_mt = bool(sub["is_mt"].any())
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
     norm = cmap = None
     units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF"}
@@ -549,7 +641,9 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         if out:
             norm, cmap = out
     if norm is not None:
-        add_age_colorbar(fig, norm, cmap, list(axes))
+        add_age_colorbar(
+            fig, norm, cmap, list(axes), age_ticks=age_ticks, has_mt=has_mt
+        )
     fig.suptitle(f"Asymmetry clouds (days 1–2): max vs min\n{AI_FORMULA}")
     savefig(fig, out_dir, "03_asymmetry_Gj_CC.png")
 
@@ -561,8 +655,12 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         if out:
             norm, cmap = out
     if norm is not None:
-        add_age_colorbar(fig2, norm, cmap, list(axes2))
-    fig2.suptitle(rf"Cell-property asymmetry (days 1–2): $R_{{in}}$ and $C_m$" + f"\n{AI_FORMULA}")
+        add_age_colorbar(
+            fig2, norm, cmap, list(axes2), age_ticks=age_ticks, has_mt=has_mt
+        )
+    fig2.suptitle(
+        rf"Cell-property asymmetry (days 1–2): $R_{{in}}$ and $C_m$" + f"\n{AI_FORMULA}"
+    )
     savefig(fig2, out_dir, "04_asymmetry_Rin_Cm.png")
 
 
