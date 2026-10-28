@@ -770,7 +770,7 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Figure 2: AI vs age (warped X, group colors) + separate group stats
+# Figure 2: AI vs age (warped X, continuous age Greys) + separate group stats
 # ---------------------------------------------------------------------------
 def _warped_age_x(age_num, is_mt, vmin, max_age, mt_val) -> float:
     return age_to_unit(age_num, bool(is_mt), vmin, max_age, mt_val)
@@ -793,20 +793,11 @@ def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has
 
 
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
-    """Scatter AI vs warped age; points colored by P10–32 / P33–50 / P50+ (MT in P50+)."""
+    """Scatter AI vs warped age; continuous age Greys colormap (same as day/asymmetry figs)."""
     sub = df[df["in_pool"]].copy()
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
-
-    # assign group colors
-    labels, colors = [], []
-    for _, row in sub.iterrows():
-        lab, col = _age_group_label_color(row["age_num"], bool(row["is_mt"]))
-        labels.append(lab)
-        colors.append(col if col else "0.5")
     sub = sub.copy()
-    sub["age_group"] = labels
-    sub["age_group_color"] = colors
     sub["x_warp"] = [
         _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
         for a, mt in zip(sub["age_num"], sub["is_mt"])
@@ -824,38 +815,27 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         row2 = [
             ("AI_Rin", r"AI $R_{in}$"),
             ("AI_Cm", r"AI $C_{m}$"),
-            ("AI_Vm", r"AI $|V_{m}|$"),
+            ("AI_Vm", r"AI $V_{m}$"),
         ]
 
         def _ai_age_panel(ax, col: str, ylabel: str):
             if col not in sub.columns:
                 ax.set_visible(False)
                 return
-            d = sub[sub[col].notna() & sub["age_group"].notna()]
+            d = sub[sub[col].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
             ax.scatter(
                 d["x_warp"],
                 d[col],
-                c=d["age_group_color"],
+                c=colors,
                 s=POINT_SIZE,
                 alpha=POINT_ALPHA,
                 edgecolors="white",
                 linewidths=0.35,
                 zorder=2,
             )
-            vals = d[col]
-            if len(vals):
-                m = float(vals.mean())
-                ax.axhline(m, color="crimson", lw=1.1, zorder=1)
-                ax.text(
-                    0.98,
-                    0.96,
-                    f"mean = {m:.2f}",
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=8,
-                    color="0.25",
-                )
             ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
             ax.set_ylabel(ylabel)
             ax.set_xlabel("Age [postnatal days]")
@@ -870,23 +850,22 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         for ax, (col, ylabel) in zip(axes[1], row2):
             _ai_age_panel(ax, col, ylabel)
 
-        # one legend for age groups
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=color,
-                markersize=7,
-                label=label,
-            )
-            for label, _lo, _hi, _mt, color in AGE_ASYM_BINS
-        ]
-        fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=9)
+        visible_axes = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
+        cbar = add_age_colorbar(
+            fig,
+            visible_axes,
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
             "AI (asymmetry index) vs age\n"
-            f"{AI_FORMULA}; {AI_FORMULA_VM_NOTE}; X stretched to P50; dotted: AI≈0.33 (~2×)",
+            f"{AI_FORMULA}; X stretched to P50; dotted: AI≈0.33 (~2×)",
             fontsize=11,
             color="0.15",
         )
