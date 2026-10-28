@@ -834,7 +834,6 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
             ls="--",
             lw=0.9,
             zorder=1,
-            label="y = x",
         )
         if with_fit:
             k = _fit_slope_through_origin(d[xmin_c].to_numpy(), d[xmax_c].to_numpy())
@@ -845,16 +844,23 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
                     color="crimson",
                     lw=1.2,
                     zorder=1,
-                    label=f"k = {k:.2f}",
+                )
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"k = {k:.2f}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
                 )
         sym = PARAM_MATH.get(name, name)
         unit = f" [{unit_note}]" if unit_note else ""
         ax.set_xlabel(rf"{sym} min{unit}")
         ax.set_ylabel(rf"{sym} max{unit}")
-        ax.set_title("")
         ax.set_aspect("equal", adjustable="box")
         _style_pub_ax(ax)
-        ax.legend(frameon=False, loc="upper left", fontsize=8)
         return True
 
     def _finish(fig, axes, outfile: str):
