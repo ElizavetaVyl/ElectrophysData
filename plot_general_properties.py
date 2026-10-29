@@ -1,12 +1,18 @@
 """
 General properties plotting for mPFC electrical synapse pairs.
 
-PyCharm: Run this file. It will ask for the data folder path.
+PyCharm: Run this file. It asks for the data folder, then shows a window
+to choose which figures to (re)generate. Existing files are overwritten.
+
 Expected Excel name (in that folder):
   General_Properties_FOR_PLOTTING_ONLY.xlsx
 
 Figures are saved to:
   <chosen_folder>/general properties figures/
+
+CLI tips:
+  python plot_general_properties.py --folder PATH --all-figures
+  python plot_general_properties.py --folder PATH --figures 01,07,13
 """
 
 from __future__ import annotations
@@ -481,9 +487,10 @@ def add_age_colorbar(
 def savefig(fig: plt.Figure, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / name
+    existed = path.is_file()
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved: {path}")
+    print(f"{'Overwrote' if existed else 'Saved'}: {path}")
 
 
 def shapiro_ok(values: np.ndarray) -> tuple[bool, float | None]:
@@ -2702,8 +2709,8 @@ def _run_day_by_age_mode(
         savefig(fig, out_dir, outfile_stats)
 
 
-def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
-    """Run Day×age analysis for pair means and for pooled sides."""
+def plot_day_by_age_pair_mean(df: pd.DataFrame, out_dir: Path):
+    """Day×age analysis for pair means only."""
     sub = df[df["day"].isin([1, 2])].copy()
     _run_day_by_age_mode(
         sub,
@@ -2713,6 +2720,11 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
         outfile_stats="13b_day_by_age_pair_mean_stats.png",
         title_mode="pair means",
     )
+
+
+def plot_day_by_age_pooled(df: pd.DataFrame, out_dir: Path):
+    """Day×age analysis for pooled sides {x1,x2}."""
+    sub = df[df["day"].isin([1, 2])].copy()
     _run_day_by_age_mode(
         sub,
         out_dir,
@@ -2722,6 +2734,12 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
         title_mode=r"pooled $\{x_1,x_2\}$",
     )
 
+
+def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
+    """Run Day×age analysis for pair means and for pooled sides."""
+    plot_day_by_age_pair_mean(df, out_dir)
+    plot_day_by_age_pooled(df, out_dir)
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -2729,7 +2747,303 @@ def parse_args():
         default=None,
         help="Folder with the Excel file. If omitted, the script asks interactively.",
     )
+    p.add_argument(
+        "--figures",
+        default=None,
+        help="Comma-separated figure IDs to run (e.g. 01,07,13). "
+        "Use 'all' for everything. If omitted, a selection window/prompt is shown.",
+    )
+    p.add_argument(
+        "--all-figures",
+        action="store_true",
+        help="Generate all figures without asking (same as --figures all).",
+    )
     return p.parse_args()
+
+
+def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
+    """
+    Registry of selectable figure jobs.
+    Each item: id, label, outputs (file names), run (callable).
+    Existing output files are overwritten when the job runs.
+    """
+
+    def _day_panels():
+        plot_day_comparison(
+            df,
+            out_dir,
+            params=DAY_FIG_COUPLING,
+            outfile="01_day_comparison_Gj_CC.png",
+            subtitle=r"$G_{j}$ and $CC$",
+        )
+        plot_day_comparison(
+            df,
+            out_dir,
+            params=DAY_FIG_CELL,
+            outfile="01_day_comparison_Rin_Cm_Vm.png",
+            subtitle=r"$R_{in}$, $C_m$, $V_m$",
+        )
+
+    def _asym_by_age_coupling():
+        plot_asymmetry_by_age_bins(
+            df,
+            out_dir,
+            rows=[("CC", ""), ("Gj", "nS")],
+            outfile="03b_asymmetry_CC_Gj_by_age.png",
+            title="Coupling asymmetry",
+        )
+
+    def _asym_by_age_cell():
+        plot_asymmetry_by_age_bins(
+            df,
+            out_dir,
+            rows=[("Rin", r"M$\Omega$"), ("Cm", "pF"), ("Vm", "mV")],
+            outfile="04b_asymmetry_Rin_Cm_Vm_by_age.png",
+            title="Within-pair asymmetry",
+        )
+
+    return [
+        {
+            "id": "01",
+            "label": "01  Day 1–2–3 comparison (Gj/CC + Rin/Cm/Vm)",
+            "outputs": [
+                "01_day_comparison_Gj_CC.png",
+                "01_day_comparison_Rin_Cm_Vm.png",
+            ],
+            "run": _day_panels,
+        },
+        {
+            "id": "01b",
+            "label": "01b Day 1 vs Day 2 statistics",
+            "outputs": ["01b_day1_vs_day2_stats.png"],
+            "run": lambda: plot_day12_statistics(df, out_dir),
+        },
+        {
+            "id": "02",
+            "label": "02  AI vs age (continuous colour)",
+            "outputs": ["02_AI_vs_age.png"],
+            "run": lambda: plot_ai_vs_age(df, out_dir),
+        },
+        {
+            "id": "02b",
+            "label": "02b AI by age group (KW + Dunn)",
+            "outputs": ["02b_AI_by_age_group.png"],
+            "run": lambda: plot_ai_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "03",
+            "label": "03/04 Asymmetry clouds (Gj/CC + Rin/Cm/Vm)",
+            "outputs": [
+                "03_asymmetry_Gj_CC.png",
+                "04_asymmetry_Rin_Cm_Vm.png",
+            ],
+            "run": lambda: plot_asymmetry_clouds(df, out_dir),
+        },
+        {
+            "id": "03b",
+            "label": "03b Coupling asymmetry by age bins",
+            "outputs": ["03b_asymmetry_CC_Gj_by_age.png"],
+            "run": _asym_by_age_coupling,
+        },
+        {
+            "id": "04b",
+            "label": "04b Within-pair asymmetry by age bins",
+            "outputs": ["04b_asymmetry_Rin_Cm_Vm_by_age.png"],
+            "run": _asym_by_age_cell,
+        },
+        {
+            "id": "05",
+            "label": "05  AI histograms",
+            "outputs": ["05_AI_histograms.png"],
+            "run": lambda: plot_ai_histograms(df, out_dir),
+        },
+        {
+            "id": "06",
+            "label": "06  Coupling vs Distance",
+            "outputs": ["06_coupling_vs_distance.png"],
+            "run": lambda: plot_coupling_vs_distance(df, out_dir),
+        },
+        {
+            "id": "07",
+            "label": "07  Gj/CC by age group (pooled + pair mean)",
+            "outputs": ["07_Gj_CC_by_age_group.png"],
+            "run": lambda: plot_coupling_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "08",
+            "label": "08  AI_Gj / AI_CC vs AI_Rin",
+            "outputs": ["08_AI_Gj_CC_vs_AI_Rin.png"],
+            "run": lambda: plot_ai_gj_vs_ai_rin(df, out_dir),
+        },
+        {
+            "id": "09",
+            "label": "09  Signed ΔGj/ΔCC vs ΔRin_recv",
+            "outputs": ["09_signed_dGj_dCC_vs_dRin.png"],
+            "run": lambda: plot_signed_delta_gj_vs_rin(df, out_dir),
+        },
+        {
+            "id": "10",
+            "label": "10  Gj/CC vs age continuous (Spearman + LOWESS)",
+            "outputs": ["10_Gj_CC_vs_age_continuous.png"],
+            "run": lambda: plot_coupling_vs_age_continuous(df, out_dir),
+        },
+        {
+            "id": "11",
+            "label": "11  Distance + age coverage histograms",
+            "outputs": ["11_distance_age_histograms.png"],
+            "run": lambda: plot_coverage_histograms(df, out_dir),
+        },
+        {
+            "id": "13",
+            "label": "13  Day×age (pair means) + stats text",
+            "outputs": [
+                "13_day_by_age_pair_mean_overview.png",
+                "13b_day_by_age_pair_mean_stats.png",
+            ],
+            "run": lambda: plot_day_by_age_pair_mean(df, out_dir),
+        },
+        {
+            "id": "14",
+            "label": "14  Day×age (pooled sides) + stats text",
+            "outputs": [
+                "14_day_by_age_pooled_overview.png",
+                "14b_day_by_age_pooled_stats.png",
+            ],
+            "run": lambda: plot_day_by_age_pooled(df, out_dir),
+        },
+    ]
+
+
+def _ask_figures_tk(catalog: list[dict], out_dir: Path) -> list[str] | None:
+    """Checkbox window; returns selected ids, [] if none, None if cancelled."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Select figures to generate")
+    root.geometry("720x560")
+    root.minsize(520, 400)
+
+    frm = ttk.Frame(root, padding=10)
+    frm.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(
+        frm,
+        text=(
+            "Choose figures to (re)generate.\n"
+            f"Output folder: {out_dir}\n"
+            "Existing files with the same name will be overwritten."
+        ),
+        justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=(0, 8))
+
+    canvas = tk.Canvas(frm, highlightthickness=0)
+    scroll = ttk.Scrollbar(frm, orient=tk.VERTICAL, command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    inner.bind(
+        "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+    canvas.configure(yscrollcommand=scroll.set)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    vars_by_id: dict[str, tk.BooleanVar] = {}
+    for job in catalog:
+        exists = any((out_dir / f).is_file() for f in job["outputs"])
+        mark = "  [exists — will overwrite]" if exists else ""
+        var = tk.BooleanVar(value=True)
+        vars_by_id[job["id"]] = var
+        ttk.Checkbutton(
+            inner, text=f"{job['label']}{mark}", variable=var
+        ).pack(anchor=tk.W, pady=2)
+
+    result: dict[str, list[str] | None] = {"ids": None}
+
+    def _select_all(val: bool):
+        for v in vars_by_id.values():
+            v.set(val)
+
+    def _ok():
+        result["ids"] = [jid for jid, v in vars_by_id.items() if v.get()]
+        root.destroy()
+
+    def _cancel():
+        result["ids"] = None
+        root.destroy()
+
+    btns = ttk.Frame(root, padding=10)
+    btns.pack(fill=tk.X)
+    ttk.Button(btns, text="Select all", command=lambda: _select_all(True)).pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(btns, text="Select none", command=lambda: _select_all(False)).pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=4)
+    ttk.Button(btns, text="Run selected", command=_ok).pack(side=tk.RIGHT, padx=4)
+
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    root.mainloop()
+    return result["ids"]
+
+
+def _ask_figures_console(catalog: list[dict], out_dir: Path) -> list[str] | None:
+    """Console multi-select fallback when tkinter is unavailable."""
+    print("\nSelect figures to (re)generate.")
+    print(f"Output folder: {out_dir}")
+    print("Existing files with the same name will be overwritten.")
+    print("  all          — all figures")
+    print("  none / Enter empty after numbers — cancel")
+    print("  e.g. 01,07,13 or 1 7 13\n")
+    for i, job in enumerate(catalog, start=1):
+        exists = any((out_dir / f).is_file() for f in job["outputs"])
+        mark = " [exists]" if exists else ""
+        print(f"  {i:2d}. {job['id']:4s}  {job['label']}{mark}")
+    raw = input("\nIDs or numbers > ").strip()
+    if not raw:
+        return None
+    if raw.lower() in {"all", "*"}:
+        return [j["id"] for j in catalog]
+    if raw.lower() in {"none", "cancel", "q"}:
+        return None
+    tokens = [t.strip() for t in raw.replace(";", ",").replace(" ", ",").split(",") if t.strip()]
+    id_set = {j["id"] for j in catalog}
+    id_by_num = {str(i): j["id"] for i, j in enumerate(catalog, start=1)}
+    selected = []
+    for t in tokens:
+        if t in id_set:
+            selected.append(t)
+        elif t in id_by_num:
+            selected.append(id_by_num[t])
+        else:
+            print(f"  Unknown: {t}")
+    # preserve catalog order, unique
+    order = [j["id"] for j in catalog]
+    return [jid for jid in order if jid in set(selected)]
+
+
+def ask_which_figures(catalog: list[dict], out_dir: Path) -> list[str] | None:
+    try:
+        return _ask_figures_tk(catalog, out_dir)
+    except Exception as exc:
+        print(f"Figure selection window unavailable ({exc}); using console prompt.")
+        return _ask_figures_console(catalog, out_dir)
+
+
+def parse_figure_ids(catalog: list[dict], figures_arg: str) -> list[str]:
+    """Parse --figures value into ordered catalog ids; exit on unknown ids."""
+    raw = figures_arg.strip()
+    if raw.lower() == "all":
+        return [j["id"] for j in catalog]
+    wanted = {t.strip() for t in raw.replace(";", ",").split(",") if t.strip()}
+    known = {j["id"] for j in catalog}
+    unknown = sorted(wanted - known)
+    if unknown:
+        print(f"Unknown figure ids: {', '.join(unknown)}")
+        print("Known:", ", ".join(j["id"] for j in catalog))
+        sys.exit(1)
+    return [j["id"] for j in catalog if j["id"] in wanted]
 
 
 def main():
@@ -2737,6 +3051,7 @@ def main():
     folder = ask_data_folder(args.folder)
     excel_path = find_excel(folder)
     out_dir = folder / FIGURES_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Reading: {excel_path}")
     df = load_and_prepare(excel_path)
     print(f"Rows after Gj filter: {len(df)}")
@@ -2746,49 +3061,29 @@ def main():
     )
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
-    # Day 1–2–3 (identity left/right only)
-    plot_day_comparison(
-        df,
-        out_dir,
-        params=DAY_FIG_COUPLING,
-        outfile="01_day_comparison_Gj_CC.png",
-        subtitle=r"$G_{j}$ and $CC$",
-    )
-    plot_day_comparison(
-        df,
-        out_dir,
-        params=DAY_FIG_CELL,
-        outfile="01_day_comparison_Rin_Cm_Vm.png",
-        subtitle=r"$R_{in}$, $C_m$, $V_m$",
-    )
+    catalog = build_figure_catalog(df, out_dir)
 
-    plot_day12_statistics(df, out_dir)
-    plot_ai_vs_age(df, out_dir)
-    plot_ai_by_age_groups(df, out_dir)
-    plot_asymmetry_clouds(df, out_dir)
-    plot_asymmetry_by_age_bins(
-        df,
-        out_dir,
-        rows=[("CC", ""), ("Gj", "nS")],
-        outfile="03b_asymmetry_CC_Gj_by_age.png",
-        title="Coupling asymmetry",
-    )
-    plot_asymmetry_by_age_bins(
-        df,
-        out_dir,
-        rows=[("Rin", r"M$\Omega$"), ("Cm", "pF"), ("Vm", "mV")],
-        outfile="04b_asymmetry_Rin_Cm_Vm_by_age.png",
-        title="Within-pair asymmetry",
-    )
-    plot_ai_histograms(df, out_dir)
-    plot_coupling_vs_distance(df, out_dir)
-    plot_coupling_by_age_groups(df, out_dir)
-    plot_coupling_vs_age_continuous(df, out_dir)
-    plot_coverage_histograms(df, out_dir)
-    plot_ai_gj_vs_ai_rin(df, out_dir)
-    plot_signed_delta_gj_vs_rin(df, out_dir)
-    plot_day_by_age(df, out_dir)
-    print("Done. Figures are in:", out_dir)
+    if args.all_figures or (args.figures and args.figures.strip().lower() == "all"):
+        selected = [j["id"] for j in catalog]
+    elif args.figures:
+        selected = parse_figure_ids(catalog, args.figures)
+    else:
+        selected = ask_which_figures(catalog, out_dir)
+
+    if selected is None:
+        print("Cancelled — no figures generated.")
+        return
+    if not selected:
+        print("Nothing selected — no figures generated.")
+        return
+
+    jobs = {j["id"]: j for j in catalog}
+    print(f"\nGenerating {len(selected)} figure job(s): {', '.join(selected)}")
+    for jid in selected:
+        job = jobs[jid]
+        print(f"\n=== {job['label']} ===")
+        job["run"]()
+    print("\nDone. Figures are in:", out_dir)
 
 
 if __name__ == "__main__":
