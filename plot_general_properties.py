@@ -350,7 +350,10 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
 
 
 def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """Coupling analyses, all days: drop Exclude?=yes; require Gj both sides."""
+    """
+    Day 1–2–3 comparison and day stats: Require Gj_12 & Gj_21 filled,
+    drop Exclude?=yes. (Coverage histograms are the only plots that keep Exclude?=yes.)
+    """
     mask = df["has_gj"] if "has_gj" in df.columns else True
     if "excluded" in df.columns:
         mask = mask & ~df["excluded"]
@@ -359,8 +362,9 @@ def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
 def analysis_pool(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Asymmetry / AI / coupling summaries: Days 1–2, Exclude?=yes out, Gj present.
-    Coverage Distance/age histograms keep Exclude?=yes (and may lack Gj).
+    Asymmetry / AI / coupling / day×age: Days 1–2, Exclude?=yes out, Gj both sides.
+    Only fig. 11 coverage panels marked “incl. Exclude?=yes” keep excluded rows
+    (those may lack Gj and are used solely for Distance/age counts).
     """
     mask = df["day"].isin(POOL_DAYS)
     if "has_gj" in df.columns:
