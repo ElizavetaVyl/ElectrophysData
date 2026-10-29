@@ -2007,25 +2007,271 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Coverage: Distance + age histograms on one figure
+# Coverage: Distance + age histograms (with / without Exclude?=yes)
 # ---------------------------------------------------------------------------
+def _coverage_frame(df: pd.DataFrame, include_excluded: bool) -> pd.DataFrame:
+    """All days; optionally drop Exclude?=yes rows."""
+    if include_excluded or "excluded" not in df.columns:
+        return df.copy()
+    return df[~df["excluded"]].copy()
+
+
+def _draw_distance_hist(ax, dists: np.ndarray, panel_title: str):
+    if len(dists) == 0:
+        ax.text(0.5, 0.5, "no Distance", ha="center", va="center", color="0.4")
+        ax.set_title(panel_title, fontsize=10, color="0.25")
+        ax.set_xlabel(r"Distance [$\mu$m]")
+        ax.set_ylabel("Number of pairs")
+        _style_pub_ax(ax)
+        return
+    d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
+    d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
+    if d_max <= d_min:
+        d_max = d_min + 10.0
+    width = 15.0
+    edges = np.arange(d_min, d_max + width, width)
+    if len(edges) < 7:
+        width = 10.0
+        edges = np.arange(d_min, d_max + width, width)
+    ax.hist(dists, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
+    d_mean = float(np.mean(dists))
+    ax.axvline(d_mean, color="crimson", lw=1.3)
+    ax.text(
+        0.98,
+        0.96,
+        f"$n$ = {len(dists)}\n"
+        f"{np.min(dists):.0f}–{np.max(dists):.0f} µm\n"
+        f"mean = {d_mean:.0f} µm",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        color="0.25",
+    )
+    ax.set_title(panel_title, fontsize=10, color="0.25")
+    ax.set_xlabel(r"Distance [$\mu$m]")
+    ax.set_ylabel("Number of pairs")
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    _style_pub_ax(ax)
+    print(f"  Distance [{panel_title}]: n={len(dists)}, mean={d_mean:.1f} µm")
+
+
+def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
+    """
+    Warped age histogram; band labels P10–32 / P33–50 / P50+ with pair counts.
+    """
+    numeric = frame.loc[~frame["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
+    n_mt = int(frame["is_mt"].sum())
+    bin_w = 5.0
+
+    ax.set_title(panel_title, fontsize=10, color="0.25")
+    ax.set_xlabel("Age [postnatal days]")
+    ax.set_ylabel("Number of pairs")
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    if not (len(numeric) or n_mt):
+        ax.text(0.5, 0.5, "no ages", ha="center", va="center", color="0.4")
+        _style_pub_ax(ax)
+        return
+
+    if len(numeric):
+        a_min = float(np.floor(np.min(numeric) / bin_w) * bin_w)
+        max_age = float(np.max(numeric))
+        vmin = float(np.min(numeric))
+    else:
+        a_min = 10.0
+        vmin, max_age = 10.0, float(STRETCH_AGE_HI)
+    mt_val = max_age + MT_AGE_OFFSET
+    age_ticks = sorted({float(a) for a in numeric}) if len(numeric) else [a_min]
+    old_ages = [a for a in age_ticks if a > float(STRETCH_AGE_HI)]
+    n_old = len(old_ages)
+
+    def _u_young(a: float) -> float:
+        a_c = float(np.clip(float(a), vmin, float(STRETCH_AGE_HI)))
+        return age_to_unit(a_c, False, vmin, max_age, mt_val)
+
+    u_tail0 = _u_young(float(STRETCH_AGE_HI))
+    span_young = max(float(STRETCH_AGE_HI) - vmin, bin_w)
+    w_ref = float(STRETCH_FRAC) * bin_w / span_young
+    slot = w_ref
+    if n_old:
+        old_centers = {
+            a: u_tail0 + (i + 0.5) * slot for i, a in enumerate(old_ages)
+        }
+        old_bar_w = 0.88 * slot
+        u_tail1 = u_tail0 + n_old * slot
+    else:
+        old_centers = {}
+        old_bar_w = w_ref
+        u_tail1 = u_tail0
+
+    def _u_hist(a: float) -> float:
+        a = float(a)
+        if a <= float(STRETCH_AGE_HI):
+            return _u_young(a)
+        if a in old_centers:
+            return old_centers[a]
+        if old_ages:
+            nearest = min(old_ages, key=lambda x: abs(x - a))
+            return old_centers[nearest]
+        return u_tail1
+
+    # Pair counts per age band (for labels above the plot)
+    band_ns = []
+    for label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
+        band_ns.append(int(_age_bin_mask(frame, lo, hi, include_mt).sum()))
+
+    band_specs = [
+        (10.0, 32.5, "#FB8C00", 0.12, "P10–32", False, band_ns[0]),
+        (32.5, 50.0, "#8E24AA", 0.10, "P33–50", False, band_ns[1]),
+        (50.0, max_age, "#2E0854", 0.08, "P50+", True, band_ns[2]),
+    ]
+    for lo_b, hi_b, col_b, alpha_b, lab_b, is_old, n_band in band_specs:
+        if is_old:
+            if not old_ages and max_age <= float(STRETCH_AGE_HI) and n_mt == 0:
+                continue
+            u_lo = u_tail0
+            u_hi = u_tail1 if (old_ages or n_mt) else _u_young(max_age)
+        else:
+            lo_c = max(lo_b, a_min)
+            hi_c = min(hi_b, float(STRETCH_AGE_HI), max_age)
+            if hi_c <= lo_c:
+                continue
+            u_lo, u_hi = _u_young(lo_c), _u_young(hi_c)
+        if u_hi <= u_lo:
+            continue
+        ax.axvspan(u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0)
+        ax.text(
+            0.5 * (u_lo + u_hi),
+            1.08,
+            f"{lab_b}\n$n_{{ec}}$={n_band}",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color=col_b,
+            alpha=0.9,
+            clip_on=False,
+            linespacing=1.15,
+        )
+
+    if old_ages or max_age > STRETCH_AGE_HI:
+        ax.axvline(u_tail0, color="0.8", ls="--", lw=0.7, zorder=1)
+
+    if len(numeric):
+        young = numeric[numeric <= float(STRETCH_AGE_HI)]
+        edges = np.arange(a_min, float(STRETCH_AGE_HI) + bin_w * 0.5, bin_w)
+        if len(edges) < 2:
+            edges = np.array([a_min, a_min + bin_w])
+        if edges[-1] < float(STRETCH_AGE_HI):
+            edges = np.append(edges, float(STRETCH_AGE_HI))
+        else:
+            edges[-1] = float(STRETCH_AGE_HI)
+        if len(young):
+            counts_y, _ = np.histogram(young, bins=edges)
+            edges_u = np.array([_u_young(float(e)) for e in edges], dtype=float)
+            widths_u = np.maximum(np.diff(edges_u), 1e-4)
+            ax.bar(
+                edges_u[:-1],
+                counts_y,
+                width=widths_u,
+                align="edge",
+                color="0.55",
+                edgecolor="white",
+                alpha=0.9,
+                zorder=2,
+            )
+        if old_ages:
+            old_arr = numeric[numeric > float(STRETCH_AGE_HI)]
+            old_counts = [int(np.sum(np.isclose(old_arr, a))) for a in old_ages]
+            ax.bar(
+                [old_centers[a] for a in old_ages],
+                old_counts,
+                width=old_bar_w,
+                align="center",
+                color="0.55",
+                edgecolor="white",
+                alpha=0.9,
+                zorder=2,
+            )
+
+    majors = major_labeled_ages(age_ticks) or [a_min]
+    tick_pos = [_u_hist(a) for a in majors]
+    tick_lab = [_fmt_age_tick(a) for a in majors]
+
+    u_left = _u_young(a_min) - 0.02
+    u_right = u_tail1 + 0.03
+    if n_mt:
+        sep_x = u_tail1 + 0.015
+        dam_x = u_tail1 + 0.015 + slot
+        dam_w = old_bar_w
+        ax.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
+        ax.axvspan(
+            dam_x - 0.5 * dam_w,
+            dam_x + 0.5 * dam_w,
+            color="#2E0854",
+            alpha=0.06,
+            zorder=0,
+            lw=0,
+        )
+        ax.bar(
+            dam_x,
+            n_mt,
+            width=dam_w,
+            color="0.35",
+            edgecolor="white",
+            alpha=0.9,
+            align="center",
+            zorder=2,
+        )
+        tick_pos.append(dam_x)
+        tick_lab.append(MT_DISPLAY_LABEL)
+        u_right = dam_x + 0.5 * slot + 0.03
+
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_lab)
+    minor_pos = [_u_hist(a) for a in age_ticks]
+    if n_mt:
+        minor_pos.append(dam_x)
+    if minor_pos:
+        ax.set_xticks(sorted(set(minor_pos)), minor=True)
+    ax.set_xlim(u_left, u_right)
+    _style_pub_ax(ax)
+    ax.tick_params(axis="x", which="minor", length=3.0, width=0.8, colors="0.2")
+    ax.tick_params(axis="x", which="major", length=6.0, width=1.0, colors="0.2")
+    print(
+        f"  Age [{panel_title}]: n_numeric={len(numeric)}, "
+        f"n_{MT_DISPLAY_LABEL}={n_mt}; "
+        + ", ".join(f"{lab} n_ec={n}" for (lab, *_rest), n in zip(AGE_ASYM_BINS, band_ns))
+    )
+
+
 def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
     """
-    One figure, three panels: Distance bins | age (5-day) | age groups.
-    Distance + age histograms: every pair with the value (any day; Exclude?=yes
-    included — coverage of the recorded sample).
-    Age-group KW panel: analysis pool (Days 1–2, Exclude?=yes omitted).
+    Separate coverage figure (2×2):
+      Distance | Distance (Exclude?=yes omitted)
+      Age      | Age (Exclude?=yes omitted)
+    Age-group KW bar panel removed; band labels carry $n_{ec}$ counts.
     """
-    sub = analysis_pool(df)  # KW age-group panel only
-    # Coverage hists: all pairs with Distance / age, including Exclude?=yes
-    if "Distance_um" in df.columns:
-        dists = df.loc[df["Distance_um"].notna(), "Distance_um"].to_numpy(dtype=float)
-    else:
-        dists = np.array([])
-    numeric = df.loc[~df["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
-    n_mt = int(df["is_mt"].sum())
+    frame_all = _coverage_frame(df, include_excluded=True)
+    frame_keep = _coverage_frame(df, include_excluded=False)
 
-    if len(dists) == 0 and len(numeric) == 0 and n_mt == 0:
+    def _dists(frame: pd.DataFrame) -> np.ndarray:
+        if "Distance_um" not in frame.columns:
+            return np.array([])
+        return frame.loc[frame["Distance_um"].notna(), "Distance_um"].to_numpy(
+            dtype=float
+        )
+
+    d_all, d_keep = _dists(frame_all), _dists(frame_keep)
+    has_age_all = bool((~frame_all["is_mt"] & frame_all["age_num"].notna()).any()) or bool(
+        frame_all["is_mt"].any()
+    )
+    has_age_keep = bool(
+        (~frame_keep["is_mt"] & frame_keep["age_num"].notna()).any()
+    ) or bool(frame_keep["is_mt"].any())
+
+    if len(d_all) == 0 and len(d_keep) == 0 and not has_age_all and not has_age_keep:
         print("Skipping coverage histograms: no distance/age values.")
         return
 
@@ -2036,269 +2282,27 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.3), constrained_layout=True)
-        ax_d, ax_a, ax_g = axes
-
-        # --- Distance (all pairs with Distance; Exclude?=yes included) ---
-        if len(dists):
-            d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
-            d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
-            if d_max <= d_min:
-                d_max = d_min + 10.0
-            width = 15.0
-            edges = np.arange(d_min, d_max + width, width)
-            if len(edges) < 7:
-                width = 10.0
-                edges = np.arange(d_min, d_max + width, width)
-            ax_d.hist(dists, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
-            d_mean = float(np.mean(dists))
-            ax_d.axvline(d_mean, color="crimson", lw=1.3)
-            ax_d.text(
-                0.98,
-                0.96,
-                f"$n$ = {len(dists)}\n"
-                f"{np.min(dists):.0f}–{np.max(dists):.0f} µm\n"
-                f"mean = {d_mean:.0f} µm",
-                transform=ax_d.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                color="0.25",
-            )
-            n_excl_dist = (
-                int((df["Distance_um"].notna() & df["excluded"]).sum())
-                if "excluded" in df.columns
-                else 0
-            )
-            print(
-                f"\nCoverage histograms — Distance: n={len(dists)} "
-                f"(incl. Exclude?=yes: {n_excl_dist}), "
-                f"mean={d_mean:.1f} µm"
-            )
-        else:
-            ax_d.text(0.5, 0.5, "no Distance", ha="center", va="center", color="0.4")
-            print("\nCoverage histograms — Distance: skipped (no column/values)")
-        ax_d.set_xlabel(r"Distance [$\mu$m]")
-        ax_d.set_ylabel("Number of pairs")
-        ax_d.yaxis.set_major_locator(MaxNLocator(integer=True))
-        _style_pub_ax(ax_d)
-
-        # --- Age histogram on warped scale (+ Dam after dotted separator) ---
-        # All pairs with age (any day; Exclude?=yes included). ≤P50: 5-day bins;
-        # >P50: one equal-width bar per observed age; majors sparse, minors all ages.
-        bin_w = 5.0
-        if len(numeric) or n_mt:
-            if len(numeric):
-                a_min = float(np.floor(np.min(numeric) / bin_w) * bin_w)
-                max_age = float(np.max(numeric))
-                vmin = float(np.min(numeric))
-            else:
-                a_min = 10.0
-                vmin, max_age = 10.0, float(STRETCH_AGE_HI)
-            mt_val = max_age + MT_AGE_OFFSET
-            age_ticks = (
-                sorted({float(a) for a in numeric}) if len(numeric) else [a_min]
-            )
-            old_ages = [a for a in age_ticks if a > float(STRETCH_AGE_HI)]
-            n_old = len(old_ages)
-
-            def _u_young(a: float) -> float:
-                a_c = float(np.clip(float(a), vmin, float(STRETCH_AGE_HI)))
-                return age_to_unit(a_c, False, vmin, max_age, mt_val)
-
-            u_tail0 = _u_young(float(STRETCH_AGE_HI))
-            span_young = max(float(STRETCH_AGE_HI) - vmin, bin_w)
-            w_ref = float(STRETCH_FRAC) * bin_w / span_young
-            slot = w_ref
-            if n_old:
-                old_centers = {
-                    a: u_tail0 + (i + 0.5) * slot for i, a in enumerate(old_ages)
-                }
-                old_bar_w = 0.88 * slot
-                u_tail1 = u_tail0 + n_old * slot
-            else:
-                old_centers = {}
-                old_bar_w = w_ref
-                u_tail1 = u_tail0
-
-            def _u_hist(a: float) -> float:
-                a = float(a)
-                if a <= float(STRETCH_AGE_HI):
-                    return _u_young(a)
-                if a in old_centers:
-                    return old_centers[a]
-                if old_ages:
-                    nearest = min(old_ages, key=lambda x: abs(x - a))
-                    return old_centers[nearest]
-                return u_tail1
-
-            band_specs = [
-                (10.0, 32.5, "#FB8C00", 0.12, "P10–32", False),
-                (32.5, 50.0, "#8E24AA", 0.10, "P33–50", False),
-                (50.0, max_age, "#2E0854", 0.08, "P50+", True),
-            ]
-            for lo_b, hi_b, col_b, alpha_b, lab_b, is_old in band_specs:
-                if is_old:
-                    if not old_ages and max_age <= float(STRETCH_AGE_HI):
-                        continue
-                    u_lo = u_tail0
-                    u_hi = u_tail1 if old_ages else _u_young(max_age)
-                else:
-                    lo_c = max(lo_b, a_min)
-                    hi_c = min(hi_b, float(STRETCH_AGE_HI), max_age)
-                    if hi_c <= lo_c:
-                        continue
-                    u_lo, u_hi = _u_young(lo_c), _u_young(hi_c)
-                if u_hi <= u_lo:
-                    continue
-                ax_a.axvspan(u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0)
-                ax_a.text(
-                    0.5 * (u_lo + u_hi),
-                    1.08,
-                    lab_b,
-                    transform=ax_a.get_xaxis_transform(),
-                    ha="center",
-                    va="bottom",
-                    fontsize=7,
-                    color=col_b,
-                    alpha=0.9,
-                    clip_on=False,
-                )
-
-            if old_ages or max_age > STRETCH_AGE_HI:
-                ax_a.axvline(u_tail0, color="0.8", ls="--", lw=0.7, zorder=1)
-
-            if len(numeric):
-                young = numeric[numeric <= float(STRETCH_AGE_HI)]
-                edges = np.arange(a_min, float(STRETCH_AGE_HI) + bin_w * 0.5, bin_w)
-                if len(edges) < 2:
-                    edges = np.array([a_min, a_min + bin_w])
-                if edges[-1] < float(STRETCH_AGE_HI):
-                    edges = np.append(edges, float(STRETCH_AGE_HI))
-                else:
-                    edges[-1] = float(STRETCH_AGE_HI)
-                if len(young):
-                    counts_y, _ = np.histogram(young, bins=edges)
-                    edges_u = np.array([_u_young(float(e)) for e in edges], dtype=float)
-                    widths_u = np.maximum(np.diff(edges_u), 1e-4)
-                    ax_a.bar(
-                        edges_u[:-1],
-                        counts_y,
-                        width=widths_u,
-                        align="edge",
-                        color="0.55",
-                        edgecolor="white",
-                        alpha=0.9,
-                        zorder=2,
-                    )
-                if old_ages:
-                    old_arr = numeric[numeric > float(STRETCH_AGE_HI)]
-                    old_counts = [
-                        int(np.sum(np.isclose(old_arr, a))) for a in old_ages
-                    ]
-                    ax_a.bar(
-                        [old_centers[a] for a in old_ages],
-                        old_counts,
-                        width=old_bar_w,
-                        align="center",
-                        color="0.55",
-                        edgecolor="white",
-                        alpha=0.9,
-                        zorder=2,
-                    )
-
-            majors = major_labeled_ages(age_ticks) or [a_min]
-            tick_pos = [_u_hist(a) for a in majors]
-            tick_lab = [_fmt_age_tick(a) for a in majors]
-
-            u_left = _u_young(a_min) - 0.02
-            u_right = u_tail1 + 0.03
-            if n_mt:
-                sep_x = u_tail1 + 0.015
-                dam_x = u_tail1 + 0.015 + slot
-                dam_w = old_bar_w
-                ax_a.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
-                ax_a.axvspan(
-                    dam_x - 0.5 * dam_w,
-                    dam_x + 0.5 * dam_w,
-                    color="#2E0854",
-                    alpha=0.06,
-                    zorder=0,
-                    lw=0,
-                )
-                ax_a.bar(
-                    dam_x,
-                    n_mt,
-                    width=dam_w,
-                    color="0.35",
-                    edgecolor="white",
-                    alpha=0.9,
-                    align="center",
-                    zorder=2,
-                )
-                tick_pos.append(dam_x)
-                tick_lab.append(MT_DISPLAY_LABEL)
-                u_right = dam_x + 0.5 * slot + 0.03
-
-            ax_a.set_xticks(tick_pos)
-            ax_a.set_xticklabels(tick_lab)
-            minor_pos = [_u_hist(a) for a in age_ticks]
-            if n_mt:
-                minor_pos.append(dam_x)
-            if minor_pos:
-                ax_a.set_xticks(sorted(set(minor_pos)), minor=True)
-            ax_a.set_xlim(u_left, u_right)
-        else:
-            ax_a.text(0.5, 0.5, "no ages", ha="center", va="center", color="0.4")
-        ax_a.set_xlabel("Age [postnatal days]")
-        ax_a.set_ylabel("Number of pairs")
-        ax_a.yaxis.set_major_locator(MaxNLocator(integer=True))
-        _style_pub_ax(ax_a)
-        if len(numeric) or n_mt:
-            ax_a.tick_params(
-                axis="x", which="minor", length=3.0, width=0.8, colors="0.2"
-            )
-            ax_a.tick_params(
-                axis="x", which="major", length=6.0, width=1.0, colors="0.2"
-            )
-
-        # --- Age groups (same as KW plots; MT in P50+) ---
-        labels = [b[0] for b in AGE_ASYM_BINS]
-        colors = [b[4] for b in AGE_ASYM_BINS]
-        counts = []
-        for _label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
-            mask = _age_bin_mask(sub, lo, hi, include_mt)
-            counts.append(int(mask.sum()))
-        x = np.arange(len(labels))
-        ax_g.bar(x, counts, color=colors, edgecolor="white", width=0.7, alpha=0.9)
-        for xi, n in zip(x, counts):
-            ax_g.text(
-                xi, n + 0.15, str(n), ha="center", va="bottom", fontsize=9, color="0.25"
-            )
-        ax_g.set_xticks(x)
-        ax_g.set_xticklabels(labels)
-        ax_g.set_ylabel("Number of pairs")
-        ax_g.set_xlabel("")
-        ax_g.set_title("Age groups (KW bins)", fontsize=10, color="0.25")
-        ax_g.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ymax = max(counts) if counts else 1
-        ax_g.set_ylim(0, ymax * 1.18 + 0.5)
-        _style_pub_ax(ax_g)
-
+        fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.2), constrained_layout=True)
+        print("\nCoverage histograms (Distance / Age × Exclude on/off):")
+        _draw_distance_hist(
+            axes[0, 0], d_all, r"Distance (all pairs, incl. Exclude?=yes)"
+        )
+        _draw_distance_hist(
+            axes[0, 1], d_keep, r"Distance (Exclude?=yes omitted)"
+        )
+        _draw_age_coverage_hist(
+            axes[1, 0], frame_all, r"Age (all pairs, incl. Exclude?=yes)"
+        )
+        _draw_age_coverage_hist(
+            axes[1, 1], frame_keep, r"Age (Exclude?=yes omitted)"
+        )
         fig.suptitle(
-            r"Sample coverage: distance and age"
+            r"Sample coverage: inter-soma distance and postnatal age"
             "\n"
-            r"Distance & age histograms: all recorded pairs (incl. Exclude?=yes); "
-            rf"KW age groups: {POOL_NOTE}",
+            r"left: all recorded pairs; right: Exclude?=yes omitted; "
+            r"age-band labels show $n_{ec}$",
             fontsize=11,
             color="0.15",
-        )
-        n_excl_age = int(df["excluded"].sum()) if "excluded" in df.columns else 0
-        print(
-            f"Coverage histograms — Age: n_numeric={len(numeric)}, "
-            f"n_{MT_DISPLAY_LABEL}={n_mt} (incl. Exclude?=yes: {n_excl_age}); "
-            "KW groups (analysis pool): "
-            + ", ".join(f"{lab}={n}" for lab, n in zip(labels, counts))
         )
         savefig(fig, out_dir, "11_distance_age_histograms.png")
 
@@ -3177,7 +3181,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "11",
-            "label": "11  Distance + age coverage histograms",
+            "label": "11  Distance/age coverage (with & without Exclude)",
             "outputs": ["11_distance_age_histograms.png"],
             "run": lambda: plot_coverage_histograms(df, out_dir),
         },
