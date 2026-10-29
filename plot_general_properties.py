@@ -35,17 +35,20 @@ EXCEL_NAME_ALIASES = (
 )
 FIGURES_DIR_NAME = "general properties figures"
 POOL_DAYS = {1, 2}
-MT_AGE_PLACEHOLDER = 400  # x-position for MT on age plots (days)
+MT_AGE_PLACEHOLDER = 400  # x-position for MT/Dam on age plots (days)
 P50_ZOOM_MAX = 50
 DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
 DAY_X = {1: 1.0, 2: 1.55, 3: 2.1}  # days closer together
 POINT_SIZE = 36
 POINT_ALPHA = 0.55
 MT_AGE_OFFSET = 50  # MT darker than max age by this many "days" on color scale
+# Excel age column uses German Muttertier token; figures show English label
+MT_EXCEL_TOKEN = "MT"
+MT_DISPLAY_LABEL = "Dam"  # breeding female, postnatal age not recorded
 STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar (linear ruler)
 STRETCH_FRAC = 0.75  # fraction of colorbar reserved for <= STRETCH_AGE_HI
 MAJOR_AGE_TARGETS = (20, 30, 40, 50)
-# saturated orange (young) -> almost-black purple (old / MT)
+# saturated orange (young) -> almost-black purple (old / Dam)
 AGE_CMAP = LinearSegmentedColormap.from_list(
     "age_orange_purple",
     ["#FB8C00", "#EF6C00", "#D84315", "#8E24AA", "#4A148C", "#12001F"],
@@ -206,7 +209,8 @@ def parse_age(value) -> tuple[float | None, bool]:
     text = str(value).strip()
     if not text:
         return None, False
-    if text.upper() == "MT":
+    # Excel: MT (Muttertier); optionally Dam if already relabelled
+    if text.upper() in {MT_EXCEL_TOKEN.upper(), MT_DISPLAY_LABEL.upper()}:
         return None, True
     m = re.search(r"(\d+(?:[.,]\d+)?)", text)
     if m:
@@ -462,7 +466,7 @@ def add_age_colorbar(
     major_labels = [_fmt_age_tick(a) for a in major_ages]
     if has_mt:
         major_units.append(_unit(mt_val, is_mt=True))
-        major_labels.append("MT")
+        major_labels.append(MT_DISPLAY_LABEL)
     if major_units:
         cbar.set_ticks(major_units)
         cbar.set_ticklabels(major_labels)
@@ -842,7 +846,7 @@ def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has
     tick_lab = [_fmt_age_tick(a) for a in majors]
     if has_mt:
         tick_u.append(_warped_age_x(mt_val, True, vmin, max_age, mt_val))
-        tick_lab.append("MT")
+        tick_lab.append(MT_DISPLAY_LABEL)
     # divider after P50
     if max_age > STRETCH_AGE_HI:
         u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
@@ -1905,7 +1909,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
             )
             note = f"$n$ numeric = {len(numeric)}"
             if n_mt:
-                note += f"\nMT = {n_mt} (not in hist)"
+                note += f"\n{MT_DISPLAY_LABEL} = {n_mt} (not in hist)"
             ax_a.text(
                 0.98,
                 0.96,
@@ -1956,7 +1960,8 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
             color="0.15",
         )
         print(
-            f"Coverage histograms — Age: n_numeric={len(numeric)}, n_MT={n_mt}; "
+            f"Coverage histograms — Age: n_numeric={len(numeric)}, "
+            f"n_{MT_DISPLAY_LABEL}={n_mt}; "
             + ", ".join(f"{lab}={n}" for lab, n in zip(labels, counts))
         )
         savefig(fig, out_dir, "11_distance_age_histograms.png")
@@ -2288,7 +2293,9 @@ def main():
     df = load_and_prepare(excel_path)
     print(f"Rows after Gj filter: {len(df)}")
     print(f"Days present: {sorted(df['day'].dropna().unique().tolist())}")
-    print(f"MT pairs: {int(df['is_mt'].sum())}")
+    print(
+        f"{MT_DISPLAY_LABEL} pairs (Excel {MT_EXCEL_TOKEN}): {int(df['is_mt'].sum())}"
+    )
     print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
 
     # Day 1–2–3 (identity left/right only)
