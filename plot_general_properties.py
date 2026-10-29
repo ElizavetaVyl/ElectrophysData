@@ -2799,8 +2799,8 @@ def plot_day_by_age_pair_mean(df: pd.DataFrame, out_dir: Path):
         sub,
         out_dir,
         mode="pair",
-        outfile_overview="13_day_by_age_pair_mean_overview.png",
-        outfile_stats="13b_day_by_age_pair_mean_stats.png",
+        outfile_overview="13_day_by_age_overview.png",
+        outfile_stats="13b_day_by_age_stats.png",
         title_mode="pair means",
     )
 
@@ -2980,8 +2980,8 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "id": "13",
             "label": "13  Day×age (pair means) + stats text",
             "outputs": [
-                "13_day_by_age_pair_mean_overview.png",
-                "13b_day_by_age_pair_mean_stats.png",
+                "13_day_by_age_overview.png",
+                "13b_day_by_age_stats.png",
             ],
             "run": lambda: plot_day_by_age_pair_mean(df, out_dir),
         },
