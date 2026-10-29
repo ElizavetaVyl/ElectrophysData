@@ -1978,7 +1978,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 ax_a.axvspan(u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0)
                 ax_a.text(
                     0.5 * (u_lo + u_hi),
-                    1.04,
+                    1.08,
                     lab_b,
                     transform=ax_a.get_xaxis_transform(),
                     ha="center",
