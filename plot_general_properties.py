@@ -2012,26 +2012,22 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
 def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
     """
     One figure, three panels: Distance bins | age (5-day) | age groups.
-    Distance: every pair with a Distance value (any day; Include Exclude?=yes).
-    Age panels: analysis pool (Days 1–2, Exclude?=yes omitted).
+    Distance + age histograms: every pair with the value (any day; Exclude?=yes
+    included — coverage of the recorded sample).
+    Age-group KW panel: analysis pool (Days 1–2, Exclude?=yes omitted).
     """
-    sub = analysis_pool(df)
-    # Distance hist: all pairs that have Distance, including Exclude?=yes
+    sub = analysis_pool(df)  # KW age-group panel only
+    # Coverage hists: all pairs with Distance / age, including Exclude?=yes
     if "Distance_um" in df.columns:
         dists = df.loc[df["Distance_um"].notna(), "Distance_um"].to_numpy(dtype=float)
     else:
         dists = np.array([])
+    numeric = df.loc[~df["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
+    n_mt = int(df["is_mt"].sum())
 
-    if len(sub) == 0 and len(dists) == 0:
-        print("Skipping coverage histograms: empty pool and no distances.")
+    if len(dists) == 0 and len(numeric) == 0 and n_mt == 0:
+        print("Skipping coverage histograms: no distance/age values.")
         return
-
-    numeric = (
-        sub.loc[~sub["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
-        if len(sub)
-        else np.array([])
-    )
-    n_mt = int(sub["is_mt"].sum()) if len(sub) else 0
 
     with plt.rc_context(
         {
@@ -2055,24 +2051,20 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 width = 10.0
                 edges = np.arange(d_min, d_max + width, width)
             ax_d.hist(dists, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
-            ax_d.axvline(
-                float(np.mean(dists)),
-                color="crimson",
-                lw=1.3,
-                label=f"mean = {np.mean(dists):.0f} µm",
-            )
+            d_mean = float(np.mean(dists))
+            ax_d.axvline(d_mean, color="crimson", lw=1.3)
             ax_d.text(
                 0.98,
                 0.96,
                 f"$n$ = {len(dists)}\n"
-                f"{np.min(dists):.0f}–{np.max(dists):.0f} µm",
+                f"{np.min(dists):.0f}–{np.max(dists):.0f} µm\n"
+                f"mean = {d_mean:.0f} µm",
                 transform=ax_d.transAxes,
                 ha="right",
                 va="top",
                 fontsize=8,
                 color="0.25",
             )
-            ax_d.legend(frameon=False, fontsize=8, loc="upper left")
             n_excl_dist = (
                 int((df["Distance_um"].notna() & df["excluded"]).sum())
                 if "excluded" in df.columns
@@ -2081,7 +2073,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
             print(
                 f"\nCoverage histograms — Distance: n={len(dists)} "
                 f"(incl. Exclude?=yes: {n_excl_dist}), "
-                f"mean={np.mean(dists):.1f} µm"
+                f"mean={d_mean:.1f} µm"
             )
         else:
             ax_d.text(0.5, 0.5, "no Distance", ha="center", va="center", color="0.4")
@@ -2092,10 +2084,8 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         _style_pub_ax(ax_d)
 
         # --- Age histogram on warped scale (+ Dam after dotted separator) ---
-        # ≤P50: 5-day bins on stretched ruler. >P50: one bar per observed age
-        # with the same visual width as a 5-day bin (axis grows as needed).
-        # Minor ticks at every observed age (colorbar style); majors sparse.
-        # Band labels sit above the axes (not over the shaded regions).
+        # All pairs with age (any day; Exclude?=yes included). ≤P50: 5-day bins;
+        # >P50: one equal-width bar per observed age; majors sparse, minors all ages.
         bin_w = 5.0
         if len(numeric) or n_mt:
             if len(numeric):
@@ -2298,14 +2288,16 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Sample coverage: distance and age"
             "\n"
-            r"Distance: all pairs with a value (incl. Exclude?=yes); "
-            rf"age: {POOL_NOTE}",
+            r"Distance & age histograms: all recorded pairs (incl. Exclude?=yes); "
+            rf"KW age groups: {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
+        n_excl_age = int(df["excluded"].sum()) if "excluded" in df.columns else 0
         print(
             f"Coverage histograms — Age: n_numeric={len(numeric)}, "
-            f"n_{MT_DISPLAY_LABEL}={n_mt}; "
+            f"n_{MT_DISPLAY_LABEL}={n_mt} (incl. Exclude?=yes: {n_excl_age}); "
+            "KW groups (analysis pool): "
             + ", ".join(f"{lab}={n}" for lab, n in zip(labels, counts))
         )
         savefig(fig, out_dir, "11_distance_age_histograms.png")
