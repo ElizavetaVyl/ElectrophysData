@@ -2096,9 +2096,12 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
 
             ax_a.set_xticks(tick_pos)
             ax_a.set_xticklabels(tick_lab)
-            # Minor насечки at every observed age in P50+ (no extra labels)
-            if old_ages:
-                ax_a.set_xticks([old_centers[a] for a in old_ages], minor=True)
+            # Minor насечки: every observed age (+ Dam), same rule as age colorbar
+            minor_pos = [_u_hist(a) for a in age_ticks]
+            if n_mt:
+                minor_pos.append(dam_x)
+            if minor_pos:
+                ax_a.set_xticks(sorted(set(minor_pos)), minor=True)
             ax_a.set_xlim(u_left, u_right)
         else:
             ax_a.text(0.5, 0.5, "no ages", ha="center", va="center", color="0.4")
@@ -2107,9 +2110,13 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         ax_a.set_title("Age (5-day bins; P50+ by age)", fontsize=10, color="0.25")
         ax_a.yaxis.set_major_locator(MaxNLocator(integer=True))
         _style_pub_ax(ax_a)
-        if len(numeric) and any(float(a) > float(STRETCH_AGE_HI) for a in numeric):
+        if len(numeric) or n_mt:
+            # Match colorbar tick styling: short minors, longer majors
             ax_a.tick_params(
-                axis="x", which="minor", length=3.0, width=0.7, colors="0.2"
+                axis="x", which="minor", length=3.0, width=0.8, colors="0.2"
+            )
+            ax_a.tick_params(
+                axis="x", which="major", length=6.0, width=1.0, colors="0.2"
             )
 
         # --- Age groups (same as KW plots; MT in P50+) ---
