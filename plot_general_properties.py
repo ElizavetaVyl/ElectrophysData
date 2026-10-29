@@ -40,7 +40,10 @@ EXCEL_NAME_ALIASES = (
     "Generaral Properties FOR PLOTTING ONLY.xlsx",
 )
 FIGURES_DIR_NAME = "general properties figures"
+# Asymmetry / AI / coupling / coverage: Days 1–2 only. Day 3 stays on the
+# Day 1–2–3 comparison figure (01) and is not mixed into the analysis pool.
 POOL_DAYS = {1, 2}
+POOL_NOTE = r"pool days 1–2 (Day 3 excluded)"
 MT_AGE_PLACEHOLDER = 400  # x-position for MT/Dam on age plots (days)
 P50_ZOOM_MAX = 50
 DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
@@ -297,6 +300,14 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
 
     df["in_pool"] = df["day"].isin(POOL_DAYS)
     return df.reset_index(drop=True)
+
+
+def analysis_pool(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pairs for asymmetry, AI, coupling-vs-age/distance, and coverage plots.
+    Keeps Days 1–2 only; Day 3 is excluded (still shown on figure 01).
+    """
+    return df[df["day"].isin(POOL_DAYS)].copy()
 
 
 def age_limits(df: pd.DataFrame) -> tuple[float, float, float, bool]:
@@ -912,7 +923,7 @@ def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has
 
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     """Scatter AI vs warped age; continuous age Greys colormap (same as day/asymmetry figs)."""
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
     sub = sub.copy()
@@ -983,7 +994,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
             "AI (asymmetry index) vs age\n"
-            f"{AI_FORMULA}; X stretched to P50; dotted: AI≈0.33 (~2×)",
+            f"{AI_FORMULA}; X stretched to P50; dotted: AI≈0.33 (~2×); {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1051,7 +1062,7 @@ def _short_age_pair(a: str, b: str) -> str:
 
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """AI by age group: Kruskal–Wallis + Dunn post-hoc (Bonferroni)."""
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
     row1 = [("AI_Gj", r"AI $G_{j}$"), ("AI_CC", r"AI $CC$")]
@@ -1186,7 +1197,8 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             fontsize=9,
         )
         fig.suptitle(
-            "AI (asymmetry index) by age group\nKruskal–Wallis; Dunn post-hoc (Bonferroni)",
+            "AI (asymmetry index) by age group\n"
+            f"Kruskal–Wallis; Dunn post-hoc (Bonferroni); {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1231,7 +1243,7 @@ def _asym_axis_limits(x: np.ndarray, y: np.ndarray, name: str) -> tuple[float, f
 
 
 def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
     units = {"Gj": "nS", "CC": "", "Rin": r"M$\Omega$", "Cm": "pF", "Vm": "mV"}
@@ -1296,7 +1308,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         _style_pub_ax(ax)
         return True
 
-    def _finish(fig, axes, outfile: str):
+    def _finish(fig, axes, outfile: str, title: str):
         cbar = add_age_colorbar(
             fig,
             list(axes),
@@ -1309,7 +1321,7 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         cbar.outline.set_linewidth(0.6)
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
         cbar.set_label("Age [postnatal days]", fontsize=9)
-        fig.suptitle("Coupling asymmetry", fontsize=11, color="0.15")
+        fig.suptitle(f"{title}\n{POOL_NOTE}", fontsize=11, color="0.15")
         savefig(fig, out_dir, outfile)
 
     with plt.rc_context(
@@ -1322,12 +1334,14 @@ def plot_asymmetry_clouds(df: pd.DataFrame, out_dir: Path):
         fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
         for ax, name in zip(axes, ["Gj", "CC"]):
             _panel(ax, name, with_fit=True, unit_note=units[name])
-        _finish(fig, axes, "03_asymmetry_Gj_CC.png")
+        _finish(fig, axes, "03_asymmetry_Gj_CC.png", "Coupling asymmetry")
 
         fig2, axes2 = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
         for ax, name in zip(axes2, ["Rin", "Cm", "Vm"]):
             _panel(ax, name, with_fit=True, unit_note=units[name])
-        _finish(fig2, axes2, "04_asymmetry_Rin_Cm_Vm.png")
+        _finish(
+            fig2, axes2, "04_asymmetry_Rin_Cm_Vm.png", "Within-pair asymmetry"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1344,7 +1358,7 @@ def plot_asymmetry_by_age_bins(
     rows x 3 age bins. Fixed colors per column, no age colorbar.
     rows: list of (param_name, unit_note)
     """
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     n_rows = len(rows)
 
     with plt.rc_context(
@@ -1456,7 +1470,7 @@ def plot_asymmetry_by_age_bins(
                     ax.set_ylabel("")
                 ax.set_xlabel(rf"{sym} min{unit}")
 
-        fig.suptitle(title, fontsize=11, color="0.15")
+        fig.suptitle(f"{title}\n{POOL_NOTE}", fontsize=11, color="0.15")
         savefig(fig, out_dir, outfile)
 
 
@@ -1472,7 +1486,8 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
         print("Skipping distance plots: no Distance column in Excel.")
         return
 
-    sub = df[df["in_pool"] & df["Distance_um"].notna()].copy()
+    sub = analysis_pool(df)
+    sub = sub[sub["Distance_um"].notna()].copy()
     if len(sub) == 0:
         print("Skipping distance plots: no Distance values in pool days 1–2.")
         return
@@ -1559,7 +1574,7 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Coupling vs inter-soma distance"
             "\n"
-            r"pair mean $=(x_1+x_2)/2$; pool days 1–2",
+            r"pair mean $=(x_1+x_2)/2$; " + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
@@ -1574,7 +1589,7 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
     2×2: top = pooled {x1, x2} for Gj and CC; bottom = pair means.
     Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
     """
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
 
@@ -1737,7 +1752,7 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"$G_{j}$ and $CC$ by age group"
             "\n"
-            r"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni)",
+            rf"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1752,7 +1767,7 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
     Continuous alternative to age-group KW: pair-mean Gj and CC vs warped age.
     Annotate Spearman ρ (rank correlation, not a regression slope); overlay LOWESS.
     """
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
     sub = sub.copy()
@@ -1844,7 +1859,7 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Pair-mean $G_{j}$ and $CC$ vs age (continuous)"
             "\n"
-            r"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; pool days 1–2",
+            rf"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1859,7 +1874,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
     One figure, three panels: Distance bins | age (5-day) | age groups.
     Pool days 1–2; one count per electrically coupled pair.
     """
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     if len(sub) == 0:
         print("Skipping coverage histograms: empty pool.")
         return
@@ -2140,7 +2155,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Sample coverage: distance and age"
             "\n"
-            r"pool days 1–2; one count per electrically coupled pair",
+            rf"{POOL_NOTE}; one count per electrically coupled pair",
             fontsize=11,
             color="0.15",
         )
@@ -2160,7 +2175,7 @@ def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
     Does Gj (or CC) asymmetry track Rin asymmetry?
     Scatter AI_coupling vs AI_Rin; identity line; Spearman ρ.
     """
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     if "AI_Rin" not in sub.columns or "AI_Gj" not in sub.columns:
         print("Skipping AI_Gj vs AI_Rin: missing AI columns.")
         return
@@ -2237,7 +2252,7 @@ def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Coupling asymmetry vs $R_{in}$ asymmetry"
             "\n"
-            r"$AI=(max-min)/(max+min)$; dashed: identity; pool days 1–2",
+            rf"$AI=(max-min)/(max+min)$; dashed: identity; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -2260,7 +2275,7 @@ def plot_signed_delta_gj_vs_rin(df: pd.DataFrame, out_dir: Path):
         print("Skipping signed ΔGj vs ΔRin: missing Gj/Rin columns.")
         return
 
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     sub["dGj"] = sub["Gj_12"] - sub["Gj_21"]
     sub["dRin_recv"] = sub["Rin_2"] - sub["Rin_1"]
     if "CC_12" in sub.columns and "CC_21" in sub.columns:
@@ -2372,7 +2387,8 @@ def plot_signed_delta_gj_vs_rin(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Signed coupling difference vs receiver $\Delta R_{in}$"
             "\n"
-            r"shaded: same sign (larger coupling toward higher-$R_{in}$ cell); pool days 1–2",
+            r"shaded: same sign (larger coupling toward higher-$R_{in}$ cell); "
+            + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
@@ -2383,7 +2399,7 @@ def plot_signed_delta_gj_vs_rin(df: pd.DataFrame, out_dir: Path):
 # Figure 5: AI histograms
 # ---------------------------------------------------------------------------
 def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
-    sub = df[df["in_pool"]].copy()
+    sub = analysis_pool(df)
     # row1: coupling; row2: cell properties (Rin, Cm, Vm together)
     row1 = [("AI_Gj", r"AI $G_{j}$"), ("AI_CC", r"AI $CC$")]
     row2 = [
@@ -2452,7 +2468,7 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         fig.suptitle(
-            f"AI (asymmetry index)\n{AI_FORMULA}; dotted reference: AI≈0.33 (~2×)",
+            f"AI (asymmetry index)\n{AI_FORMULA}; dotted reference: AI≈0.33 (~2×); {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -2844,7 +2860,7 @@ def _run_day_by_age_mode(
 
 def plot_day_by_age_pair_mean(df: pd.DataFrame, out_dir: Path):
     """Day×age analysis for pair means only."""
-    sub = df[df["day"].isin([1, 2])].copy()
+    sub = analysis_pool(df)
     _run_day_by_age_mode(
         sub,
         out_dir,
@@ -2857,7 +2873,7 @@ def plot_day_by_age_pair_mean(df: pd.DataFrame, out_dir: Path):
 
 def plot_day_by_age_pooled(df: pd.DataFrame, out_dir: Path):
     """Day×age analysis for pooled sides {x1,x2}."""
-    sub = df[df["day"].isin([1, 2])].copy()
+    sub = analysis_pool(df)
     _run_day_by_age_mode(
         sub,
         out_dir,
@@ -3192,7 +3208,11 @@ def main():
     print(
         f"{MT_DISPLAY_LABEL} pairs (Excel {MT_EXCEL_TOKEN}): {int(df['is_mt'].sum())}"
     )
-    print(f"Pool days 1–2: {int(df['in_pool'].sum())}")
+    n_day3 = int((df["day"] == 3).sum())
+    print(
+        f"Analysis pool (Days 1–2): {int(df['in_pool'].sum())} "
+        f"(Day 3 excluded from asymmetry/AI/coupling: n={n_day3})"
+    )
 
     catalog = build_figure_catalog(df, out_dir)
 
