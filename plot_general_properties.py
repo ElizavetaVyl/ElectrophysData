@@ -555,6 +555,53 @@ def format_p(p: float | None) -> str:
     return f"p={p:.3f}"
 
 
+def p_to_stars(p: float | None) -> str:
+    """Significance stars; 'ns' if not significant / missing."""
+    if p is None or not np.isfinite(p):
+        return "ns"
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "ns"
+
+
+def bonferroni_adjust(p: float | None, n_tests: int) -> float | None:
+    if p is None or not np.isfinite(p) or n_tests < 1:
+        return None
+    return float(min(1.0, p * n_tests))
+
+
+def _sig_bracket(
+    ax,
+    x1: float,
+    x2: float,
+    y: float,
+    text: str,
+    *,
+    h: float | None = None,
+    fs: float = 9,
+    color: str = "0.2",
+):
+    """Draw a significance bracket between x1 and x2 at height y."""
+    if h is None:
+        ymin, ymax = ax.get_ylim()
+        h = 0.03 * (ymax - ymin)
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=0.9, c=color, clip_on=False)
+    ax.text(
+        0.5 * (x1 + x2),
+        y + h,
+        text,
+        ha="center",
+        va="bottom",
+        fontsize=fs,
+        color=color,
+        clip_on=False,
+    )
+
+
 def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
     sub = df[df["day"] == day]
     vals = pd.concat([sub[c1], sub[c2]], ignore_index=True)
@@ -2274,6 +2321,334 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "05_AI_histograms.png")
 
 
+# ---------------------------------------------------------------------------
+# Day 1 vs Day 2 × age groups (MW + Bonferroni; KW + Dunn) with stars
+# ---------------------------------------------------------------------------
+DAY_AGE_DAY_COLORS = {1: "#4C78A8", 2: "#E45756"}  # blue / red
+DAY_AGE_OFFSET = 0.18
+
+
+def _pair_vals_day_age(
+    df: pd.DataFrame, mean_col: str, day: int, lo, hi, include_mt: bool
+) -> np.ndarray:
+    mask = (df["day"] == day) & _age_bin_mask(df, lo, hi, include_mt)
+    if mean_col not in df.columns:
+        return np.array([], dtype=float)
+    return df.loc[mask, mean_col].dropna().to_numpy(dtype=float)
+
+
+def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
+    """
+    Day 1 vs Day 2 within each age group (pair means).
+    - Overview figure: swarm + mean±SEM + significance brackets (stars).
+      Day within age: MW/Welch, Bonferroni across 3 ages.
+      Age within day: KW + Dunn; significant Dunn pairs get brackets.
+    - Stats figure: text summary of all tests (like 01b).
+    """
+    sub = df[df["day"].isin([1, 2])].copy()
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    n_age = len(AGE_ASYM_BINS)
+    params = list(STAT_PARAMS)  # Gj, CC, Rin, Cm, Vm
+
+    # Precompute all stats
+    # day_vs: name -> list of compare_two_groups dicts (len 3) + p_adj
+    # age_kw: name -> {day: (H, p, dunn_list, samples)}
+    day_vs: dict[str, list[dict]] = {}
+    age_kw: dict[str, dict[int, dict]] = {}
+
+    print("\nDay 1 vs Day 2 × age groups (pair means):")
+    for name, _c1, _c2, mean_col in params:
+        if mean_col not in sub.columns:
+            continue
+        day_results = []
+        print(f"  [{name}] Day1 vs Day2 within age (Bonferroni ×{n_age}):")
+        for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+            v1 = _pair_vals_day_age(sub, mean_col, 1, lo, hi, include_mt)
+            v2 = _pair_vals_day_age(sub, mean_col, 2, lo, hi, include_mt)
+            if len(v1) >= 1 and len(v2) >= 1:
+                res = compare_two_groups(v1, v2)
+            else:
+                res = {
+                    "n1": len(v1),
+                    "n2": len(v2),
+                    "p": np.nan,
+                    "test": "n/a",
+                    "shapiro_p1": None,
+                    "shapiro_p2": None,
+                    "mean1": np.nan,
+                    "mean2": np.nan,
+                    "sem1": np.nan,
+                    "sem2": np.nan,
+                    "median1": np.nan,
+                    "median2": np.nan,
+                }
+            res["p_adj"] = bonferroni_adjust(res.get("p"), n_age)
+            res["age"] = label
+            day_results.append(res)
+            print(
+                f"    {label}: n={res['n1']}/{res['n2']}, {res['test']} "
+                f"{format_p(res.get('p'))} → adj {format_p(res['p_adj'])} "
+                f"{p_to_stars(res['p_adj'])}"
+            )
+        day_vs[name] = day_results
+
+        age_kw[name] = {}
+        for day in (1, 2):
+            samples = [
+                _pair_vals_day_age(sub, mean_col, day, lo, hi, include_mt)
+                for _lab, lo, hi, include_mt, _c in AGE_ASYM_BINS
+            ]
+            nonempty = [s for s in samples if len(s) > 0]
+            if len(nonempty) >= 2:
+                try:
+                    H, p = stats.kruskal(*nonempty)
+                    dunn = _dunn_posthoc(samples, group_labels)
+                except Exception as exc:
+                    H, p, dunn = np.nan, np.nan, []
+                    print(f"    Day {day} KW n/a ({exc})")
+            else:
+                H, p, dunn = np.nan, np.nan, []
+            age_kw[name][day] = {"H": H, "p": p, "dunn": dunn, "samples": samples}
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            print(
+                f"    Age KW Day{day}: {format_p(p)}; Dunn: {dunn_bits}"
+            )
+
+    day_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=DAY_AGE_DAY_COLORS[1],
+            markersize=7,
+            label="Day 1",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=DAY_AGE_DAY_COLORS[2],
+            markersize=7,
+            label="Day 2",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="crimson",
+            linestyle="None",
+            markersize=6,
+            label="mean ± SEM",
+        ),
+    ]
+
+    # ----- Overview with brackets / stars -----
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(13.5, 8.5), constrained_layout=True)
+        axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
+        axes[0, 2].set_visible(False)
+
+        for ax, (name, _c1, _c2, mean_col) in zip(axes_flat, params):
+            if mean_col not in sub.columns or name not in day_vs:
+                ax.set_visible(False)
+                continue
+
+            # collect y for bracket stacking
+            all_y = []
+            x_day = {1: {}, 2: {}}  # age_label -> x
+            for i, (label, lo, hi, include_mt, _col) in enumerate(AGE_ASYM_BINS):
+                xc = i + 1
+                for day, sign in ((1, -1), (2, +1)):
+                    x = xc + sign * DAY_AGE_OFFSET
+                    x_day[day][label] = x
+                    vals = _pair_vals_day_age(sub, mean_col, day, lo, hi, include_mt)
+                    if len(vals) == 0:
+                        continue
+                    all_y.append(vals)
+                    jitter = np.random.default_rng(
+                        abs(hash(f"{name}{day}{label}")) % (2**32)
+                    ).normal(0, 0.04, len(vals))
+                    ax.scatter(
+                        np.full(len(vals), x) + jitter,
+                        vals,
+                        c=DAY_AGE_DAY_COLORS[day],
+                        s=POINT_SIZE,
+                        alpha=POINT_ALPHA,
+                        edgecolors="white",
+                        linewidths=0.35,
+                        zorder=2,
+                    )
+                    m, sem, med = _mean_sem_median(vals)
+                    ax.errorbar(
+                        [x],
+                        [m],
+                        yerr=[sem],
+                        fmt="o",
+                        color="crimson",
+                        markersize=5,
+                        capsize=2.5,
+                        zorder=3,
+                    )
+                    ax.plot(
+                        [x],
+                        [med],
+                        marker="D",
+                        color="royalblue",
+                        markersize=4,
+                        zorder=4,
+                    )
+
+            # y-range with headroom for brackets
+            if all_y:
+                y_all = np.concatenate(all_y)
+                y_lo, y_hi = float(np.min(y_all)), float(np.max(y_all))
+                span = max(y_hi - y_lo, abs(y_hi) * 0.05, 1e-6)
+                head = 0.55 * span
+                ax.set_ylim(y_lo - 0.08 * span, y_hi + head)
+            else:
+                y_lo, y_hi, span = 0.0, 1.0, 1.0
+
+            # Day1 vs Day2 brackets within each age (Bonferroni-adj)
+            bracket_y = y_hi + 0.08 * span
+            step = 0.10 * span
+            for res in day_vs[name]:
+                stars = p_to_stars(res["p_adj"])
+                if stars == "ns":
+                    continue
+                lab = res["age"]
+                x1, x2 = x_day[1][lab], x_day[2][lab]
+                _sig_bracket(ax, x1, x2, bracket_y, stars, h=0.035 * span)
+                bracket_y += step
+
+            # Significant Dunn age pairs within each day (above day brackets)
+            for day in (1, 2):
+                info = age_kw.get(name, {}).get(day, {})
+                dunn = info.get("dunn") or []
+                for a, b, pv in dunn:
+                    if p_to_stars(pv) == "ns":
+                        continue
+                    if a not in x_day[day] or b not in x_day[day]:
+                        continue
+                    x1, x2 = x_day[day][a], x_day[day][b]
+                    _sig_bracket(
+                        ax,
+                        x1,
+                        x2,
+                        bracket_y,
+                        f"D{day} {p_to_stars(pv)}",
+                        h=0.035 * span,
+                        fs=7,
+                    )
+                    bracket_y += step
+
+            # KW note
+            kw1 = age_kw.get(name, {}).get(1, {})
+            kw2 = age_kw.get(name, {}).get(2, {})
+            ax.text(
+                0.02,
+                0.98,
+                f"Age KW D1 {format_p(kw1.get('p'))}; D2 {format_p(kw2.get('p'))}",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7,
+                color="0.3",
+            )
+
+            ax.set_xticks([1, 2, 3])
+            ax.set_xticklabels(group_labels)
+            ax.set_xlim(0.45, 3.55)
+            ax.set_ylabel(PARAM_YLABELS[name])
+            ax.set_xlabel("")
+            _style_pub_ax(ax)
+
+        fig.legend(
+            handles=day_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.55),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"Day 1 vs Day 2 by age group (pair means)"
+            "\n"
+            r"brackets: Day within age (MW/Welch, Bonferroni×3); "
+            r"D1/D2 = Dunn age pairs; * p<0.05, ** p<0.01, *** p<0.001",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "13_day_by_age_overview.png")
+
+    # ----- Stats detail figure -----
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 5, figsize=(16.5, 5.2), constrained_layout=True)
+        for ax, (name, _c1, _c2, mean_col) in zip(axes, params):
+            ax.set_axis_off()
+            if name not in day_vs:
+                continue
+            lines = [rf"{PARAM_MATH[name]} pair mean", ""]
+            lines.append("Day1 vs Day2 (Bonferroni×3)")
+            for res in day_vs[name]:
+                lines.append(
+                    f"  {res['age']}: n={res['n1']}/{res['n2']}"
+                )
+                lines.append(
+                    f"    {res['test']}: {format_p(res.get('p'))}"
+                )
+                lines.append(
+                    f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
+                )
+            lines.append("")
+            for day in (1, 2):
+                info = age_kw[name][day]
+                lines.append(f"Age KW Day{day}: {format_p(info['p'])}")
+                dunn = info.get("dunn") or []
+                if not dunn:
+                    lines.append("  Dunn: —")
+                for a, b, pv in dunn:
+                    lines.append(
+                        f"  {_short_age_pair(a, b)}: "
+                        f"{format_p(pv)} {p_to_stars(pv)}"
+                    )
+                lines.append("")
+            ax.text(
+                0.02,
+                0.98,
+                "\n".join(lines),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7.5,
+                family="monospace",
+                color="0.15",
+                linespacing=1.25,
+            )
+        fig.suptitle(
+            "Day × age statistics (pair means; Days 1–2 only)\n"
+            "Day within age: Shapiro→Welch or Mann–Whitney, Bonferroni across 3 ages; "
+            "Age within day: Kruskal–Wallis + Dunn (Bonferroni)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "13b_day_by_age_stats.png")
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -2339,6 +2714,7 @@ def main():
     plot_coverage_histograms(df, out_dir)
     plot_ai_gj_vs_ai_rin(df, out_dir)
     plot_signed_delta_gj_vs_rin(df, out_dir)
+    plot_day_by_age(df, out_dir)
     print("Done. Figures are in:", out_dir)
 
 
