@@ -1933,75 +1933,97 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         ax_d.yaxis.set_major_locator(MaxNLocator(integer=True))
         _style_pub_ax(ax_d)
 
-        # --- Age, 5-day bins (+ Dam after dashed separator) ---
+        # --- Age, 5-day bins on warped scale (+ Dam after dotted separator) ---
+        # Same stretch as colorbars / AI-vs-age: expanded to P50, compressed after.
         bin_w = 5.0
         if len(numeric) or n_mt:
             if len(numeric):
                 a_min = float(np.floor(np.min(numeric) / bin_w) * bin_w)
-                a_max = float(np.ceil(np.max(numeric) / bin_w) * bin_w)
+                max_age = float(np.max(numeric))
+                a_max = float(np.ceil(max_age / bin_w) * bin_w)
                 if a_max <= a_min:
                     a_max = a_min + bin_w
+                vmin = float(np.min(numeric))
             else:
                 a_min, a_max = 10.0, float(STRETCH_AGE_HI)
+                vmin, max_age = 10.0, float(STRETCH_AGE_HI)
+            mt_val = max_age + MT_AGE_OFFSET
 
-            # Light age-group backgrounds (numeric range only)
-            y_top_guess = max(
-                1,
-                int(np.max(np.histogram(numeric, bins=np.arange(a_min, a_max + bin_w, bin_w))[0]))
-                if len(numeric)
-                else 1,
-                n_mt,
-            )
+            def _u(a: float, is_mt: bool = False) -> float:
+                return age_to_unit(a, is_mt, vmin, max_age, mt_val)
+
+            # Light age-group backgrounds in warped unit space
             band_specs = [
                 (10.0, 32.5, "#FB8C00", 0.12, "P10–32"),
                 (32.5, 50.0, "#8E24AA", 0.10, "P33–50"),
-                (50.0, a_max, "#2E0854", 0.08, "P50+"),
+                (50.0, max_age, "#2E0854", 0.08, "P50+"),
             ]
-            for lo_b, hi_b, col_b, alpha_b, _lab_b in band_specs:
+            for lo_b, hi_b, col_b, alpha_b, lab_b in band_specs:
                 lo_c = max(lo_b, a_min)
-                hi_c = min(hi_b, a_max)
+                hi_c = min(hi_b, max_age)
                 if hi_c > lo_c:
-                    ax_a.axvspan(lo_c, hi_c, color=col_b, alpha=alpha_b, zorder=0, lw=0)
+                    u_lo, u_hi = _u(lo_c), _u(hi_c)
+                    if u_hi > u_lo:
+                        ax_a.axvspan(
+                            u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0
+                        )
+                        ax_a.text(
+                            0.5 * (u_lo + u_hi),
+                            0.92,
+                            lab_b,
+                            transform=ax_a.get_xaxis_transform(),
+                            ha="center",
+                            va="top",
+                            fontsize=7,
+                            color=col_b,
+                            alpha=0.85,
+                        )
+
+            if max_age > STRETCH_AGE_HI:
+                ax_a.axvline(
+                    _u(float(STRETCH_AGE_HI)), color="0.8", ls="--", lw=0.7, zorder=1
+                )
 
             if len(numeric):
-                edges = np.arange(a_min, a_max + bin_w, bin_w)
-                ax_a.hist(
-                    numeric,
-                    bins=edges,
+                edges = np.arange(a_min, a_max + bin_w * 0.5, bin_w)
+                if edges[-1] < a_max:
+                    edges = np.append(edges, a_max)
+                counts, _ = np.histogram(numeric, bins=edges)
+                edges_u = np.array([_u(float(e)) for e in edges], dtype=float)
+                # keep last numeric edge at/under the compressed-tail end (before Dam)
+                edges_u = np.minimum(edges_u, 0.92)
+                widths_u = np.diff(edges_u)
+                widths_u = np.maximum(widths_u, 1e-4)
+                ax_a.bar(
+                    edges_u[:-1],
+                    counts,
+                    width=widths_u,
+                    align="edge",
                     color="0.55",
                     edgecolor="white",
                     alpha=0.9,
                     zorder=2,
                 )
-                ax_a.axvline(
-                    float(np.median(numeric)),
-                    color="darkorange",
-                    ls="--",
-                    lw=1.3,
-                    label=f"median = {np.median(numeric):.0f}",
-                    zorder=3,
-                )
-                ax_a.axvline(
-                    float(np.mean(numeric)),
-                    color="crimson",
-                    lw=1.3,
-                    label=f"mean = {np.mean(numeric):.0f}",
-                    zorder=3,
-                )
 
-            # Dam column after a thin dashed separator
-            tick_ages = [a for a in (a_min, 20, 30, 40, 50, a_max) if a_min <= a <= a_max]
-            tick_ages = sorted(set(float(a) for a in tick_ages))
-            tick_pos = list(tick_ages)
-            tick_lab = [_fmt_age_tick(a) for a in tick_ages]
-            x_right = a_max + 0.5 * bin_w
+            age_ticks = (
+                sorted({float(a) for a in numeric}) if len(numeric) else [a_min, a_max]
+            )
+            majors = major_labeled_ages(age_ticks) or [a_min]
+            tick_pos = [_u(a) for a in majors]
+            tick_lab = [_fmt_age_tick(a) for a in majors]
+
+            u_left = _u(a_min) - 0.02
+            u_right = 0.94
             if n_mt:
-                dam_x = a_max + 1.5 * bin_w
-                sep_x = a_max + 0.5 * bin_w
+                u_num_end = _u(max_age) if len(numeric) else _u(a_max)
+                u_num_end = min(u_num_end, 0.92)
+                sep_x = u_num_end + 0.02
+                dam_x = 1.0
+                dam_w = 0.05
                 ax_a.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
                 ax_a.axvspan(
-                    dam_x - 0.6 * bin_w,
-                    dam_x + 0.6 * bin_w,
+                    dam_x - dam_w,
+                    dam_x + dam_w,
                     color="#2E0854",
                     alpha=0.06,
                     zorder=0,
@@ -2010,7 +2032,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 ax_a.bar(
                     dam_x,
                     n_mt,
-                    width=bin_w * 0.9,
+                    width=dam_w * 1.6,
                     color="0.35",
                     edgecolor="white",
                     alpha=0.9,
@@ -2019,43 +2041,15 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 )
                 tick_pos.append(dam_x)
                 tick_lab.append(MT_DISPLAY_LABEL)
-                x_right = dam_x + bin_w
+                u_right = 1.04
+            elif len(numeric) and max_age > STRETCH_AGE_HI:
+                u_right = min(_u(max_age), 0.92) + 0.03
+            else:
+                u_right = max(tick_pos) + 0.03 if tick_pos else 0.8
+
             ax_a.set_xticks(tick_pos)
             ax_a.set_xticklabels(tick_lab)
-            ax_a.set_xlim(a_min - 0.5 * bin_w, x_right)
-
-            note = f"$n$ = {len(numeric) + n_mt}"
-            if len(numeric):
-                note += f"\nnumeric = {len(numeric)}"
-            if n_mt:
-                note += f"\n{MT_DISPLAY_LABEL} = {n_mt}"
-            ax_a.text(
-                0.98,
-                0.96,
-                note,
-                transform=ax_a.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                color="0.25",
-            )
-            if len(numeric):
-                ax_a.legend(frameon=False, fontsize=8, loc="upper left")
-            # small band labels near top of numeric range
-            for lo_b, hi_b, col_b, _a, lab_b in band_specs:
-                mid = 0.5 * (max(lo_b, a_min) + min(hi_b, a_max))
-                if min(hi_b, a_max) > max(lo_b, a_min):
-                    ax_a.text(
-                        mid,
-                        0.92,
-                        lab_b,
-                        transform=ax_a.get_xaxis_transform(),
-                        ha="center",
-                        va="top",
-                        fontsize=7,
-                        color=col_b,
-                        alpha=0.85,
-                    )
+            ax_a.set_xlim(u_left, u_right)
         else:
             ax_a.text(0.5, 0.5, "no ages", ha="center", va="center", color="0.4")
         ax_a.set_xlabel("Age [postnatal days]")
