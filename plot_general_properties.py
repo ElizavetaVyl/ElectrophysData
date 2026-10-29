@@ -1640,8 +1640,9 @@ def plot_asymmetry_by_age_bins(
 # ---------------------------------------------------------------------------
 def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
     """
-    Gj and CC vs Distance (µm): both directed values of each pair plus pair mean
-    on the same axes. AI vs distance removed. Spearman on pair mean vs Distance.
+    Gj and CC vs Distance (µm): both directed values + pair mean on the axes.
+    Spearman (pair mean and pooled {x12,x21}) reported on a separate stats figure,
+    not overlaid on the scatter.
     """
     if "Distance_um" not in df.columns:
         print("Skipping distance plots: no Distance column in Excel.")
@@ -1659,6 +1660,7 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
         ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} [nS]"),
         ("CC", "CC_12", "CC_21", "CC_pair_mean", rf"{PARAM_MATH['CC']}"),
     ]
+    spearman_rows: list[dict] = []
 
     with plt.rc_context(
         {
@@ -1668,7 +1670,7 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-        print("\nCoupling vs Distance (both sides + pair mean; Spearman on mean):")
+        print("\nCoupling vs Distance (plot: both sides + mean; Spearman → stats fig):")
 
         for ax, (name, c1, c2, mean_col, ylabel) in zip(axes, panels):
             need = [c1, c2, mean_col]
@@ -1687,7 +1689,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             y2 = d[c2].to_numpy(dtype=float)
             ym = d[mean_col].to_numpy(dtype=float)
 
-            # Thin vertical connectors between the two directed values
             for xi, a, b, col in zip(x, y1, y2, colors):
                 ax.plot(
                     [xi, xi],
@@ -1698,7 +1699,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                     zorder=1,
                     solid_capstyle="round",
                 )
-            # Both sides of the pair (open / smaller)
             ax.scatter(
                 x,
                 y1,
@@ -1708,7 +1708,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 edgecolors="white",
                 linewidths=0.3,
                 zorder=2,
-                label=rf"${name}_{{12}}$ / ${name}_{{21}}$",
             )
             ax.scatter(
                 x,
@@ -1720,7 +1719,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 linewidths=0.3,
                 zorder=2,
             )
-            # Pair mean (filled, larger)
             ax.scatter(
                 x,
                 ym,
@@ -1730,34 +1728,39 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 edgecolors="0.15",
                 linewidths=0.5,
                 zorder=3,
-                label=r"pair mean",
             )
 
+            # Spearman: pair mean (1 / pair) and pooled both sides (2 / pair)
+            x_pool = np.concatenate([x, x])
+            y_pool = np.concatenate([y1, y2])
+            row = {
+                "name": name,
+                "n_pairs": len(d),
+                "rho_mean": np.nan,
+                "p_mean": np.nan,
+                "rho_pool": np.nan,
+                "p_pool": np.nan,
+                "n_pool": int(len(y_pool)),
+            }
             if len(d) >= 3:
-                rho, p = stats.spearmanr(x, ym)
-                ax.text(
-                    0.04,
-                    0.96,
-                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n"
-                    rf"$n_{{\mathrm{{pairs}}}}$={len(d)}",
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    fontsize=8,
-                    color="0.25",
+                row["rho_mean"], row["p_mean"] = stats.spearmanr(x, ym)
+                row["rho_pool"], row["p_pool"] = stats.spearmanr(x_pool, y_pool)
+                print(
+                    f"  {name} mean: ρ={row['rho_mean']:.3f}, {format_p(row['p_mean'])}, "
+                    f"n_pairs={row['n_pairs']}"
                 )
                 print(
-                    f"  {name} pair mean vs Distance: ρ={rho:.3f}, "
-                    f"{format_p(p)}, n_pairs={len(d)}"
+                    f"  {name} pooled {{x12,x21}}: ρ={row['rho_pool']:.3f}, "
+                    f"{format_p(row['p_pool'])}, n={row['n_pool']}"
                 )
             else:
                 print(f"  {name}: n={len(d)} (too few for Spearman)")
+            spearman_rows.append(row)
 
             ax.set_xlabel(r"Distance [$\mu$m]")
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
-        # Single legend for marker meaning (age is in colorbar)
         legend_handles = [
             Line2D(
                 [0],
@@ -1804,12 +1807,70 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             r"Coupling vs inter-soma distance"
             "\n"
             r"small points: both directions; large: pair mean; "
-            r"Spearman on pair mean; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "06_coupling_vs_distance.png")
+
+    # Separate stats figure (not overlaid on the scatter)
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig_s, axes_s = plt.subplots(
+            1, max(len(spearman_rows), 1), figsize=(9.5, 3.6), constrained_layout=True
+        )
+        if len(spearman_rows) == 1:
+            axes_s = [axes_s]
+        elif len(spearman_rows) == 0:
+            axes_s = [axes_s] if not hasattr(axes_s, "__iter__") else list(axes_s)
+        for ax, row in zip(axes_s, spearman_rows):
+            ax.set_axis_off()
+            sym = PARAM_MATH.get(row["name"], row["name"])
+            lines = [
+                rf"{sym} vs Distance",
+                "",
+                "Pair mean $(x_{12}+x_{21})/2$",
+                f"  n_pairs = {row['n_pairs']}",
+                f"  Spearman ρ = {row['rho_mean']:.3f}"
+                if np.isfinite(row["rho_mean"])
+                else "  Spearman ρ = n/a",
+                f"  {format_p(row['p_mean'])}",
+                "",
+                r"Pooled $\{x_{12},x_{21}\}$ (all directed values)",
+                f"  n = {row['n_pool']}",
+                f"  Spearman ρ = {row['rho_pool']:.3f}"
+                if np.isfinite(row["rho_pool"])
+                else "  Spearman ρ = n/a",
+                f"  {format_p(row['p_pool'])}",
+                "",
+                "Note: $(x_{12}+x_{21})$ has the same Spearman as the pair mean.",
+            ]
+            ax.text(
+                0.05,
+                0.95,
+                "\n".join(lines),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                family="monospace",
+                color="0.15",
+                linespacing=1.35,
+            )
+        for ax in list(axes_s)[len(spearman_rows) :]:
+            ax.set_axis_off()
+        fig_s.suptitle(
+            "Coupling vs Distance — Spearman statistics\n"
+            f"{POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig_s, out_dir, "06b_coupling_vs_distance_stats.png")
 
 
 # ---------------------------------------------------------------------------
@@ -3243,8 +3304,11 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "06",
-            "label": "06  Coupling vs Distance (both sides + mean)",
-            "outputs": ["06_coupling_vs_distance.png"],
+            "label": "06  Coupling vs Distance (plot + Spearman stats)",
+            "outputs": [
+                "06_coupling_vs_distance.png",
+                "06b_coupling_vs_distance_stats.png",
+            ],
             "run": lambda: plot_coupling_vs_distance(df, out_dir),
         },
         {
