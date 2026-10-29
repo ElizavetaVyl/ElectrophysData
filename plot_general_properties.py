@@ -238,16 +238,18 @@ def parse_exclude_flag(value) -> bool:
             return False
         return bool(value) and float(value) != 0.0
     text = str(value).strip().lower()
+    # strip zero-width / BOM junk sometimes pasted from Excel
+    text = re.sub(r"[\u200b\ufeff]", "", text)
     if not text:
         return False
     return text in {"yes", "y", "true", "1", "exclude", "excluded"}
 
 
 def _find_exclude_column(columns: list[str]) -> str | None:
-    """Match Exclude? / Exclude / exclude? etc."""
-    norm = {c: re.sub(r"[\s_?]+", "", c.strip().lower()) for c in columns}
-    for c, n in norm.items():
-        if n in {"exclude", "excluded"}:
+    """Match Exclude? / Exclude / exclude? (ASCII or fullwidth ?)."""
+    for c in columns:
+        n = re.sub(r"[\s_?？]+", "", str(c).strip().lower())
+        if n in {"exclude", "excluded"} or n.startswith("exclude"):
             return c
     return None
 
@@ -264,7 +266,9 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     df = df.copy()
     df["Gj_12"] = _to_float(df["Gj_12"])
     df["Gj_21"] = _to_float(df["Gj_21"])
-    df = df[df["Gj_12"].notna() & df["Gj_21"].notna()].copy()
+    # Keep rows without Gj for Distance/age coverage (often Exclude?=yes).
+    # Coupling / AI / day stats still require both Gj sides via has_gj.
+    df["has_gj"] = df["Gj_12"].notna() & df["Gj_21"].notna()
 
     df["day"] = _to_float(df["day"])
     for col_a, col_b in PARAM_DIRS.values():
@@ -323,31 +327,44 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     if dist_col is not None:
         df["Distance_um"] = _to_float(df[dist_col])
 
-    # Optional Exclude? column: yes → keep for distance hist only; skip elsewhere
+    # Optional Exclude? column: yes → keep for coverage hists; skip analysis plots
     excl_col = _find_exclude_column(list(df.columns))
     if excl_col is not None:
         df["excluded"] = df[excl_col].map(parse_exclude_flag)
+        df.attrs["exclude_column"] = excl_col
     else:
         df["excluded"] = False
+        df.attrs["exclude_column"] = None
 
-    df["in_pool"] = df["day"].isin(POOL_DAYS) & ~df["excluded"]
+    # Drop empty junk rows with neither Gj nor Distance nor age/Dam
+    keep = (
+        df["has_gj"]
+        | (df["Distance_um"].notna() if "Distance_um" in df.columns else False)
+        | df["age_num"].notna()
+        | df["is_mt"]
+    )
+    df = df[keep].copy()
+
+    df["in_pool"] = df["day"].isin(POOL_DAYS) & ~df["excluded"] & df["has_gj"]
     return df.reset_index(drop=True)
 
 
 def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """All recording days, but drop pairs marked Exclude?=yes."""
-    if "excluded" not in df.columns:
-        return df.copy()
-    return df[~df["excluded"]].copy()
+    """Coupling analyses, all days: drop Exclude?=yes; require Gj both sides."""
+    mask = df["has_gj"] if "has_gj" in df.columns else True
+    if "excluded" in df.columns:
+        mask = mask & ~df["excluded"]
+    return df[mask].copy()
 
 
 def analysis_pool(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Pairs for asymmetry, AI, coupling-vs-age/distance, and age coverage.
-    Days 1–2 only; Day 3 out; Exclude?=yes out.
-    (Distance histogram uses all pairs with Distance, including Exclude?=yes.)
+    Asymmetry / AI / coupling summaries: Days 1–2, Exclude?=yes out, Gj present.
+    Coverage Distance/age histograms keep Exclude?=yes (and may lack Gj).
     """
     mask = df["day"].isin(POOL_DAYS)
+    if "has_gj" in df.columns:
+        mask = mask & df["has_gj"]
     if "excluded" in df.columns:
         mask = mask & ~df["excluded"]
     return df[mask].copy()
@@ -3346,19 +3363,29 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Reading: {excel_path}")
     df = load_and_prepare(excel_path)
-    print(f"Rows after Gj filter: {len(df)}")
+    print(f"Rows kept (Gj and/or Distance and/or age): {len(df)}")
+    print(f"  with Gj both sides: {int(df['has_gj'].sum())}")
     print(f"Days present: {sorted(df['day'].dropna().unique().tolist())}")
     print(
         f"{MT_DISPLAY_LABEL} pairs (Excel {MT_EXCEL_TOKEN}): {int(df['is_mt'].sum())}"
     )
+    excl_col = df.attrs.get("exclude_column")
     n_excl = int(df["excluded"].sum()) if "excluded" in df.columns else 0
-    n_day3 = int(((df["day"] == 3) & ~df["excluded"]).sum()) if "excluded" in df.columns else int((df["day"] == 3).sum())
-    print(
-        f"Exclude?=yes: {n_excl} "
-        "(kept for Distance/age coverage histograms only)"
+    if excl_col:
+        print(
+            f"Exclude column: {excl_col!r} → Exclude?=yes: {n_excl} "
+            "(kept for Distance/age coverage only)"
+        )
+    else:
+        print(
+            "Exclude column: not found "
+            "(expected header Exclude? / Exclude). Treating all as included."
+        )
+    n_day3 = int(
+        ((df["day"] == 3) & df["has_gj"] & ~df["excluded"]).sum()
     )
     print(
-        f"Analysis pool (Days 1–2, not excluded): {int(df['in_pool'].sum())} "
+        f"Analysis pool (Days 1–2, not excluded, with Gj): {int(df['in_pool'].sum())} "
         f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
     )
 
