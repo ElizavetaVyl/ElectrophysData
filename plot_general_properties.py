@@ -1934,126 +1934,81 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         _style_pub_ax(ax_d)
 
         # --- Age histogram on warped scale (+ Dam after dotted separator) ---
-        # ≤P50: 5-day bins on the stretched ruler. >P50: one bar per observed
-        # age, same visual width as a 5-day bin (axis grows as needed); minor
-        # ticks mark those ages; major labels stay sparse.
+        # Same age_to_unit mapping as the colorbar: stretch ≤P50, compress after.
+        # 5-day bins; minor ticks at every observed age; majors sparse.
         bin_w = 5.0
         if len(numeric) or n_mt:
             if len(numeric):
                 a_min = float(np.floor(np.min(numeric) / bin_w) * bin_w)
                 max_age = float(np.max(numeric))
+                a_max = float(np.ceil(max_age / bin_w) * bin_w)
+                if a_max <= a_min:
+                    a_max = a_min + bin_w
                 vmin = float(np.min(numeric))
             else:
-                a_min = 10.0
+                a_min, a_max = 10.0, float(STRETCH_AGE_HI)
                 vmin, max_age = 10.0, float(STRETCH_AGE_HI)
             mt_val = max_age + MT_AGE_OFFSET
             age_ticks = (
                 sorted({float(a) for a in numeric}) if len(numeric) else [a_min]
             )
-            old_ages = [a for a in age_ticks if a > float(STRETCH_AGE_HI)]
-            n_old = len(old_ages)
 
-            def _u_young(a: float) -> float:
-                """Warped unit for ages ≤ P50 (same stretch as colorbar)."""
-                a_c = float(np.clip(float(a), vmin, float(STRETCH_AGE_HI)))
-                return age_to_unit(a_c, False, vmin, max_age, mt_val)
+            def _u(a: float, is_mt: bool = False) -> float:
+                a_c = float(a)
+                if not is_mt:
+                    a_c = float(np.clip(a_c, vmin, max_age))
+                return age_to_unit(a_c, is_mt, vmin, max_age, mt_val)
 
-            u_tail0 = _u_young(float(STRETCH_AGE_HI))
-            # Reference width = one 5-day bin on the stretched ≤P50 ruler
-            span_young = max(float(STRETCH_AGE_HI) - vmin, bin_w)
-            w_ref = float(STRETCH_FRAC) * bin_w / span_young
-            slot = w_ref  # one slot per observed age > P50
-            if n_old:
-                old_centers = {
-                    a: u_tail0 + (i + 0.5) * slot for i, a in enumerate(old_ages)
-                }
-                old_bar_w = 0.88 * slot
-                u_tail1 = u_tail0 + n_old * slot
-            else:
-                old_centers = {}
-                old_bar_w = w_ref
-                u_tail1 = u_tail0
+            u_num_end = min(_u(max_age), 0.92)
 
-            def _u_hist(a: float) -> float:
-                """Histogram X: warped ≤P50; equal-width slots for ages >P50."""
-                a = float(a)
-                if a <= float(STRETCH_AGE_HI):
-                    return _u_young(a)
-                if a in old_centers:
-                    return old_centers[a]
-                if old_ages:
-                    nearest = min(old_ages, key=lambda x: abs(x - a))
-                    return old_centers[nearest]
-                return u_tail1
-
-            # Light age-group backgrounds
+            # Light age-group backgrounds; labels above the axes (not over bars)
             band_specs = [
-                (10.0, 32.5, "#FB8C00", 0.12, "P10–32", False),
-                (32.5, 50.0, "#8E24AA", 0.10, "P33–50", False),
-                (50.0, max_age, "#2E0854", 0.08, "P50+", True),
+                (10.0, 32.5, "#FB8C00", 0.12, "P10–32"),
+                (32.5, 50.0, "#8E24AA", 0.10, "P33–50"),
+                (50.0, max_age, "#2E0854", 0.08, "P50+"),
             ]
-            for lo_b, hi_b, col_b, alpha_b, lab_b, is_old in band_specs:
-                if is_old:
-                    if not old_ages and max_age <= float(STRETCH_AGE_HI):
-                        continue
-                    u_lo = u_tail0
-                    u_hi = u_tail1 if old_ages else _u_young(max_age)
-                else:
-                    lo_c = max(lo_b, a_min)
-                    hi_c = min(hi_b, float(STRETCH_AGE_HI), max_age)
-                    if hi_c <= lo_c:
-                        continue
-                    u_lo, u_hi = _u_young(lo_c), _u_young(hi_c)
-                if u_hi > u_lo:
-                    ax_a.axvspan(
-                        u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0
-                    )
-                    ax_a.text(
-                        0.5 * (u_lo + u_hi),
-                        0.92,
-                        lab_b,
-                        transform=ax_a.get_xaxis_transform(),
-                        ha="center",
-                        va="top",
-                        fontsize=7,
-                        color=col_b,
-                        alpha=0.85,
-                    )
+            for lo_b, hi_b, col_b, alpha_b, lab_b in band_specs:
+                lo_c = max(lo_b, a_min)
+                hi_c = min(hi_b, max_age)
+                if hi_c <= lo_c:
+                    continue
+                u_lo, u_hi = _u(lo_c), min(_u(hi_c), u_num_end)
+                if u_hi <= u_lo:
+                    continue
+                ax_a.axvspan(u_lo, u_hi, color=col_b, alpha=alpha_b, zorder=0, lw=0)
+                ax_a.text(
+                    0.5 * (u_lo + u_hi),
+                    1.04,
+                    lab_b,
+                    transform=ax_a.get_xaxis_transform(),
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    color=col_b,
+                    alpha=0.9,
+                    clip_on=False,
+                )
 
-            if old_ages or max_age > STRETCH_AGE_HI:
-                ax_a.axvline(u_tail0, color="0.8", ls="--", lw=0.7, zorder=1)
+            if max_age > STRETCH_AGE_HI:
+                ax_a.axvline(
+                    _u(float(STRETCH_AGE_HI)), color="0.8", ls="--", lw=0.7, zorder=1
+                )
 
             if len(numeric):
-                young = numeric[numeric <= float(STRETCH_AGE_HI)]
-                edges = np.arange(a_min, float(STRETCH_AGE_HI) + bin_w * 0.5, bin_w)
-                if len(edges) < 2:
-                    edges = np.array([a_min, a_min + bin_w])
-                if edges[-1] < float(STRETCH_AGE_HI):
-                    edges = np.append(edges, float(STRETCH_AGE_HI))
-                else:
-                    edges[-1] = float(STRETCH_AGE_HI)
-                if len(young):
-                    counts_y, _ = np.histogram(young, bins=edges)
-                    edges_u = np.array([_u_young(float(e)) for e in edges], dtype=float)
-                    widths_u = np.maximum(np.diff(edges_u), 1e-4)
+                edges = np.arange(a_min, a_max + bin_w * 0.5, bin_w)
+                if edges[-1] < a_max:
+                    edges = np.append(edges, a_max)
+                counts, _ = np.histogram(numeric, bins=edges)
+                edges_u = np.array([min(_u(float(e)), 0.92) for e in edges], dtype=float)
+                widths_u = np.diff(edges_u)
+                for left, width, height in zip(edges_u[:-1], widths_u, counts):
+                    if height <= 0 or width <= 0:
+                        continue
                     ax_a.bar(
-                        edges_u[:-1],
-                        counts_y,
-                        width=widths_u,
+                        left,
+                        height,
+                        width=max(width, 1e-4),
                         align="edge",
-                        color="0.55",
-                        edgecolor="white",
-                        alpha=0.9,
-                        zorder=2,
-                    )
-                if old_ages:
-                    old_arr = numeric[numeric > float(STRETCH_AGE_HI)]
-                    old_counts = [int(np.sum(np.isclose(old_arr, a))) for a in old_ages]
-                    ax_a.bar(
-                        [old_centers[a] for a in old_ages],
-                        old_counts,
-                        width=old_bar_w,
-                        align="center",
                         color="0.55",
                         edgecolor="white",
                         alpha=0.9,
@@ -2061,16 +2016,15 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                     )
 
             majors = major_labeled_ages(age_ticks) or [a_min]
-            # Prefer a labeled major near P50 on the young side when both 49 & 51 exist
-            tick_pos = [_u_hist(a) for a in majors]
+            tick_pos = [_u(a) for a in majors]
             tick_lab = [_fmt_age_tick(a) for a in majors]
 
-            u_left = _u_young(a_min) - 0.02
-            u_right = u_tail1 + 0.03
+            u_left = _u(a_min) - 0.02
+            u_right = u_num_end + 0.03
             if n_mt:
-                sep_x = u_tail1 + 0.015
-                dam_x = u_tail1 + 0.015 + slot
-                dam_w = old_bar_w
+                sep_x = u_num_end + 0.02
+                dam_x = 1.0
+                dam_w = 0.05
                 ax_a.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
                 ax_a.axvspan(
                     dam_x - 0.5 * dam_w,
@@ -2092,12 +2046,12 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 )
                 tick_pos.append(dam_x)
                 tick_lab.append(MT_DISPLAY_LABEL)
-                u_right = dam_x + 0.5 * slot + 0.03
+                u_right = 1.04
 
             ax_a.set_xticks(tick_pos)
             ax_a.set_xticklabels(tick_lab)
-            # Minor насечки: every observed age (+ Dam), same rule as age colorbar
-            minor_pos = [_u_hist(a) for a in age_ticks]
+            # Minor ticks: every observed age (+ Dam), same as age colorbar
+            minor_pos = [_u(a) for a in age_ticks]
             if n_mt:
                 minor_pos.append(dam_x)
             if minor_pos:
@@ -2107,11 +2061,9 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
             ax_a.text(0.5, 0.5, "no ages", ha="center", va="center", color="0.4")
         ax_a.set_xlabel("Age [postnatal days]")
         ax_a.set_ylabel("Number of pairs")
-        ax_a.set_title("Age (5-day bins; P50+ by age)", fontsize=10, color="0.25")
         ax_a.yaxis.set_major_locator(MaxNLocator(integer=True))
         _style_pub_ax(ax_a)
         if len(numeric) or n_mt:
-            # Match colorbar tick styling: short minors, longer majors
             ax_a.tick_params(
                 axis="x", which="minor", length=3.0, width=0.8, colors="0.2"
             )
