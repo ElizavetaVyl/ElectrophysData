@@ -2323,65 +2323,112 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
 
 # ---------------------------------------------------------------------------
 # Day 1 vs Day 2 × age groups (MW + Bonferroni; KW + Dunn) with stars
+# Modes: pair mean AND pooled {x1, x2} as independent measurements
 # ---------------------------------------------------------------------------
 DAY_AGE_DAY_COLORS = {1: "#4C78A8", 2: "#E45756"}  # blue / red
 DAY_AGE_OFFSET = 0.18
 
 
-def _pair_vals_day_age(
-    df: pd.DataFrame, mean_col: str, day: int, lo, hi, include_mt: bool
+def _vals_day_age(
+    df: pd.DataFrame,
+    *,
+    mode: str,
+    c1: str,
+    c2: str,
+    mean_col: str,
+    day: int,
+    lo,
+    hi,
+    include_mt: bool,
 ) -> np.ndarray:
+    """mode='pair' → pair mean; mode='pool' → concatenate both sides."""
     mask = (df["day"] == day) & _age_bin_mask(df, lo, hi, include_mt)
-    if mean_col not in df.columns:
+    g = df.loc[mask]
+    if mode == "pair":
+        if mean_col not in g.columns:
+            return np.array([], dtype=float)
+        return g[mean_col].dropna().to_numpy(dtype=float)
+    # pooled sides as independent measurements
+    if c1 not in g.columns or c2 not in g.columns:
         return np.array([], dtype=float)
-    return df.loc[mask, mean_col].dropna().to_numpy(dtype=float)
+    return pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(dtype=float)
 
 
-def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
+def _empty_compare(n1: int = 0, n2: int = 0) -> dict:
+    return {
+        "n1": n1,
+        "n2": n2,
+        "p": np.nan,
+        "test": "n/a",
+        "shapiro_p1": None,
+        "shapiro_p2": None,
+        "mean1": np.nan,
+        "mean2": np.nan,
+        "sem1": np.nan,
+        "sem2": np.nan,
+        "median1": np.nan,
+        "median2": np.nan,
+    }
+
+
+def _run_day_by_age_mode(
+    sub: pd.DataFrame,
+    out_dir: Path,
+    *,
+    mode: str,
+    outfile_overview: str,
+    outfile_stats: str,
+    title_mode: str,
+):
     """
-    Day 1 vs Day 2 within each age group (pair means).
-    - Overview figure: swarm + mean±SEM + significance brackets (stars).
-      Day within age: MW/Welch, Bonferroni across 3 ages.
-      Age within day: KW + Dunn; significant Dunn pairs get brackets.
-    - Stats figure: text summary of all tests (like 01b).
+    mode: 'pair' | 'pool'
+    Day within age: MW/Welch + Bonferroni×3 ages.
+    Age within day: KW + Dunn; significant brackets on overview.
     """
-    sub = df[df["day"].isin([1, 2])].copy()
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     n_age = len(AGE_ASYM_BINS)
-    params = list(STAT_PARAMS)  # Gj, CC, Rin, Cm, Vm
+    params = list(STAT_PARAMS)
 
-    # Precompute all stats
-    # day_vs: name -> list of compare_two_groups dicts (len 3) + p_adj
-    # age_kw: name -> {day: (H, p, dunn_list, samples)}
     day_vs: dict[str, list[dict]] = {}
     age_kw: dict[str, dict[int, dict]] = {}
 
-    print("\nDay 1 vs Day 2 × age groups (pair means):")
-    for name, _c1, _c2, mean_col in params:
-        if mean_col not in sub.columns:
+    print(f"\nDay 1 vs Day 2 × age groups ({title_mode}):")
+    for name, c1, c2, mean_col in params:
+        if mode == "pair" and mean_col not in sub.columns:
             continue
+        if mode == "pool" and (c1 not in sub.columns or c2 not in sub.columns):
+            continue
+
         day_results = []
         print(f"  [{name}] Day1 vs Day2 within age (Bonferroni ×{n_age}):")
         for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
-            v1 = _pair_vals_day_age(sub, mean_col, 1, lo, hi, include_mt)
-            v2 = _pair_vals_day_age(sub, mean_col, 2, lo, hi, include_mt)
-            if len(v1) >= 1 and len(v2) >= 1:
-                res = compare_two_groups(v1, v2)
-            else:
-                res = {
-                    "n1": len(v1),
-                    "n2": len(v2),
-                    "p": np.nan,
-                    "test": "n/a",
-                    "shapiro_p1": None,
-                    "shapiro_p2": None,
-                    "mean1": np.nan,
-                    "mean2": np.nan,
-                    "sem1": np.nan,
-                    "sem2": np.nan,
-                    "median1": np.nan,
-                    "median2": np.nan,
-                }
+            v1 = _vals_day_age(
+                sub,
+                mode=mode,
+                c1=c1,
+                c2=c2,
+                mean_col=mean_col,
+                day=1,
+                lo=lo,
+                hi=hi,
+                include_mt=include_mt,
+            )
+            v2 = _vals_day_age(
+                sub,
+                mode=mode,
+                c1=c1,
+                c2=c2,
+                mean_col=mean_col,
+                day=2,
+                lo=lo,
+                hi=hi,
+                include_mt=include_mt,
+            )
+            res = (
+                compare_two_groups(v1, v2)
+                if len(v1) >= 1 and len(v2) >= 1
+                else _empty_compare(len(v1), len(v2))
+            )
             res["p_adj"] = bonferroni_adjust(res.get("p"), n_age)
             res["age"] = label
             day_results.append(res)
@@ -2395,7 +2442,17 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
         age_kw[name] = {}
         for day in (1, 2):
             samples = [
-                _pair_vals_day_age(sub, mean_col, day, lo, hi, include_mt)
+                _vals_day_age(
+                    sub,
+                    mode=mode,
+                    c1=c1,
+                    c2=c2,
+                    mean_col=mean_col,
+                    day=day,
+                    lo=lo,
+                    hi=hi,
+                    include_mt=include_mt,
+                )
                 for _lab, lo, hi, include_mt, _c in AGE_ASYM_BINS
             ]
             nonempty = [s for s in samples if len(s) > 0]
@@ -2412,9 +2469,7 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
             dunn_bits = [
                 f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
             ]
-            print(
-                f"    Age KW Day{day}: {format_p(p)}; Dunn: {dunn_bits}"
-            )
+            print(f"    Age KW Day{day}: {format_p(p)}; Dunn: {dunn_bits}")
 
     day_handles = [
         Line2D(
@@ -2458,25 +2513,34 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
         axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
         axes[0, 2].set_visible(False)
 
-        for ax, (name, _c1, _c2, mean_col) in zip(axes_flat, params):
-            if mean_col not in sub.columns or name not in day_vs:
+        for ax, (name, c1, c2, mean_col) in zip(axes_flat, params):
+            if name not in day_vs:
                 ax.set_visible(False)
                 continue
 
-            # collect y for bracket stacking
             all_y = []
-            x_day = {1: {}, 2: {}}  # age_label -> x
+            x_day = {1: {}, 2: {}}
             for i, (label, lo, hi, include_mt, _col) in enumerate(AGE_ASYM_BINS):
                 xc = i + 1
                 for day, sign in ((1, -1), (2, +1)):
                     x = xc + sign * DAY_AGE_OFFSET
                     x_day[day][label] = x
-                    vals = _pair_vals_day_age(sub, mean_col, day, lo, hi, include_mt)
+                    vals = _vals_day_age(
+                        sub,
+                        mode=mode,
+                        c1=c1,
+                        c2=c2,
+                        mean_col=mean_col,
+                        day=day,
+                        lo=lo,
+                        hi=hi,
+                        include_mt=include_mt,
+                    )
                     if len(vals) == 0:
                         continue
                     all_y.append(vals)
                     jitter = np.random.default_rng(
-                        abs(hash(f"{name}{day}{label}")) % (2**32)
+                        abs(hash(f"{mode}{name}{day}{label}")) % (2**32)
                     ).normal(0, 0.04, len(vals))
                     ax.scatter(
                         np.full(len(vals), x) + jitter,
@@ -2508,17 +2572,14 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
                         zorder=4,
                     )
 
-            # y-range with headroom for brackets
             if all_y:
                 y_all = np.concatenate(all_y)
                 y_lo, y_hi = float(np.min(y_all)), float(np.max(y_all))
                 span = max(y_hi - y_lo, abs(y_hi) * 0.05, 1e-6)
-                head = 0.55 * span
-                ax.set_ylim(y_lo - 0.08 * span, y_hi + head)
+                ax.set_ylim(y_lo - 0.08 * span, y_hi + 0.55 * span)
             else:
                 y_lo, y_hi, span = 0.0, 1.0, 1.0
 
-            # Day1 vs Day2 brackets within each age (Bonferroni-adj)
             bracket_y = y_hi + 0.08 * span
             step = 0.10 * span
             for res in day_vs[name]:
@@ -2530,20 +2591,17 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
                 _sig_bracket(ax, x1, x2, bracket_y, stars, h=0.035 * span)
                 bracket_y += step
 
-            # Significant Dunn age pairs within each day (above day brackets)
             for day in (1, 2):
                 info = age_kw.get(name, {}).get(day, {})
-                dunn = info.get("dunn") or []
-                for a, b, pv in dunn:
+                for a, b, pv in info.get("dunn") or []:
                     if p_to_stars(pv) == "ns":
                         continue
                     if a not in x_day[day] or b not in x_day[day]:
                         continue
-                    x1, x2 = x_day[day][a], x_day[day][b]
                     _sig_bracket(
                         ax,
-                        x1,
-                        x2,
+                        x_day[day][a],
+                        x_day[day][b],
                         bracket_y,
                         f"D{day} {p_to_stars(pv)}",
                         h=0.035 * span,
@@ -2551,7 +2609,6 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
                     )
                     bracket_y += step
 
-            # KW note
             kw1 = age_kw.get(name, {}).get(1, {})
             kw2 = age_kw.get(name, {}).get(2, {})
             ax.text(
@@ -2564,7 +2621,6 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
                 fontsize=7,
                 color="0.3",
             )
-
             ax.set_xticks([1, 2, 3])
             ax.set_xticklabels(group_labels)
             ax.set_xlim(0.45, 3.55)
@@ -2580,16 +2636,17 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
             fontsize=9,
         )
         fig.suptitle(
-            r"Day 1 vs Day 2 by age group (pair means)"
+            rf"Day 1 vs Day 2 by age group ({title_mode})"
             "\n"
             r"brackets: Day within age (MW/Welch, Bonferroni×3); "
             r"D1/D2 = Dunn age pairs; * p<0.05, ** p<0.01, *** p<0.001",
             fontsize=11,
             color="0.15",
         )
-        savefig(fig, out_dir, "13_day_by_age_overview.png")
+        savefig(fig, out_dir, outfile_overview)
 
     # ----- Stats detail figure -----
+    mode_tag = "pair mean" if mode == "pair" else r"pooled $\{x_1,x_2\}$"
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -2598,19 +2655,15 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(1, 5, figsize=(16.5, 5.2), constrained_layout=True)
-        for ax, (name, _c1, _c2, mean_col) in zip(axes, params):
+        for ax, (name, _c1, _c2, _mc) in zip(axes, params):
             ax.set_axis_off()
             if name not in day_vs:
                 continue
-            lines = [rf"{PARAM_MATH[name]} pair mean", ""]
+            lines = [rf"{PARAM_MATH[name]} {mode_tag}", ""]
             lines.append("Day1 vs Day2 (Bonferroni×3)")
             for res in day_vs[name]:
-                lines.append(
-                    f"  {res['age']}: n={res['n1']}/{res['n2']}"
-                )
-                lines.append(
-                    f"    {res['test']}: {format_p(res.get('p'))}"
-                )
+                lines.append(f"  {res['age']}: n={res['n1']}/{res['n2']}")
+                lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
                 lines.append(
                     f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
                 )
@@ -2640,14 +2693,34 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
                 linespacing=1.25,
             )
         fig.suptitle(
-            "Day × age statistics (pair means; Days 1–2 only)\n"
+            f"Day × age statistics ({title_mode}; Days 1–2 only)\n"
             "Day within age: Shapiro→Welch or Mann–Whitney, Bonferroni across 3 ages; "
             "Age within day: Kruskal–Wallis + Dunn (Bonferroni)",
             fontsize=11,
             color="0.15",
         )
-        savefig(fig, out_dir, "13b_day_by_age_stats.png")
+        savefig(fig, out_dir, outfile_stats)
 
+
+def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
+    """Run Day×age analysis for pair means and for pooled sides."""
+    sub = df[df["day"].isin([1, 2])].copy()
+    _run_day_by_age_mode(
+        sub,
+        out_dir,
+        mode="pair",
+        outfile_overview="13_day_by_age_pair_mean_overview.png",
+        outfile_stats="13b_day_by_age_pair_mean_stats.png",
+        title_mode="pair means",
+    )
+    _run_day_by_age_mode(
+        sub,
+        out_dir,
+        mode="pool",
+        outfile_overview="14_day_by_age_pooled_overview.png",
+        outfile_stats="14b_day_by_age_pooled_stats.png",
+        title_mode=r"pooled $\{x_1,x_2\}$",
+    )
 
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
