@@ -1640,8 +1640,8 @@ def plot_asymmetry_by_age_bins(
 # ---------------------------------------------------------------------------
 def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
     """
-    Exploratory: pair-mean Gj/CC and AI_Gj/AI_CC vs Distance (µm).
-    Continuous age colormap; Spearman ρ annotated.
+    Gj and CC vs Distance (µm): both directed values of each pair plus pair mean
+    on the same axes. AI vs distance removed. Spearman on pair mean vs Distance.
     """
     if "Distance_um" not in df.columns:
         print("Skipping distance plots: no Distance column in Excel.")
@@ -1655,14 +1655,9 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
 
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
-    # top: means; bottom: asymmetry indices
-    row1 = [
-        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
-        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
-    ]
-    row2 = [
-        ("AI_Gj", r"AI $G_{j}$"),
-        ("AI_CC", r"AI $CC$"),
+    panels = [
+        ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} [nS]"),
+        ("CC", "CC_12", "CC_21", "CC_pair_mean", rf"{PARAM_MATH['CC']}"),
     ]
 
     with plt.rc_context(
@@ -1672,57 +1667,130 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8), constrained_layout=True)
-        print("\nCoupling vs Distance (Spearman):")
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        print("\nCoupling vs Distance (both sides + pair mean; Spearman on mean):")
 
-        def _dist_panel(ax, col: str, ylabel: str):
-            if col not in sub.columns:
+        for ax, (name, c1, c2, mean_col, ylabel) in zip(axes, panels):
+            need = [c1, c2, mean_col]
+            if any(c not in sub.columns for c in need):
                 ax.set_visible(False)
-                return
-            d = sub[sub[col].notna()].copy()
+                continue
+            d = sub[sub[c1].notna() & sub[c2].notna() & sub[mean_col].notna()].copy()
+            if len(d) == 0:
+                ax.set_visible(False)
+                continue
             colors, _, _ = age_colors(
                 d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
             )
+            x = d["Distance_um"].to_numpy(dtype=float)
+            y1 = d[c1].to_numpy(dtype=float)
+            y2 = d[c2].to_numpy(dtype=float)
+            ym = d[mean_col].to_numpy(dtype=float)
+
+            # Thin vertical connectors between the two directed values
+            for xi, a, b, col in zip(x, y1, y2, colors):
+                ax.plot(
+                    [xi, xi],
+                    [a, b],
+                    color=col,
+                    lw=0.6,
+                    alpha=0.35,
+                    zorder=1,
+                    solid_capstyle="round",
+                )
+            # Both sides of the pair (open / smaller)
             ax.scatter(
-                d["Distance_um"],
-                d[col],
+                x,
+                y1,
                 c=colors,
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
+                s=POINT_SIZE * 0.55,
+                alpha=0.45,
                 edgecolors="white",
-                linewidths=0.35,
+                linewidths=0.3,
+                zorder=2,
+                label=rf"${name}_{{12}}$ / ${name}_{{21}}$",
+            )
+            ax.scatter(
+                x,
+                y2,
+                c=colors,
+                s=POINT_SIZE * 0.55,
+                alpha=0.45,
+                edgecolors="white",
+                linewidths=0.3,
                 zorder=2,
             )
+            # Pair mean (filled, larger)
+            ax.scatter(
+                x,
+                ym,
+                c=colors,
+                s=POINT_SIZE * 1.15,
+                alpha=0.9,
+                edgecolors="0.15",
+                linewidths=0.5,
+                zorder=3,
+                label=r"pair mean",
+            )
+
             if len(d) >= 3:
-                rho, p = stats.spearmanr(d["Distance_um"], d[col])
+                rho, p = stats.spearmanr(x, ym)
                 ax.text(
                     0.04,
                     0.96,
-                    f"Spearman ρ={rho:.2f}\n{format_p(p)}",
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n"
+                    rf"$n_{{\mathrm{{pairs}}}}$={len(d)}",
                     transform=ax.transAxes,
                     va="top",
                     ha="left",
                     fontsize=8,
                     color="0.25",
                 )
-                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+                print(
+                    f"  {name} pair mean vs Distance: ρ={rho:.3f}, "
+                    f"{format_p(p)}, n_pairs={len(d)}"
+                )
             else:
-                print(f"  {col}: n={len(d)} (too few for Spearman)")
-            if col.startswith("AI_"):
-                ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
-                ax.set_ylim(0, 1.05)
+                print(f"  {name}: n={len(d)} (too few for Spearman)")
+
             ax.set_xlabel(r"Distance [$\mu$m]")
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
-        for ax, (col, ylabel) in zip(axes[0], row1):
-            _dist_panel(ax, col, ylabel)
-        for ax, (col, ylabel) in zip(axes[1], row2):
-            _dist_panel(ax, col, ylabel)
-
+        # Single legend for marker meaning (age is in colorbar)
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="0.55",
+                markeredgecolor="white",
+                markersize=5,
+                alpha=0.7,
+                label=r"directed $x_{12}$, $x_{21}$",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="0.35",
+                markeredgecolor="0.15",
+                markersize=7,
+                label=r"pair mean $(x_{12}+x_{21})/2$",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.55),
+            frameon=False,
+            fontsize=9,
+        )
         cbar = add_age_colorbar(
             fig,
-            list(axes.ravel()),
+            list(axes),
             vmin=vmin,
             max_age=max_age,
             mt_val=mt_val,
@@ -1735,7 +1803,9 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Coupling vs inter-soma distance"
             "\n"
-            r"pair mean $=(x_1+x_2)/2$; " + POOL_NOTE,
+            r"small points: both directions; large: pair mean; "
+            r"Spearman on pair mean; "
+            + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
@@ -2269,10 +2339,11 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
 
 def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
     """
-    Separate coverage figure (2×2):
+    Separate coverage figure (2×2) — the only place Exclude?=yes is retained:
       Distance | Distance (Exclude?=yes omitted)
       Age      | Age (Exclude?=yes omitted)
-    Age-group KW bar panel removed; band labels carry $n_{ec}$ counts.
+    Left column may include pairs without Gj (coverage only). All other figures
+    use analysis_pool / included_pairs and require filled Gj + no Exclude.
     """
     frame_all = _coverage_frame(df, include_excluded=True)
     frame_keep = _coverage_frame(df, include_excluded=False)
@@ -3172,7 +3243,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "06",
-            "label": "06  Coupling vs Distance",
+            "label": "06  Coupling vs Distance (both sides + mean)",
             "outputs": ["06_coupling_vs_distance.png"],
             "run": lambda: plot_coupling_vs_distance(df, out_dir),
         },
