@@ -3349,7 +3349,10 @@ def main():
     )
     n_excl = int(df["excluded"].sum()) if "excluded" in df.columns else 0
     n_day3 = int(((df["day"] == 3) & ~df["excluded"]).sum()) if "excluded" in df.columns else int((df["day"] == 3).sum())
-    print(f"Exclude?=yes: {n_excl} (kept only for Distance histogram)")
+    print(
+        f"Exclude?=yes: {n_excl} "
+        "(kept for Distance/age coverage histograms only)"
+    )
     print(
         f"Analysis pool (Days 1–2, not excluded): {int(df['in_pool'].sum())} "
         f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
