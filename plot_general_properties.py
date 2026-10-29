@@ -2413,8 +2413,9 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
 # Day 1 vs Day 2 × age groups (MW + Bonferroni; KW + Dunn) with stars
 # Modes: pair mean AND pooled {x1, x2} as independent measurements
 # ---------------------------------------------------------------------------
-DAY_AGE_DAY_COLORS = {1: "#4C78A8", 2: "#E45756"}  # blue / red
+DAY_AGE_DAY_MARKERS = {1: "o", 2: "s"}  # Day 1 circle, Day 2 square
 DAY_AGE_OFFSET = 0.18
+MEAN_COLOR = "0.15"  # black-ish mean ± SEM
 
 
 def _vals_day_age(
@@ -2559,22 +2560,25 @@ def _run_day_by_age_mode(
             ]
             print(f"    Age KW Day{day}: {format_p(p)}; Dunn: {dunn_bits}")
 
+    # Legend: day = marker shape; age = orange→purple on x; mean = black
     day_handles = [
         Line2D(
             [0],
             [0],
-            marker="o",
+            marker=DAY_AGE_DAY_MARKERS[1],
             color="w",
-            markerfacecolor=DAY_AGE_DAY_COLORS[1],
+            markerfacecolor="0.45",
+            markeredgecolor="white",
             markersize=7,
             label="Day 1",
         ),
         Line2D(
             [0],
             [0],
-            marker="o",
+            marker=DAY_AGE_DAY_MARKERS[2],
             color="w",
-            markerfacecolor=DAY_AGE_DAY_COLORS[2],
+            markerfacecolor="0.45",
+            markeredgecolor="white",
             markersize=7,
             label="Day 2",
         ),
@@ -2582,11 +2586,23 @@ def _run_day_by_age_mode(
             [0],
             [0],
             marker="o",
-            color="crimson",
+            color=MEAN_COLOR,
             linestyle="None",
             markersize=6,
             label="mean ± SEM",
         ),
+    ]
+    age_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=color,
+            markersize=7,
+            label=label,
+        )
+        for label, _lo, _hi, _mt, color in AGE_ASYM_BINS
     ]
 
     # ----- Overview with brackets / stars -----
@@ -2608,7 +2624,7 @@ def _run_day_by_age_mode(
 
             all_y = []
             x_day = {1: {}, 2: {}}
-            for i, (label, lo, hi, include_mt, _col) in enumerate(AGE_ASYM_BINS):
+            for i, (label, lo, hi, include_mt, age_color) in enumerate(AGE_ASYM_BINS):
                 xc = i + 1
                 for day, sign in ((1, -1), (2, +1)):
                     x = xc + sign * DAY_AGE_OFFSET
@@ -2633,31 +2649,26 @@ def _run_day_by_age_mode(
                     ax.scatter(
                         np.full(len(vals), x) + jitter,
                         vals,
-                        c=DAY_AGE_DAY_COLORS[day],
+                        c=age_color,
+                        marker=DAY_AGE_DAY_MARKERS[day],
                         s=POINT_SIZE,
                         alpha=POINT_ALPHA,
                         edgecolors="white",
                         linewidths=0.35,
                         zorder=2,
                     )
-                    m, sem, med = _mean_sem_median(vals)
+                    m, sem, _med = _mean_sem_median(vals)
                     ax.errorbar(
                         [x],
                         [m],
                         yerr=[sem],
                         fmt="o",
-                        color="crimson",
+                        color=MEAN_COLOR,
+                        ecolor=MEAN_COLOR,
                         markersize=5,
-                        capsize=2.5,
+                        capsize=3,
+                        elinewidth=1.1,
                         zorder=3,
-                    )
-                    ax.plot(
-                        [x],
-                        [med],
-                        marker="D",
-                        color="royalblue",
-                        markersize=4,
-                        zorder=4,
                     )
 
             if all_y:
@@ -2668,8 +2679,9 @@ def _run_day_by_age_mode(
             else:
                 y_lo, y_hi, span = 0.0, 1.0, 1.0
 
+            # Day1 vs Day2 within age: stars only (no p-text on plot)
             bracket_y = y_hi + 0.08 * span
-            step = 0.10 * span
+            step = 0.12 * span
             for res in day_vs[name]:
                 stars = p_to_stars(res["p_adj"])
                 if stars == "ns":
@@ -2679,10 +2691,12 @@ def _run_day_by_age_mode(
                 _sig_bracket(ax, x1, x2, bracket_y, stars, h=0.035 * span)
                 bracket_y += step
 
+            # Dunn age pairs within a day: label "day 1" / "day 2" + stars
             for day in (1, 2):
                 info = age_kw.get(name, {}).get(day, {})
                 for a, b, pv in info.get("dunn") or []:
-                    if p_to_stars(pv) == "ns":
+                    stars = p_to_stars(pv)
+                    if stars == "ns":
                         continue
                     if a not in x_day[day] or b not in x_day[day]:
                         continue
@@ -2691,24 +2705,12 @@ def _run_day_by_age_mode(
                         x_day[day][a],
                         x_day[day][b],
                         bracket_y,
-                        f"D{day} {p_to_stars(pv)}",
+                        f"day {day}\n{stars}",
                         h=0.035 * span,
                         fs=7,
                     )
                     bracket_y += step
 
-            kw1 = age_kw.get(name, {}).get(1, {})
-            kw2 = age_kw.get(name, {}).get(2, {})
-            ax.text(
-                0.02,
-                0.98,
-                f"Age KW D1 {format_p(kw1.get('p'))}; D2 {format_p(kw2.get('p'))}",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=7,
-                color="0.3",
-            )
             ax.set_xticks([1, 2, 3])
             ax.set_xticklabels(group_labels)
             ax.set_xlim(0.45, 3.55)
@@ -2717,7 +2719,7 @@ def _run_day_by_age_mode(
             _style_pub_ax(ax)
 
         fig.legend(
-            handles=day_handles,
+            handles=day_handles + age_handles,
             loc="center left",
             bbox_to_anchor=(1.0, 0.55),
             frameon=False,
@@ -2726,8 +2728,8 @@ def _run_day_by_age_mode(
         fig.suptitle(
             rf"Day 1 vs Day 2 by age group ({title_mode})"
             "\n"
-            r"brackets: Day within age (MW/Welch, Bonferroni×3); "
-            r"D1/D2 = Dunn age pairs; * p<0.05, ** p<0.01, *** p<0.001",
+            r"colour = age group; marker = day (○ Day 1, □ Day 2); "
+            r"black = mean ± SEM; brackets = significant contrasts only",
             fontsize=11,
             color="0.15",
         )
