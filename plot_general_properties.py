@@ -227,6 +227,31 @@ def parse_age(value) -> tuple[float | None, bool]:
     return None, False
 
 
+def parse_exclude_flag(value) -> bool:
+    """True if Excel Exclude? marks the pair to skip from analysis plots."""
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if np.isnan(value):
+            return False
+        return bool(value) and float(value) != 0.0
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    return text in {"yes", "y", "true", "1", "exclude", "excluded"}
+
+
+def _find_exclude_column(columns: list[str]) -> str | None:
+    """Match Exclude? / Exclude / exclude? etc."""
+    norm = {c: re.sub(r"[\s_?]+", "", c.strip().lower()) for c in columns}
+    for c, n in norm.items():
+        if n in {"exclude", "excluded"}:
+            return c
+    return None
+
+
 def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     df = pd.read_excel(excel_path, sheet_name=0)
     df.columns = [str(c).strip() for c in df.columns]
@@ -298,16 +323,34 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     if dist_col is not None:
         df["Distance_um"] = _to_float(df[dist_col])
 
-    df["in_pool"] = df["day"].isin(POOL_DAYS)
+    # Optional Exclude? column: yes → keep for distance hist only; skip elsewhere
+    excl_col = _find_exclude_column(list(df.columns))
+    if excl_col is not None:
+        df["excluded"] = df[excl_col].map(parse_exclude_flag)
+    else:
+        df["excluded"] = False
+
+    df["in_pool"] = df["day"].isin(POOL_DAYS) & ~df["excluded"]
     return df.reset_index(drop=True)
+
+
+def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
+    """All recording days, but drop pairs marked Exclude?=yes."""
+    if "excluded" not in df.columns:
+        return df.copy()
+    return df[~df["excluded"]].copy()
 
 
 def analysis_pool(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Pairs for asymmetry, AI, coupling-vs-age/distance, and coverage plots.
-    Keeps Days 1–2 only; Day 3 is excluded (still shown on figure 01).
+    Pairs for asymmetry, AI, coupling-vs-age/distance, and age coverage.
+    Days 1–2 only; Day 3 out; Exclude?=yes out.
+    (Distance histogram uses all pairs with Distance, including Exclude?=yes.)
     """
-    return df[df["day"].isin(POOL_DAYS)].copy()
+    mask = df["day"].isin(POOL_DAYS)
+    if "excluded" in df.columns:
+        mask = mask & ~df["excluded"]
+    return df[mask].copy()
 
 
 def age_limits(df: pd.DataFrame) -> tuple[float, float, float, bool]:
@@ -658,6 +701,7 @@ def plot_day_comparison(
     subtitle: str = "",
 ):
     """Left/right = column identity (side 1 / side 2), not sorted by magnitude."""
+    df = included_pairs(df)
     vmin, max_age, mt_val, has_mt = age_limits(df)
     age_ticks = unique_ages_for_colorbar(df)
 
@@ -781,6 +825,7 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
     Shapiro -> Welch or Mann-Whitney. Show mean±SEM and median.
     Includes Gj, CC, Rin, Cm, Vm on one figure.
     """
+    df = included_pairs(df)
     params = list(STAT_PARAMS)
     n = len(params)
 
@@ -1967,21 +2012,26 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
 def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
     """
     One figure, three panels: Distance bins | age (5-day) | age groups.
-    Pool days 1–2; one count per electrically coupled pair.
+    Distance: every pair with a Distance value (any day; Include Exclude?=yes).
+    Age panels: analysis pool (Days 1–2, Exclude?=yes omitted).
     """
     sub = analysis_pool(df)
-    if len(sub) == 0:
-        print("Skipping coverage histograms: empty pool.")
+    # Distance hist: all pairs that have Distance, including Exclude?=yes
+    if "Distance_um" in df.columns:
+        dists = df.loc[df["Distance_um"].notna(), "Distance_um"].to_numpy(dtype=float)
+    else:
+        dists = np.array([])
+
+    if len(sub) == 0 and len(dists) == 0:
+        print("Skipping coverage histograms: empty pool and no distances.")
         return
 
-    numeric = sub.loc[~sub["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
-    n_mt = int(sub["is_mt"].sum())
-    has_dist = "Distance_um" in sub.columns and sub["Distance_um"].notna().any()
-    dists = (
-        sub.loc[sub["Distance_um"].notna(), "Distance_um"].to_numpy(dtype=float)
-        if has_dist
+    numeric = (
+        sub.loc[~sub["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
+        if len(sub)
         else np.array([])
     )
+    n_mt = int(sub["is_mt"].sum()) if len(sub) else 0
 
     with plt.rc_context(
         {
@@ -1993,7 +2043,7 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.3), constrained_layout=True)
         ax_d, ax_a, ax_g = axes
 
-        # --- Distance ---
+        # --- Distance (all pairs with Distance; Exclude?=yes included) ---
         if len(dists):
             d_min = float(np.floor(np.min(dists) / 10.0) * 10.0)
             d_max = float(np.ceil(np.max(dists) / 10.0) * 10.0)
@@ -2005,13 +2055,6 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 width = 10.0
                 edges = np.arange(d_min, d_max + width, width)
             ax_d.hist(dists, bins=edges, color="0.55", edgecolor="white", alpha=0.9)
-            ax_d.axvline(
-                float(np.median(dists)),
-                color="darkorange",
-                ls="--",
-                lw=1.3,
-                label=f"median = {np.median(dists):.0f} µm",
-            )
             ax_d.axvline(
                 float(np.mean(dists)),
                 color="crimson",
@@ -2030,16 +2073,21 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
                 color="0.25",
             )
             ax_d.legend(frameon=False, fontsize=8, loc="upper left")
+            n_excl_dist = (
+                int((df["Distance_um"].notna() & df["excluded"]).sum())
+                if "excluded" in df.columns
+                else 0
+            )
             print(
-                f"\nCoverage histograms — Distance: n={len(dists)}, "
-                f"mean={np.mean(dists):.1f}, median={np.median(dists):.1f} µm"
+                f"\nCoverage histograms — Distance: n={len(dists)} "
+                f"(incl. Exclude?=yes: {n_excl_dist}), "
+                f"mean={np.mean(dists):.1f} µm"
             )
         else:
             ax_d.text(0.5, 0.5, "no Distance", ha="center", va="center", color="0.4")
             print("\nCoverage histograms — Distance: skipped (no column/values)")
         ax_d.set_xlabel(r"Distance [$\mu$m]")
         ax_d.set_ylabel("Number of pairs")
-        ax_d.set_title("Distance", fontsize=10, color="0.25")
         ax_d.yaxis.set_major_locator(MaxNLocator(integer=True))
         _style_pub_ax(ax_d)
 
@@ -2250,7 +2298,8 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Sample coverage: distance and age"
             "\n"
-            rf"{POOL_NOTE}; one count per electrically coupled pair",
+            r"Distance: all pairs with a value (incl. Exclude?=yes); "
+            rf"age: {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -3306,10 +3355,12 @@ def main():
     print(
         f"{MT_DISPLAY_LABEL} pairs (Excel {MT_EXCEL_TOKEN}): {int(df['is_mt'].sum())}"
     )
-    n_day3 = int((df["day"] == 3).sum())
+    n_excl = int(df["excluded"].sum()) if "excluded" in df.columns else 0
+    n_day3 = int(((df["day"] == 3) & ~df["excluded"]).sum()) if "excluded" in df.columns else int((df["day"] == 3).sum())
+    print(f"Exclude?=yes: {n_excl} (kept only for Distance histogram)")
     print(
-        f"Analysis pool (Days 1–2): {int(df['in_pool'].sum())} "
-        f"(Day 3 excluded from asymmetry/AI/coupling: n={n_day3})"
+        f"Analysis pool (Days 1–2, not excluded): {int(df['in_pool'].sum())} "
+        f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
     )
 
     catalog = build_figure_catalog(df, out_dir)
