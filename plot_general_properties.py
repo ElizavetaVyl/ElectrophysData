@@ -510,6 +510,49 @@ def lowess_smooth(
     return x_grid, y_hat
 
 
+# Default “upper cloud” quantile for descriptive envelope lines (not a formal test).
+QUANTILE_TAU = 0.75
+
+
+def quantile_regression_line(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    tau: float = QUANTILE_TAU,
+    n_grid: int = 60,
+    min_n: int = 12,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """
+    Linear quantile regression y ≈ a + b x via pinball loss (SciPy only).
+    Descriptive envelope helper — no slope p-value. Returns (x_line, y_hat)
+    or (None, None) if too few points.
+    """
+    from scipy.optimize import minimize
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) < min_n:
+        return None, None
+    x_med = float(np.median(x))
+    x_scale = float(np.std(x)) or 1.0
+    xs = (x - x_med) / x_scale
+
+    def pinball(beta: np.ndarray) -> float:
+        resid = y - (beta[0] + beta[1] * xs)
+        return float(np.sum(np.where(resid >= 0, tau * resid, (tau - 1.0) * resid)))
+
+    y0 = float(np.quantile(y, tau))
+    res = minimize(pinball, x0=np.array([y0, 0.0]), method="Nelder-Mead")
+    if not res.success and not np.isfinite(res.fun):
+        return None, None
+    a, b = float(res.x[0]), float(res.x[1])
+    x_line = np.linspace(float(x.min()), float(x.max()), n_grid)
+    y_hat = a + b * ((x_line - x_med) / x_scale)
+    return x_line, y_hat
+
+
 def add_age_colorbar(
     fig,
     axs,
@@ -1730,6 +1773,18 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 zorder=3,
             )
 
+            # Descriptive upper-cloud line on pair means (no slope test)
+            x_q, y_q = quantile_regression_line(x, ym, tau=QUANTILE_TAU)
+            if x_q is not None:
+                y_floor = float(np.nanmin(ym)) if len(ym) else 0.0
+                ax.plot(
+                    x_q,
+                    np.maximum(y_q, min(0.0, y_floor)),
+                    color="crimson",
+                    lw=1.6,
+                    zorder=4,
+                )
+
             # Spearman: pair mean (1 / pair) and pooled both sides (2 / pair)
             x_pool = np.concatenate([x, x])
             y_pool = np.concatenate([y1, y2])
@@ -1752,6 +1807,10 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 print(
                     f"  {name} pooled {{x12,x21}}: ρ={row['rho_pool']:.3f}, "
                     f"{format_p(row['p_pool'])}, n={row['n_pool']}"
+                )
+                print(
+                    f"  {name}: quantile τ={QUANTILE_TAU:g} on pair mean "
+                    f"(descriptive overlay only)"
                 )
             else:
                 print(f"  {name}: n={len(d)} (too few for Spearman)")
@@ -1783,6 +1842,13 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 markersize=7,
                 label=r"pair mean $(x_{12}+x_{21})/2$",
             ),
+            Line2D(
+                [0],
+                [0],
+                color="crimson",
+                lw=1.6,
+                label=rf"quantile $\tau={QUANTILE_TAU:g}$ (descriptive)",
+            ),
         ]
         fig.legend(
             handles=legend_handles,
@@ -1807,8 +1873,10 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             r"Coupling vs inter-soma distance"
             "\n"
             r"small points: both directions; large: pair mean; "
+            rf"crimson: quantile $\tau={QUANTILE_TAU:g}$ on pair mean "
+            r"(visual envelope, not a test); "
             + POOL_NOTE,
-            fontsize=11,
+            fontsize=10.5,
             color="0.15",
         )
         savefig(fig, out_dir, "06_coupling_vs_distance.png")
@@ -1849,6 +1917,9 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 f"  {format_p(row['p_pool'])}",
                 "",
                 "Note: $(x_{12}+x_{21})$ has the same Spearman as the pair mean.",
+                "",
+                rf"Quantile τ={QUANTILE_TAU:g} on the scatter is a visual",
+                "envelope only (no slope test).",
             ]
             ax.text(
                 0.05,
@@ -2594,7 +2665,10 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
-        print("\nAI vs pair-mean strength (matched; Spearman):")
+        print(
+            f"\nAI vs pair-mean strength (matched; Spearman + descriptive "
+            f"quantile τ={QUANTILE_TAU:g}):"
+        )
         for ax, (xcol, ycol, xlabel, ylabel) in zip(axes, panels):
             d = sub[sub[xcol].notna() & sub[ycol].notna()].copy()
             colors, _, _ = age_colors(
@@ -2610,6 +2684,21 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
                 linewidths=0.35,
                 zorder=2,
             )
+            x_q, y_q = quantile_regression_line(
+                d[xcol].to_numpy(dtype=float),
+                d[ycol].to_numpy(dtype=float),
+                tau=QUANTILE_TAU,
+            )
+            if x_q is not None:
+                ax.plot(
+                    x_q,
+                    np.clip(y_q, 0.0, 1.0),
+                    color="crimson",
+                    lw=1.6,
+                    zorder=3,
+                    label=rf"quantile $\tau={QUANTILE_TAU:g}$",
+                )
+            # Light rank summary only — QR line is visual, no slope test
             if len(d) >= 3:
                 rho, p = stats.spearmanr(d[xcol], d[ycol])
                 ax.text(
@@ -2622,7 +2711,10 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
                     fontsize=8,
                     color="0.25",
                 )
-                print(f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+                print(
+                    f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)} "
+                    f"(QR τ={QUANTILE_TAU:g} overlay, descriptive)"
+                )
             else:
                 print(f"  {ycol} vs {xcol}: n={len(d)} (too few)")
             ax.set_ylim(0, 1.05)
@@ -2630,6 +2722,16 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color="crimson",
+                lw=1.6,
+                label=rf"quantile $\tau={QUANTILE_TAU:g}$ (descriptive)",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         cbar = add_age_colorbar(
             fig,
             list(axes),
@@ -2646,10 +2748,10 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
             "Coupling asymmetry vs pair-mean strength (matched)"
             "\n"
             + AI_FORMULA
-            + r"; exploratory — AI & mean share $\{x_{12},x_{21}\}$ "
-            r"(not independent); "
+            + rf"; crimson: quantile $\tau={QUANTILE_TAU:g}$ (visual envelope, not a test); "
+            r"AI & mean share $\{x_{12},x_{21}\}$ — exploratory; "
             + POOL_NOTE,
-            fontsize=11,
+            fontsize=10.5,
             color="0.15",
         )
         savefig(fig, out_dir, "12_AI_vs_pair_mean_strength.png")
