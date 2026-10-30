@@ -2553,6 +2553,109 @@ def plot_ai_gj_vs_ai_rin(df: pd.DataFrame, out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# AI vs pair-mean strength (matched parameter) — exploratory
+# ---------------------------------------------------------------------------
+def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
+    """
+    Exploratory: does stronger coupling go with lower asymmetry?
+    AI_Gj vs Gj_pair_mean and AI_CC vs CC_pair_mean (matched metrics).
+    Note: AI and pair mean are both derived from {x12, x21}, so they are not
+    independent — weak pairs can inflate AI under absolute noise. Treat as
+    descriptive; prefer cross-parameter checks for inference.
+    """
+    sub = analysis_pool(df)
+    need = ["AI_Gj", "Gj_pair_mean", "AI_CC", "CC_pair_mean"]
+    if any(c not in sub.columns for c in need):
+        print("Skipping AI vs pair-mean strength: missing AI / pair-mean columns.")
+        return
+
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        (
+            "Gj_pair_mean",
+            "AI_Gj",
+            rf"{PARAM_MATH['Gj']} pair mean [nS]",
+            r"AI $G_{j}$",
+        ),
+        (
+            "CC_pair_mean",
+            "AI_CC",
+            rf"{PARAM_MATH['CC']} pair mean",
+            r"AI $CC$",
+        ),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        print("\nAI vs pair-mean strength (matched; Spearman):")
+        for ax, (xcol, ycol, xlabel, ylabel) in zip(axes, panels):
+            d = sub[sub[xcol].notna() & sub[ycol].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d[xcol],
+                d[ycol],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 3:
+                rho, p = stats.spearmanr(d[xcol], d[ycol])
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {ycol} vs {xcol}: n={len(d)} (too few)")
+            ax.set_ylim(0, 1.05)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            "Coupling asymmetry vs pair-mean strength (matched)"
+            "\n"
+            + AI_FORMULA
+            + r"; exploratory — AI & mean share $\{x_{12},x_{21}\}$ "
+            r"(not independent); "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "12_AI_vs_pair_mean_strength.png")
+
+
+# ---------------------------------------------------------------------------
 # Signed ΔGj (and ΔCC) vs ΔRin of the receiver
 # ---------------------------------------------------------------------------
 def plot_signed_delta_gj_vs_rin(df: pd.DataFrame, out_dir: Path):
@@ -3340,6 +3443,12 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "label": "11  Distance/age coverage (with & without Exclude)",
             "outputs": ["11_distance_age_histograms.png"],
             "run": lambda: plot_coverage_histograms(df, out_dir),
+        },
+        {
+            "id": "12",
+            "label": "12  AI vs pair-mean strength (Gj, CC; matched)",
+            "outputs": ["12_AI_vs_pair_mean_strength.png"],
+            "run": lambda: plot_ai_vs_pair_mean(df, out_dir),
         },
         {
             "id": "13",
