@@ -510,43 +510,52 @@ def lowess_smooth(
     return x_grid, y_hat
 
 
-# Tertile bins for envelope-style summaries (AI vs strength; strength vs distance)
-STRENGTH_BIN_NAMES = ("weak", "mid", "strong")
-DISTANCE_BIN_NAMES = ("near", "mid", "far")
-TERTILE_BIN_COLORS = ("#B0B0B0", "#6E6E6E", "#2A2A2A")
+# Fixed-width bins for envelope-style summaries (pre-specified step on x)
+GJ_BIN_WIDTH = 0.2  # nS (pair-mean Gj)
+CC_BIN_WIDTH = 0.05  # pair-mean CC
+DISTANCE_BIN_WIDTH = 20.0  # µm
+BIN_POINT_COLOR = "#6E6E6E"
 
 
-def assign_tertile_bins(
+def assign_width_bins(
     x: pd.Series,
-    names: tuple[str, ...] = STRENGTH_BIN_NAMES,
+    width: float,
+    *,
+    origin: float = 0.0,
+    drop_empty: bool = True,
 ) -> tuple[pd.Series, list[tuple[str, float, float, int]]]:
     """
-    Equal-count tertiles of x (pd.qcut). Returns (label per row, aligned to x.index;
-    NaN where x is NaN) and a list of (name, lo, hi, n) in order.
-    Falls back to fewer bins if ties force duplicates='drop'.
+    Fixed-width bins on x: [origin + k·w, origin + (k+1)·w), last bin closed on the right.
+    Returns (bin label per row; NA where x is NA) and meta
+    [(label, lo, hi, n), ...] in order. Empty bins dropped by default.
     """
     out = pd.Series(pd.NA, index=x.index, dtype="object")
     meta: list[tuple[str, float, float, int]] = []
-    valid = x.dropna()
-    if len(valid) < 6:
+    valid = x.dropna().astype(float)
+    if len(valid) < 3 or not np.isfinite(width) or width <= 0:
         return out, meta
-    n_bins = min(3, len(valid) // 2)
-    n_bins = max(n_bins, 2)
-    try:
-        cats = pd.qcut(valid, q=n_bins, duplicates="drop")
-    except ValueError:
-        return out, meta
-    intervals = list(cats.cat.categories)
-    use_names = list(names[: len(intervals)])
-    if len(use_names) < len(intervals):
-        use_names = [f"bin{i + 1}" for i in range(len(intervals))]
-    rename = {iv: name for iv, name in zip(intervals, use_names)}
-    labeled = cats.map(rename)
-    out.loc[labeled.index] = labeled.astype(object)
-    for iv, name in zip(intervals, use_names):
-        lo, hi = float(iv.left), float(iv.right)
-        n = int((cats == iv).sum())
-        meta.append((name, lo, hi, n))
+    xmin = float(valid.min())
+    xmax = float(valid.max())
+    start = float(origin + width * np.floor((xmin - origin) / width))
+    n_steps = int(np.ceil((xmax - start) / width))
+    n_steps = max(n_steps, 1)
+    vals = valid.to_numpy(dtype=float)
+    idx = np.floor((vals - start) / width).astype(int)
+    idx = np.clip(idx, 0, n_steps - 1)
+    labels = np.array(
+        [f"{start + i * width:g}–{start + (i + 1) * width:g}" for i in range(n_steps)],
+        dtype=object,
+    )
+    assigned = pd.Series(labels[idx], index=valid.index, dtype=object)
+    out.loc[assigned.index] = assigned
+    for i in range(n_steps):
+        lo = start + i * width
+        hi = start + (i + 1) * width
+        name = labels[i]
+        n = int((idx == i).sum())
+        if drop_empty and n == 0:
+            continue
+        meta.append((name, float(lo), float(hi), n))
     return out, meta
 
 
@@ -560,7 +569,7 @@ def _fmt_bin_edge(v: float, *, kind: str) -> str:
     return f"{v:.2g}"
 
 
-def _draw_tertile_panel(
+def _draw_width_bin_panel(
     ax,
     *,
     samples: list[np.ndarray],
@@ -570,12 +579,11 @@ def _draw_tertile_panel(
     seed_key: str,
     y_lim: tuple[float, float] | None = None,
 ):
-    """Jittered points + mean±SEM + median; light KW if ≥2 nonempty groups."""
-    colors = TERTILE_BIN_COLORS
+    """Jittered points + mean±SEM + median; light KW on bins with n≥3 only."""
+    n_bins = len(meta)
     for i, ((name, lo, hi, _n), vals) in enumerate(zip(meta, samples)):
         if len(vals) == 0:
             continue
-        color = colors[min(i, len(colors) - 1)]
         xpos = i + 1
         jitter = np.random.default_rng(abs(hash(seed_key + name)) % (2**32)).normal(
             0, 0.06, len(vals)
@@ -583,7 +591,7 @@ def _draw_tertile_panel(
         ax.scatter(
             np.full(len(vals), xpos) + jitter,
             vals,
-            c=color,
+            c=BIN_POINT_COLOR,
             s=POINT_SIZE,
             alpha=POINT_ALPHA,
             edgecolors="white",
@@ -616,7 +624,7 @@ def _draw_tertile_panel(
             ax.text(
                 0.98,
                 0.96,
-                f"KW {format_p(p_kw)}",
+                f"KW {format_p(p_kw)}\n(bins n≥3)",
                 transform=ax.transAxes,
                 ha="right",
                 va="top",
@@ -627,13 +635,16 @@ def _draw_tertile_panel(
             pass
 
     tick_labels = []
-    for name, lo, hi, n in meta:
+    for _name, lo, hi, n in meta:
         lo_s = _fmt_bin_edge(lo, kind=edge_kind)
         hi_s = _fmt_bin_edge(hi, kind=edge_kind)
-        tick_labels.append(f"{name}\n[{lo_s}–{hi_s}]\nn={n}")
-    ax.set_xticks(range(1, len(meta) + 1))
-    ax.set_xticklabels(tick_labels, fontsize=8)
-    ax.set_xlim(0.4, len(meta) + 0.6)
+        tick_labels.append(f"{lo_s}–{hi_s}\nn={n}")
+    ax.set_xticks(range(1, n_bins + 1))
+    rot = 0 if n_bins <= 5 else (35 if n_bins <= 10 else 60)
+    ax.set_xticklabels(tick_labels, fontsize=7 if n_bins > 6 else 8, rotation=rot)
+    if rot:
+        ax.tick_params(axis="x", pad=2)
+    ax.set_xlim(0.4, n_bins + 0.6)
     ax.set_ylabel(ylabel)
     if y_lim is not None:
         ax.set_ylim(*y_lim)
@@ -2007,21 +2018,21 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
 
 def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
     """
-    Pair-mean Gj / CC by Distance tertiles (near / mid / far).
-    Descriptive summary of the cloud envelope; light KW only.
+    Pair-mean Gj / CC by fixed Distance bins (width = DISTANCE_BIN_WIDTH µm).
+    Descriptive summary of the cloud envelope; light KW on bins with n≥3.
     """
     if "Distance_um" not in df.columns:
-        print("Skipping distance tertile bins: no Distance column.")
+        print("Skipping distance width bins: no Distance column.")
         return
     sub = analysis_pool(df)
     sub = sub[sub["Distance_um"].notna()].copy()
-    if len(sub) < 6:
-        print("Skipping distance tertile bins: too few pairs with Distance.")
+    if len(sub) < 3:
+        print("Skipping distance width bins: too few pairs with Distance.")
         return
 
-    bins, meta = assign_tertile_bins(sub["Distance_um"], DISTANCE_BIN_NAMES)
+    bins, meta = assign_width_bins(sub["Distance_um"], DISTANCE_BIN_WIDTH)
     if not meta:
-        print("Skipping distance tertile bins: could not form tertiles.")
+        print("Skipping distance width bins: could not form bins.")
         return
     sub = sub.copy()
     sub["_dist_bin"] = bins
@@ -2030,6 +2041,7 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
         ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]", "gj"),
         ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean", "cc"),
     ]
+    fig_w = max(10.5, 1.15 * len(meta) + 2.5)
 
     with plt.rc_context(
         {
@@ -2038,8 +2050,11 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-        print("\nPair-mean coupling by Distance tertiles:")
+        fig, axes = plt.subplots(1, 2, figsize=(fig_w, 4.8), constrained_layout=True)
+        print(
+            f"\nPair-mean coupling by Distance bins "
+            f"(width={DISTANCE_BIN_WIDTH:g} µm):"
+        )
         for ax, (ycol, ylabel, _kind) in zip(axes, panels):
             if ycol not in sub.columns:
                 ax.set_visible(False)
@@ -2057,7 +2072,7 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
                 print(
                     f"  {ycol} {name}: n={len(vals)}, median={med:.3g}, P75={p75:.3g}"
                 )
-            _draw_tertile_panel(
+            _draw_width_bin_panel(
                 ax,
                 samples=samples,
                 meta=meta,
@@ -2065,7 +2080,7 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
                 edge_kind="distance",
                 seed_key=f"dist-{ycol}",
             )
-            ax.set_xlabel(r"Distance tertile [$\mu$m]")
+            ax.set_xlabel(rf"Distance bin [$\mu$m] (width={DISTANCE_BIN_WIDTH:g})")
 
         handles = [
             Line2D(
@@ -2089,10 +2104,10 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         fig.suptitle(
-            r"Pair-mean coupling by Distance tertiles"
+            rf"Pair-mean coupling by Distance bins ({DISTANCE_BIN_WIDTH:g} $\mu$m)"
             "\n"
-            r"equal-count bins of Distance; points = pairs; "
-            r"descriptive (envelope-oriented); "
+            r"fixed-width bins on Distance (empty bins omitted); points = pairs; "
+            r"descriptive; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -2789,7 +2804,7 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
     Note: AI and pair mean are both derived from {x12, x21}, so they are not
     independent — weak pairs can inflate AI under absolute noise. Treat as
     descriptive; prefer cross-parameter checks for inference.
-    Also writes tertile companion figure 12b.
+    Also writes fixed-width bin companion figure 12b.
     """
     sub = analysis_pool(df)
     need = ["AI_Gj", "Gj_pair_mean", "AI_CC", "CC_pair_mean"]
@@ -2887,19 +2902,27 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
 
 def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
     """
-    AI by pair-mean strength tertiles (weak / mid / strong), matched Gj and CC.
-    Companion to the scatter; same non-independence caveat.
+    AI by fixed-width pair-mean strength bins (Gj step GJ_BIN_WIDTH nS;
+    CC step CC_BIN_WIDTH). Companion to the scatter; same non-independence caveat.
     """
     sub = analysis_pool(df)
     need = ["AI_Gj", "Gj_pair_mean", "AI_CC", "CC_pair_mean"]
     if any(c not in sub.columns for c in need):
-        print("Skipping AI by strength tertiles: missing columns.")
+        print("Skipping AI by strength bins: missing columns.")
         return
 
     panels = [
-        ("Gj_pair_mean", "AI_Gj", r"AI $G_{j}$", "gj"),
-        ("CC_pair_mean", "AI_CC", r"AI $CC$", "cc"),
+        ("Gj_pair_mean", "AI_Gj", r"AI $G_{j}$", "gj", GJ_BIN_WIDTH),
+        ("CC_pair_mean", "AI_CC", r"AI $CC$", "cc", CC_BIN_WIDTH),
     ]
+
+    # Width chosen after scanning both panels' bin counts
+    meta_lens = []
+    for xcol, _y, _yl, _k, w in panels:
+        d0 = sub[sub[xcol].notna()]
+        _b, m = assign_width_bins(d0[xcol], w)
+        meta_lens.append(len(m))
+    fig_w = max(10.5, 1.15 * max(meta_lens, default=3) + 2.5)
 
     with plt.rc_context(
         {
@@ -2908,14 +2931,17 @@ def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
-        print("\nAI by pair-mean strength tertiles:")
-        for ax, (xcol, ycol, ylabel, edge_kind) in zip(axes, panels):
+        fig, axes = plt.subplots(1, 2, figsize=(fig_w, 4.8), constrained_layout=True)
+        print(
+            f"\nAI by pair-mean strength bins "
+            f"(Gj width={GJ_BIN_WIDTH:g} nS, CC width={CC_BIN_WIDTH:g}):"
+        )
+        for ax, (xcol, ycol, ylabel, edge_kind, width) in zip(axes, panels):
             d = sub[sub[xcol].notna() & sub[ycol].notna()].copy()
-            bins, meta = assign_tertile_bins(d[xcol], STRENGTH_BIN_NAMES)
+            bins, meta = assign_width_bins(d[xcol], width)
             if not meta:
                 ax.set_visible(False)
-                print(f"  {ycol}: could not form tertiles")
+                print(f"  {ycol}: could not form bins")
                 continue
             d = d.copy()
             d["_str_bin"] = bins
@@ -2930,7 +2956,7 @@ def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
                 print(
                     f"  {ycol} {name}: n={len(vals)}, median={med:.3g}, P75={p75:.3g}"
                 )
-            _draw_tertile_panel(
+            _draw_width_bin_panel(
                 ax,
                 samples=samples,
                 meta=meta,
@@ -2939,11 +2965,12 @@ def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
                 seed_key=f"str-{ycol}",
                 y_lim=(0, 1.05),
             )
-            unit = "nS" if edge_kind == "gj" else ""
-            xlab = rf"{PARAM_MATH['Gj']} pair-mean tertile" if edge_kind == "gj" else rf"{PARAM_MATH['CC']} pair-mean tertile"
-            if unit:
-                xlab = xlab + f" [{unit}]"
-            ax.set_xlabel(xlab)
+            if edge_kind == "gj":
+                ax.set_xlabel(
+                    rf"{PARAM_MATH['Gj']} pair-mean bin [nS] (width={width:g})"
+                )
+            else:
+                ax.set_xlabel(rf"{PARAM_MATH['CC']} pair-mean bin (width={width:g})")
 
         handles = [
             Line2D(
@@ -2967,10 +2994,11 @@ def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         fig.suptitle(
-            "AI by pair-mean strength tertiles (matched)"
+            "AI by pair-mean strength bins (matched)"
             "\n"
             + AI_FORMULA
-            + r"; equal-count bins; exploratory — AI & mean share $\{x_{12},x_{21}\}$; "
+            + rf"; fixed width $G_j$={GJ_BIN_WIDTH:g} nS, $CC$={CC_BIN_WIDTH:g}; "
+            r"exploratory — AI & mean share $\{x_{12},x_{21}\}$; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -3730,7 +3758,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "06",
-            "label": "06  Coupling vs Distance (plot + stats + tertile bins)",
+            "label": "06  Coupling vs Distance (plot + stats + 20 µm bins)",
             "outputs": [
                 "06_coupling_vs_distance.png",
                 "06b_coupling_vs_distance_stats.png",
@@ -3770,7 +3798,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "12",
-            "label": "12  AI vs pair-mean strength (scatter + tertile bins)",
+            "label": "12  AI vs pair-mean strength (scatter + fixed-width bins)",
             "outputs": [
                 "12_AI_vs_pair_mean_strength.png",
                 "12b_AI_by_strength_bins.png",
