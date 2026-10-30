@@ -510,47 +510,134 @@ def lowess_smooth(
     return x_grid, y_hat
 
 
-# Default “upper cloud” quantile for descriptive envelope lines (not a formal test).
-QUANTILE_TAU = 0.75
+# Tertile bins for envelope-style summaries (AI vs strength; strength vs distance)
+STRENGTH_BIN_NAMES = ("weak", "mid", "strong")
+DISTANCE_BIN_NAMES = ("near", "mid", "far")
+TERTILE_BIN_COLORS = ("#B0B0B0", "#6E6E6E", "#2A2A2A")
 
 
-def quantile_regression_line(
-    x: np.ndarray,
-    y: np.ndarray,
+def assign_tertile_bins(
+    x: pd.Series,
+    names: tuple[str, ...] = STRENGTH_BIN_NAMES,
+) -> tuple[pd.Series, list[tuple[str, float, float, int]]]:
+    """
+    Equal-count tertiles of x (pd.qcut). Returns (label per row, aligned to x.index;
+    NaN where x is NaN) and a list of (name, lo, hi, n) in order.
+    Falls back to fewer bins if ties force duplicates='drop'.
+    """
+    out = pd.Series(pd.NA, index=x.index, dtype="object")
+    meta: list[tuple[str, float, float, int]] = []
+    valid = x.dropna()
+    if len(valid) < 6:
+        return out, meta
+    n_bins = min(3, len(valid) // 2)
+    n_bins = max(n_bins, 2)
+    try:
+        cats = pd.qcut(valid, q=n_bins, duplicates="drop")
+    except ValueError:
+        return out, meta
+    intervals = list(cats.cat.categories)
+    use_names = list(names[: len(intervals)])
+    if len(use_names) < len(intervals):
+        use_names = [f"bin{i + 1}" for i in range(len(intervals))]
+    rename = {iv: name for iv, name in zip(intervals, use_names)}
+    labeled = cats.map(rename)
+    out.loc[labeled.index] = labeled.astype(object)
+    for iv, name in zip(intervals, use_names):
+        lo, hi = float(iv.left), float(iv.right)
+        n = int((cats == iv).sum())
+        meta.append((name, lo, hi, n))
+    return out, meta
+
+
+def _fmt_bin_edge(v: float, *, kind: str) -> str:
+    if kind == "distance":
+        return f"{v:.0f}"
+    if kind == "gj":
+        return f"{v:.2g}"
+    if kind == "cc":
+        return f"{v:.2f}"
+    return f"{v:.2g}"
+
+
+def _draw_tertile_panel(
+    ax,
     *,
-    tau: float = QUANTILE_TAU,
-    n_grid: int = 60,
-    min_n: int = 12,
-) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
-    """
-    Linear quantile regression y ≈ a + b x via pinball loss (SciPy only).
-    Descriptive envelope helper — no slope p-value. Returns (x_line, y_hat)
-    or (None, None) if too few points.
-    """
-    from scipy.optimize import minimize
+    samples: list[np.ndarray],
+    meta: list[tuple[str, float, float, int]],
+    ylabel: str,
+    edge_kind: str,
+    seed_key: str,
+    y_lim: tuple[float, float] | None = None,
+):
+    """Jittered points + mean±SEM + median; light KW if ≥2 nonempty groups."""
+    colors = TERTILE_BIN_COLORS
+    for i, ((name, lo, hi, _n), vals) in enumerate(zip(meta, samples)):
+        if len(vals) == 0:
+            continue
+        color = colors[min(i, len(colors) - 1)]
+        xpos = i + 1
+        jitter = np.random.default_rng(abs(hash(seed_key + name)) % (2**32)).normal(
+            0, 0.06, len(vals)
+        )
+        ax.scatter(
+            np.full(len(vals), xpos) + jitter,
+            vals,
+            c=color,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=2,
+        )
+        ax.errorbar(
+            [xpos],
+            [float(np.mean(vals))],
+            yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
+            fmt="o",
+            color="crimson",
+            markersize=6,
+            capsize=3,
+            zorder=3,
+        )
+        ax.plot(
+            [xpos],
+            [float(np.median(vals))],
+            marker="D",
+            color="royalblue",
+            markersize=5,
+            zorder=4,
+        )
 
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    m = np.isfinite(x) & np.isfinite(y)
-    x, y = x[m], y[m]
-    if len(x) < min_n:
-        return None, None
-    x_med = float(np.median(x))
-    x_scale = float(np.std(x)) or 1.0
-    xs = (x - x_med) / x_scale
+    nonempty = [s for s in samples if len(s) >= 3]
+    if len(nonempty) >= 2:
+        try:
+            _h, p_kw = stats.kruskal(*nonempty)
+            ax.text(
+                0.98,
+                0.96,
+                f"KW {format_p(p_kw)}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="0.35",
+            )
+        except ValueError:
+            pass
 
-    def pinball(beta: np.ndarray) -> float:
-        resid = y - (beta[0] + beta[1] * xs)
-        return float(np.sum(np.where(resid >= 0, tau * resid, (tau - 1.0) * resid)))
-
-    y0 = float(np.quantile(y, tau))
-    res = minimize(pinball, x0=np.array([y0, 0.0]), method="Nelder-Mead")
-    if not res.success and not np.isfinite(res.fun):
-        return None, None
-    a, b = float(res.x[0]), float(res.x[1])
-    x_line = np.linspace(float(x.min()), float(x.max()), n_grid)
-    y_hat = a + b * ((x_line - x_med) / x_scale)
-    return x_line, y_hat
+    tick_labels = []
+    for name, lo, hi, n in meta:
+        lo_s = _fmt_bin_edge(lo, kind=edge_kind)
+        hi_s = _fmt_bin_edge(hi, kind=edge_kind)
+        tick_labels.append(f"{name}\n[{lo_s}–{hi_s}]\nn={n}")
+    ax.set_xticks(range(1, len(meta) + 1))
+    ax.set_xticklabels(tick_labels, fontsize=8)
+    ax.set_xlim(0.4, len(meta) + 0.6)
+    ax.set_ylabel(ylabel)
+    if y_lim is not None:
+        ax.set_ylim(*y_lim)
+    _style_pub_ax(ax)
 
 
 def add_age_colorbar(
@@ -1773,18 +1860,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 zorder=3,
             )
 
-            # Descriptive upper-cloud line on pair means (no slope test)
-            x_q, y_q = quantile_regression_line(x, ym, tau=QUANTILE_TAU)
-            if x_q is not None:
-                y_floor = float(np.nanmin(ym)) if len(ym) else 0.0
-                ax.plot(
-                    x_q,
-                    np.maximum(y_q, min(0.0, y_floor)),
-                    color="crimson",
-                    lw=1.6,
-                    zorder=4,
-                )
-
             # Spearman: pair mean (1 / pair) and pooled both sides (2 / pair)
             x_pool = np.concatenate([x, x])
             y_pool = np.concatenate([y1, y2])
@@ -1807,10 +1882,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 print(
                     f"  {name} pooled {{x12,x21}}: ρ={row['rho_pool']:.3f}, "
                     f"{format_p(row['p_pool'])}, n={row['n_pool']}"
-                )
-                print(
-                    f"  {name}: quantile τ={QUANTILE_TAU:g} on pair mean "
-                    f"(descriptive overlay only)"
                 )
             else:
                 print(f"  {name}: n={len(d)} (too few for Spearman)")
@@ -1842,13 +1913,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 markersize=7,
                 label=r"pair mean $(x_{12}+x_{21})/2$",
             ),
-            Line2D(
-                [0],
-                [0],
-                color="crimson",
-                lw=1.6,
-                label=rf"quantile $\tau={QUANTILE_TAU:g}$ (descriptive)",
-            ),
         ]
         fig.legend(
             handles=legend_handles,
@@ -1873,10 +1937,8 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             r"Coupling vs inter-soma distance"
             "\n"
             r"small points: both directions; large: pair mean; "
-            rf"crimson: quantile $\tau={QUANTILE_TAU:g}$ on pair mean "
-            r"(visual envelope, not a test); "
             + POOL_NOTE,
-            fontsize=10.5,
+            fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "06_coupling_vs_distance.png")
@@ -1917,9 +1979,6 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
                 f"  {format_p(row['p_pool'])}",
                 "",
                 "Note: $(x_{12}+x_{21})$ has the same Spearman as the pair mean.",
-                "",
-                rf"Quantile τ={QUANTILE_TAU:g} on the scatter is a visual",
-                "envelope only (no slope test).",
             ]
             ax.text(
                 0.05,
@@ -1942,6 +2001,103 @@ def plot_coupling_vs_distance(df: pd.DataFrame, out_dir: Path):
             color="0.15",
         )
         savefig(fig_s, out_dir, "06b_coupling_vs_distance_stats.png")
+
+    plot_coupling_by_distance_bins(df, out_dir)
+
+
+def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
+    """
+    Pair-mean Gj / CC by Distance tertiles (near / mid / far).
+    Descriptive summary of the cloud envelope; light KW only.
+    """
+    if "Distance_um" not in df.columns:
+        print("Skipping distance tertile bins: no Distance column.")
+        return
+    sub = analysis_pool(df)
+    sub = sub[sub["Distance_um"].notna()].copy()
+    if len(sub) < 6:
+        print("Skipping distance tertile bins: too few pairs with Distance.")
+        return
+
+    bins, meta = assign_tertile_bins(sub["Distance_um"], DISTANCE_BIN_NAMES)
+    if not meta:
+        print("Skipping distance tertile bins: could not form tertiles.")
+        return
+    sub = sub.copy()
+    sub["_dist_bin"] = bins
+
+    panels = [
+        ("Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]", "gj"),
+        ("CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean", "cc"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        print("\nPair-mean coupling by Distance tertiles:")
+        for ax, (ycol, ylabel, _kind) in zip(axes, panels):
+            if ycol not in sub.columns:
+                ax.set_visible(False)
+                continue
+            samples = []
+            for name, _lo, _hi, _n in meta:
+                vals = (
+                    sub.loc[sub["_dist_bin"] == name, ycol]
+                    .dropna()
+                    .to_numpy(dtype=float)
+                )
+                samples.append(vals)
+                med = float(np.median(vals)) if len(vals) else float("nan")
+                p75 = float(np.quantile(vals, 0.75)) if len(vals) else float("nan")
+                print(
+                    f"  {ycol} {name}: n={len(vals)}, median={med:.3g}, P75={p75:.3g}"
+                )
+            _draw_tertile_panel(
+                ax,
+                samples=samples,
+                meta=meta,
+                ylabel=ylabel,
+                edge_kind="distance",
+                seed_key=f"dist-{ycol}",
+            )
+            ax.set_xlabel(r"Distance tertile [$\mu$m]")
+
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                lw=0,
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                lw=0,
+                markersize=5,
+                label="median",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        fig.suptitle(
+            r"Pair-mean coupling by Distance tertiles"
+            "\n"
+            r"equal-count bins of Distance; points = pairs; "
+            r"descriptive (envelope-oriented); "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "06c_coupling_by_distance_bins.png")
 
 
 # ---------------------------------------------------------------------------
@@ -2633,6 +2789,7 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
     Note: AI and pair mean are both derived from {x12, x21}, so they are not
     independent — weak pairs can inflate AI under absolute noise. Treat as
     descriptive; prefer cross-parameter checks for inference.
+    Also writes tertile companion figure 12b.
     """
     sub = analysis_pool(df)
     need = ["AI_Gj", "Gj_pair_mean", "AI_CC", "CC_pair_mean"]
@@ -2665,10 +2822,7 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
-        print(
-            f"\nAI vs pair-mean strength (matched; Spearman + descriptive "
-            f"quantile τ={QUANTILE_TAU:g}):"
-        )
+        print("\nAI vs pair-mean strength (matched; Spearman):")
         for ax, (xcol, ycol, xlabel, ylabel) in zip(axes, panels):
             d = sub[sub[xcol].notna() & sub[ycol].notna()].copy()
             colors, _, _ = age_colors(
@@ -2684,21 +2838,6 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
                 linewidths=0.35,
                 zorder=2,
             )
-            x_q, y_q = quantile_regression_line(
-                d[xcol].to_numpy(dtype=float),
-                d[ycol].to_numpy(dtype=float),
-                tau=QUANTILE_TAU,
-            )
-            if x_q is not None:
-                ax.plot(
-                    x_q,
-                    np.clip(y_q, 0.0, 1.0),
-                    color="crimson",
-                    lw=1.6,
-                    zorder=3,
-                    label=rf"quantile $\tau={QUANTILE_TAU:g}$",
-                )
-            # Light rank summary only — QR line is visual, no slope test
             if len(d) >= 3:
                 rho, p = stats.spearmanr(d[xcol], d[ycol])
                 ax.text(
@@ -2711,10 +2850,7 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
                     fontsize=8,
                     color="0.25",
                 )
-                print(
-                    f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)} "
-                    f"(QR τ={QUANTILE_TAU:g} overlay, descriptive)"
-                )
+                print(f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
             else:
                 print(f"  {ycol} vs {xcol}: n={len(d)} (too few)")
             ax.set_ylim(0, 1.05)
@@ -2722,16 +2858,6 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                color="crimson",
-                lw=1.6,
-                label=rf"quantile $\tau={QUANTILE_TAU:g}$ (descriptive)",
-            ),
-        ]
-        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         cbar = add_age_colorbar(
             fig,
             list(axes),
@@ -2748,13 +2874,108 @@ def plot_ai_vs_pair_mean(df: pd.DataFrame, out_dir: Path):
             "Coupling asymmetry vs pair-mean strength (matched)"
             "\n"
             + AI_FORMULA
-            + rf"; crimson: quantile $\tau={QUANTILE_TAU:g}$ (visual envelope, not a test); "
-            r"AI & mean share $\{x_{12},x_{21}\}$ — exploratory; "
+            + r"; exploratory — AI & mean share $\{x_{12},x_{21}\}$ "
+            r"(not independent); "
             + POOL_NOTE,
-            fontsize=10.5,
+            fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "12_AI_vs_pair_mean_strength.png")
+
+    plot_ai_by_strength_bins(df, out_dir)
+
+
+def plot_ai_by_strength_bins(df: pd.DataFrame, out_dir: Path):
+    """
+    AI by pair-mean strength tertiles (weak / mid / strong), matched Gj and CC.
+    Companion to the scatter; same non-independence caveat.
+    """
+    sub = analysis_pool(df)
+    need = ["AI_Gj", "Gj_pair_mean", "AI_CC", "CC_pair_mean"]
+    if any(c not in sub.columns for c in need):
+        print("Skipping AI by strength tertiles: missing columns.")
+        return
+
+    panels = [
+        ("Gj_pair_mean", "AI_Gj", r"AI $G_{j}$", "gj"),
+        ("CC_pair_mean", "AI_CC", r"AI $CC$", "cc"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        print("\nAI by pair-mean strength tertiles:")
+        for ax, (xcol, ycol, ylabel, edge_kind) in zip(axes, panels):
+            d = sub[sub[xcol].notna() & sub[ycol].notna()].copy()
+            bins, meta = assign_tertile_bins(d[xcol], STRENGTH_BIN_NAMES)
+            if not meta:
+                ax.set_visible(False)
+                print(f"  {ycol}: could not form tertiles")
+                continue
+            d = d.copy()
+            d["_str_bin"] = bins
+            samples = []
+            for name, _lo, _hi, _n in meta:
+                vals = (
+                    d.loc[d["_str_bin"] == name, ycol].dropna().to_numpy(dtype=float)
+                )
+                samples.append(vals)
+                med = float(np.median(vals)) if len(vals) else float("nan")
+                p75 = float(np.quantile(vals, 0.75)) if len(vals) else float("nan")
+                print(
+                    f"  {ycol} {name}: n={len(vals)}, median={med:.3g}, P75={p75:.3g}"
+                )
+            _draw_tertile_panel(
+                ax,
+                samples=samples,
+                meta=meta,
+                ylabel=ylabel,
+                edge_kind=edge_kind,
+                seed_key=f"str-{ycol}",
+                y_lim=(0, 1.05),
+            )
+            unit = "nS" if edge_kind == "gj" else ""
+            xlab = rf"{PARAM_MATH['Gj']} pair-mean tertile" if edge_kind == "gj" else rf"{PARAM_MATH['CC']} pair-mean tertile"
+            if unit:
+                xlab = xlab + f" [{unit}]"
+            ax.set_xlabel(xlab)
+
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                lw=0,
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                lw=0,
+                markersize=5,
+                label="median",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        fig.suptitle(
+            "AI by pair-mean strength tertiles (matched)"
+            "\n"
+            + AI_FORMULA
+            + r"; equal-count bins; exploratory — AI & mean share $\{x_{12},x_{21}\}$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "12b_AI_by_strength_bins.png")
 
 
 # ---------------------------------------------------------------------------
@@ -3509,10 +3730,11 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "06",
-            "label": "06  Coupling vs Distance (plot + Spearman stats)",
+            "label": "06  Coupling vs Distance (plot + stats + tertile bins)",
             "outputs": [
                 "06_coupling_vs_distance.png",
                 "06b_coupling_vs_distance_stats.png",
+                "06c_coupling_by_distance_bins.png",
             ],
             "run": lambda: plot_coupling_vs_distance(df, out_dir),
         },
@@ -3548,8 +3770,11 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "12",
-            "label": "12  AI vs pair-mean strength (Gj, CC; matched)",
-            "outputs": ["12_AI_vs_pair_mean_strength.png"],
+            "label": "12  AI vs pair-mean strength (scatter + tertile bins)",
+            "outputs": [
+                "12_AI_vs_pair_mean_strength.png",
+                "12b_AI_by_strength_bins.png",
+            ],
             "run": lambda: plot_ai_vs_pair_mean(df, out_dir),
         },
         {
