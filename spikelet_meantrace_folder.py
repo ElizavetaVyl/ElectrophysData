@@ -1170,7 +1170,9 @@ EXCEL_KEYS = (
 
 # Short summary: last baseline file = 0 min; each file step = ±3 min
 T_REL_STEP_MIN = 3.0
-BASELINE_FILL_HEX = "FFF2CC"  # light yellow
+BASELINE_FILL_HEX = "FFF2CC"  # light yellow — baseline-period rows
+MEAN_FILL_HEX = "E2EFDA"      # light green — baseline mean columns
+NORM_FILL_HEX = "DDEBF7"      # light blue — normalized columns
 
 
 def assign_t_rel_min(rows, step_min=None):
@@ -1213,8 +1215,41 @@ def assign_t_rel_min(rows, step_min=None):
     return t_map
 
 
-def _build_short_summary_rows(rows):
-    """One row per file: t_rel_min, amps/delays raw then norm for 12 and 21."""
+_SHORT_RAW_KEYS = (
+    "amp_spike_mV",
+    "amp_spikelet_mV",
+    "amp_ratio",
+    "delay_onset_ms",
+    "delay_peak_ms",
+)
+
+
+def _short_column_order():
+    """shapes together → raw 12/21 → baseline means → norms."""
+    cols = [
+        "file", "recording_datetime", "t_rel_min", "is_baseline",
+        "shape_12", "shape_21",
+    ]
+    for tag in ("12", "21"):
+        for k in _SHORT_RAW_KEYS:
+            cols.append(f"{k}_{tag}")
+    for tag in ("12", "21"):
+        for k in _SHORT_RAW_KEYS:
+            cols.append(f"{k}_mean_{tag}")
+    for tag in ("12", "21"):
+        for k in _SHORT_RAW_KEYS:
+            cols.append(f"{k}_norm_{tag}")
+    return cols
+
+
+def _build_short_summary_rows(rows, baseline_means=None):
+    """One row per file: shapes, raw, baseline means, norms."""
+    means_by_tag = {}
+    if baseline_means:
+        for direction, means in baseline_means.items():
+            tag = "12" if direction == "ch0->ch2" else "21"
+            means_by_tag[tag] = means or {}
+
     by_file = {}
     for r in rows:
         f = r.get("file")
@@ -1231,20 +1266,12 @@ def _build_short_summary_rows(rows):
         if ent.get("t_rel_min") is None:
             ent["t_rel_min"] = r.get("t_rel_min")
         tag = "12" if r.get("direction") == "ch0->ch2" else "21"
-        for k in (
-            "shape",
-            "amp_spike_mV",
-            "amp_spikelet_mV",
-            "amp_ratio",
-            "delay_onset_ms",
-            "delay_peak_ms",
-            "amp_spike_mV_norm",
-            "amp_spikelet_mV_norm",
-            "amp_ratio_norm",
-            "delay_onset_ms_norm",
-            "delay_peak_ms_norm",
-        ):
+        ent[f"shape_{tag}"] = r.get("shape")
+        for k in _SHORT_RAW_KEYS:
             ent[f"{k}_{tag}"] = r.get(k)
+            ent[f"{k}_norm_{tag}"] = r.get(f"{k}_norm")
+            # baseline mean (same for every file in that direction)
+            ent[f"{k}_mean_{tag}"] = means_by_tag.get(tag, {}).get(k)
 
     ordered = sorted(
         by_file.values(),
@@ -1254,22 +1281,52 @@ def _build_short_summary_rows(rows):
             str(x.get("file")),
         ),
     )
-    # stable column order
-    cols = [
-        "file", "recording_datetime", "t_rel_min", "is_baseline",
-        "shape_12", "amp_spike_mV_12", "amp_spikelet_mV_12", "amp_ratio_12",
-        "delay_onset_ms_12", "delay_peak_ms_12",
-        "shape_21", "amp_spike_mV_21", "amp_spikelet_mV_21", "amp_ratio_21",
-        "delay_onset_ms_21", "delay_peak_ms_21",
-        "amp_spike_mV_norm_12", "amp_spikelet_mV_norm_12", "amp_ratio_norm_12",
-        "delay_onset_ms_norm_12", "delay_peak_ms_norm_12",
-        "amp_spike_mV_norm_21", "amp_spikelet_mV_norm_21", "amp_ratio_norm_21",
-        "delay_onset_ms_norm_21", "delay_peak_ms_norm_21",
-    ]
+    cols = _short_column_order()
     out = []
     for ent in ordered:
         out.append({c: ent.get(c) for c in cols})
     return out
+
+
+def _style_short_sheet(ws, rows_dicts):
+    """
+    Baseline rows: yellow.
+    Mean columns: green. Norm columns: blue (applied after row fill).
+    """
+    from openpyxl.styles import PatternFill
+
+    fill_bl = PatternFill(
+        start_color=BASELINE_FILL_HEX, end_color=BASELINE_FILL_HEX, fill_type="solid"
+    )
+    fill_mean = PatternFill(
+        start_color=MEAN_FILL_HEX, end_color=MEAN_FILL_HEX, fill_type="solid"
+    )
+    fill_norm = PatternFill(
+        start_color=NORM_FILL_HEX, end_color=NORM_FILL_HEX, fill_type="solid"
+    )
+    headers = [cell.value for cell in ws[1]]
+    mean_cols = [
+        i for i, h in enumerate(headers, start=1)
+        if h and "_mean_" in str(h)
+    ]
+    norm_cols = [
+        i for i, h in enumerate(headers, start=1)
+        if h and "_norm_" in str(h)
+    ]
+    # header tint for mean / norm
+    for c in mean_cols:
+        ws.cell(row=1, column=c).fill = fill_mean
+    for c in norm_cols:
+        ws.cell(row=1, column=c).fill = fill_norm
+
+    for r_i, ent in enumerate(rows_dicts, start=2):
+        if ent.get("is_baseline"):
+            for c in range(1, ws.max_column + 1):
+                ws.cell(row=r_i, column=c).fill = fill_bl
+        for c in mean_cols:
+            ws.cell(row=r_i, column=c).fill = fill_mean
+        for c in norm_cols:
+            ws.cell(row=r_i, column=c).fill = fill_norm
 
 
 def _style_baseline_rows(ws, rows_dicts):
@@ -1277,11 +1334,8 @@ def _style_baseline_rows(ws, rows_dicts):
     from openpyxl.styles import PatternFill
 
     fill = PatternFill(start_color=BASELINE_FILL_HEX, end_color=BASELINE_FILL_HEX, fill_type="solid")
-    # header is row 1; data starts at 2
-    # find is_baseline column
     headers = {cell.value: idx for idx, cell in enumerate(ws[1], start=1)}
-    ib_col = headers.get("is_baseline")
-    if ib_col is None:
+    if "is_baseline" not in headers:
         return
     for r_i, ent in enumerate(rows_dicts, start=2):
         if not ent.get("is_baseline"):
@@ -1366,7 +1420,7 @@ def save_excel(path, rows, baseline_means=None, meantraces=None):
         ):
             by_file[f][f"{k}_{tag}"] = r.get(k)
 
-    short_rows = _build_short_summary_rows(rows)
+    short_rows = _build_short_summary_rows(rows, baseline_means=baseline_means)
     summary_rows = list(by_file.values())
     summary_rows.sort(
         key=lambda x: (
@@ -1386,6 +1440,15 @@ def save_excel(path, rows, baseline_means=None, meantraces=None):
             pd.DataFrame(bl_rows).to_excel(
                 writer, sheet_name="Baseline_means", index=False,
             )
+            # tint Baseline_means sheet green
+            from openpyxl.styles import PatternFill
+            fill_mean = PatternFill(
+                start_color=MEAN_FILL_HEX, end_color=MEAN_FILL_HEX, fill_type="solid"
+            )
+            ws_bl = writer.book["Baseline_means"]
+            for row in ws_bl.iter_rows(min_row=1, max_row=ws_bl.max_row, max_col=ws_bl.max_column):
+                for cell in row:
+                    cell.fill = fill_mean
         pd.DataFrame(clean).to_excel(writer, sheet_name="All_directions", index=False)
         pd.DataFrame(summary_rows).to_excel(
             writer, sheet_name="Summary_by_file", index=False,
@@ -1394,7 +1457,7 @@ def save_excel(path, rows, baseline_means=None, meantraces=None):
             pd.DataFrame(mt_rows).to_excel(
                 writer, sheet_name="Meantraces", index=False,
             )
-        _style_baseline_rows(writer.book["Short"], short_rows)
+        _style_short_sheet(writer.book["Short"], short_rows)
         _style_baseline_rows(writer.book["Summary_by_file"], summary_rows)
     print(f"Saved Excel: {path}")
     return path
