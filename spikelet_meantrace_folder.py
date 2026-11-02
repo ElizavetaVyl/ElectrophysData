@@ -43,7 +43,7 @@ PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
 # Spikelet / shelf onset from AP start: first time passive reaches this
 # fraction of spikelet amplitude (foot of the rise — used for delay_onset)
-SPIKELET_ONSET_FRAC = 0.20
+SPIKELET_ONSET_FRAC = 0.15
 # Late plateau landmark (QC / shelf amp context): ~arrival at flat level
 SHELF_PLATEAU_START_FRAC = 0.90
 
