@@ -14,7 +14,7 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
    - **plateau** amp = mean passive in **8–15 ms** − baseline
 5. Auto **shape** (mutually exclusive — one only):
    - `peak` if local max with enough after-peak drop **and** late plateau is clearly below the peak
-   - else `shelf` if step amp ≥ 0.05 mV (peak columns cleared)
+   - else `shelf` if step amp ≥ 0.02 mV (peak columns cleared)
    - else `flat`
 6. Chosen `amp_spikelet_mV` / `amp_ratio` by shape (`peak` or `shelf`).
 7. **Two delays** (both exported when available):

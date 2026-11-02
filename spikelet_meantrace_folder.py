@@ -49,7 +49,7 @@ SHELF_PLATEAU_START_FRAC = 0.90
 
 # Shape rules
 SHELF_DROP_FRAC = 0.25  # if (Vmax-Vend)/peak_amp < this → treat as shelf even if peak found
-MIN_PLATEAU_AMP_MV = 0.05
+MIN_PLATEAU_AMP_MV = 0.02
 MIN_SPIKE_AMP_MV = 1.0
 
 OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
