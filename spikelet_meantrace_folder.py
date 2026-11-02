@@ -38,9 +38,11 @@ WINDOW_MS = 15.0
 SMOOTH_MS = 0.3
 PEAK_PROMINENCE_MV = 0.05
 
-# Plateau = mean passive in this late window after AP start (ms)
+# Shelf step height = mean passive in this late window after AP start (ms)
 PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
+# Shelf onset = first time passive reaches this fraction of step height above baseline
+SHELF_ONSET_FRAC = 0.10
 
 # Shape rules
 SHELF_DROP_FRAC = 0.25  # if (Vmax-Vend)/peak_amp < this → treat as shelf even if peak found
@@ -187,6 +189,38 @@ def _frac_time_ms(trace, i0, i_end, baseline, amp, sr, frac=0.5):
     return None
 
 
+def _shelf_onset_rel(mp_s, n_pre, base_p, amp_step, sr, frac=None):
+    """
+    Index relative to AP start (n_pre) of shelf onset on smoothed passive.
+
+    Onset = first sample after t=0 that reaches baseline + frac * step_amp.
+    Fallback: sample of max |dV/dt| in the early half of the window.
+    """
+    if frac is None:
+        frac = SHELF_ONSET_FRAC
+    if amp_step is None or abs(float(amp_step)) < 1e-9:
+        return None
+    amp_step = float(amp_step)
+    target = float(base_p) + float(frac) * amp_step
+    rising = amp_step > 0
+    y = np.asarray(mp_s, dtype=float)
+    for i in range(n_pre, len(y)):
+        v = float(y[i])
+        if rising and v >= target:
+            return i - n_pre
+        if (not rising) and v <= target:
+            return i - n_pre
+    # fallback: steepest slope after t=0
+    if len(y) <= n_pre + 3:
+        return None
+    dy = np.diff(y[n_pre:])
+    if rising:
+        j = int(np.argmax(dy))
+    else:
+        j = int(np.argmin(dy))
+    return j
+
+
 # -----------------------------------------------------------------------------
 # Core meantrace metrics
 # -----------------------------------------------------------------------------
@@ -285,6 +319,8 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         "skip_reason": None,
         "t_peak_active_ms": None,
         "t_peak_passive_ms": None,
+        "t_shelf_onset_ms": None,
+        "shelf_onset_frac": SHELF_ONSET_FRAC,
     }
     if mean_a is None or mean_p is None:
         out["skip_reason"] = "no meantrace"
@@ -363,16 +399,20 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         delay_mode = "peak_passive - peak_active"
     elif shelf_ok:
         shape = "shelf"
-        amp_s = amp_plat
-        # delay by 50% rise of step on both cells
-        i_end = len(mp) - 1
-        t50_a = _frac_time_ms(ma, n_pre, n_pre + int(i_rel_a), base_a, amp_a, sr, 0.5)
-        t50_p = _frac_time_ms(mp_s, n_pre, i_end, base_p, amp_plat, sr, 0.5)
-        if t50_a is not None and t50_p is not None:
-            delay = _round(t50_p - t50_a)
-        else:
-            delay = None
-        delay_mode = "t50_passive - t50_active (plateau amp)"
+        amp_s = amp_plat  # shelf height (late step vs baseline)
+        i_onset_rel = _shelf_onset_rel(mp_s, n_pre, base_p, amp_plat, sr)
+        if i_onset_rel is None:
+            out["skip_reason"] = "shelf amp ok but onset not found"
+            out["shape"] = "flat"
+            return out
+        t_onset = _samples_to_ms(int(i_onset_rel), sr)
+        out["t_shelf_onset_ms"] = _round(t_onset)
+        out["i_shelf_onset_rel"] = int(i_onset_rel)
+        # delay: shelf onset vs active AP peak (same active reference as peak mode)
+        delay = _round(t_onset - _samples_to_ms(int(i_rel_a), sr))
+        delay_mode = (
+            f"shelf_onset({SHELF_ONSET_FRAC:g}*step) - peak_active"
+        )
     else:
         shape = "flat"
         amp_s = None
@@ -558,13 +598,12 @@ def _draw_main_track(ax_a, ax_p, row):
                     label="detected spikelet peak" if not labeled_sp else None,
                 )
                 labeled_sp = True
-        elif shape == "shelf" and 0 <= st < len(t):
-            # mark plateau window center
-            ip = st + _ms_to_samples(0.5 * (PLATEAU_START_MS + PLATEAU_END_MS), sr)
+        elif shape == "shelf" and m.get("t_shelf_onset_ms") is not None and 0 <= st < len(t):
+            ip = st + _ms_to_samples(m["t_shelf_onset_ms"], sr)
             if 0 <= ip < len(t):
                 ax_p.scatter(
-                    t[ip], y_p[ip], c="C2", s=36, marker="D", zorder=7,
-                    label="plateau sample" if not labeled_sp else None,
+                    t[ip], y_p[ip], c="C2", s=42, marker="D", zorder=7,
+                    label="shelf onset" if not labeled_sp else None,
                 )
                 labeled_sp = True
 
@@ -626,20 +665,22 @@ def _draw_meantrace(ax, row):
                 (t[ip], mp_s[ip]), textcoords="offset points", xytext=(6, 6),
                 fontsize=8, color="0.15",
             )
-    elif shape == "shelf":
-        tmid = 0.5 * (PLATEAU_START_MS + PLATEAU_END_MS)
-        ip = n_pre + _ms_to_samples(tmid, sr)
-        ip = min(max(ip, 0), len(mean_p) - 1)
+    elif shape == "shelf" and m.get("t_shelf_onset_ms") is not None:
+        ton = float(m["t_shelf_onset_ms"])
+        ip = n_pre + _ms_to_samples(ton, sr)
+        ip = min(max(ip, 0), len(mp_s) - 1)
         ax.scatter(
-            t[ip], mean_p[ip], c="C2", s=60, marker="D", zorder=8,
-            edgecolors="k", linewidths=0.5, label="plateau amp",
+            t[ip], mp_s[ip], c="C2", s=70, marker="D", zorder=8,
+            edgecolors="k", linewidths=0.5, label="shelf onset",
         )
-        if m.get("amp_spikelet_mV") is not None:
-            ax.annotate(
-                f"shelf {m['amp_spikelet_mV']:.2f} mV",
-                (t[ip], mean_p[ip]), textcoords="offset points", xytext=(6, 6),
-                fontsize=8, color="0.15",
-            )
+        ax.axvline(ton, color="C2", ls=":", lw=1.0)
+        amp_txt = m.get("amp_spikelet_mV")
+        ax.annotate(
+            f"onset {ton:.2f} ms"
+            + (f"  amp={amp_txt:.2f} mV" if amp_txt is not None else ""),
+            (t[ip], mp_s[ip]), textcoords="offset points", xytext=(6, 6),
+            fontsize=8, color="0.15",
+        )
 
     ax2 = ax.twinx()
     ax2.plot(t, mean_a, color="C0", lw=1.4, alpha=0.85, label="mean active")
@@ -821,6 +862,10 @@ EXCEL_KEYS = (
     "amp_ratio",
     "delay_ms",
     "delay_mode",
+    "t_peak_active_ms",
+    "t_peak_passive_ms",
+    "t_shelf_onset_ms",
+    "shelf_onset_frac",
     "peak_prominence_mV",
     "plateau_window_ms",
     "skip_reason",
@@ -845,7 +890,8 @@ def save_excel(path, rows):
         for k in (
             "sweep", "shape", "amp_spike_mV", "amp_spikelet_peak_mV",
             "amp_spikelet_plateau_mV", "amp_spikelet_mV", "amp_ratio",
-            "delay_ms", "delay_mode", "skip_reason", "n_AP_aligned",
+            "delay_ms", "delay_mode", "t_shelf_onset_ms", "t_peak_passive_ms",
+            "skip_reason", "n_AP_aligned",
         ):
             by_file[f][f"{k}_{tag}"] = r.get(k)
 
