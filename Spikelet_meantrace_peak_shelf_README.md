@@ -39,10 +39,17 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 | File | Content |
 |------|---------|
 | `*_spikelet_meantrace.xlsx` | `All_directions` + `Summary_by_file` |
-| `*_12_meantrace.png` / `*_21_meantrace.png` | QC meantrace |
-| `*_spikelet_meantrace_over_time.png` | amp spike, amp spikelet, ratio, delay vs time |
+| `*_spikelet_QC.png` | Per file: **12 above, 21 below**. Each block = main sweep track (used APs + detected peaks) + meantrace with marked peak/plateau |
+| `*_spikelet_meantrace_over_time.png` | Over time: **12 (4 panels) above, 21 (4 panels) below** — amp spike, amp spikelet, ratio, delay |
 
-On the over-time spikelet-amp panel, letter **P** / **S** marks peak vs shelf.
+On spikelet-amp over-time panels, letter **P** / **S** marks peak vs shelf.
+
+QC main track marks:
+- green ▾ = AP start **used** in meantrace
+- gray ▾ = AP start not used
+- blue ○ = AP peak used
+- orange × = detected spikelet peak (shape=peak)
+- green ◆ = plateau sample (shape=shelf)
 
 ## Tunable constants
 

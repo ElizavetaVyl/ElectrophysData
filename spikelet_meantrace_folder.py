@@ -215,6 +215,7 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
     n_y = len(y_a)
 
     snips_a, snips_p = [], []
+    used_starts, used_peaks_a, used_ap_index = [], [], []
     for i in ap_indices:
         i_start = ap_starts[i] if i < len(ap_starts) else np.nan
         if not np.isfinite(i_start):
@@ -233,6 +234,9 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
                 continue
         snips_a.append(y_a[i_start - n_pre:i_start + n_post])
         snips_p.append(y_p[i_start - n_pre:i_start + n_post])
+        used_starts.append(i_start)
+        used_peaks_a.append(int(ind_peaks[i]))
+        used_ap_index.append(i + 1)
 
     if not snips_p:
         return None, "no alignable APs for meantrace"
@@ -249,6 +253,17 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
         "n_aligned": len(snips_p),
         "n_ap": n_ap,
         "use_ap1": use_ap1,
+        "used_starts": used_starts,
+        "used_peaks_a": used_peaks_a,
+        "used_ap_index": used_ap_index,
+        "y_a": y_a,
+        "y_p": y_p,
+        "stim_start": stim_start,
+        "stim_stop": stim_stop,
+        "all_peaks_a": [int(p) for p in ind_peaks],
+        "all_starts": [
+            int(s) if np.isfinite(s) else None for s in ap_starts
+        ],
     }, None
 
 
@@ -307,15 +322,19 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
     i_rel_p = _local_peak_index(seg_p, sr, prominence=PEAK_PROMINENCE_MV)
     amp_peak = None
     drop_frac = None
+    i_peak_abs = None
     if i_rel_p is not None:
-        i_peak = n_pre + int(i_rel_p)
-        amp_peak = float(mp_s[i_peak]) - base_p
+        i_peak_abs = n_pre + int(i_rel_p)
+        amp_peak = float(mp_s[i_peak_abs]) - base_p
         out["amp_spikelet_peak_mV"] = _round(amp_peak)
         out["t_peak_passive_ms"] = _round(_samples_to_ms(i_rel_p, sr))
+        out["i_peak_passive_rel"] = int(i_rel_p)
         # drop from peak to end of window (on smoothed)
         vend = float(mp_s[-1])
         if amp_peak not in (None, 0):
-            drop_frac = (float(mp_s[i_peak]) - vend) / abs(float(amp_peak))
+            drop_frac = (float(mp_s[i_peak_abs]) - vend) / abs(float(amp_peak))
+    out["i_peak_active_rel"] = int(i_rel_a)
+    out["baseline_passive_mV"] = _round(base_p)
 
     # --- plateau / step amp ---
     i_plat0 = n_pre + _ms_to_samples(PLATEAU_START_MS, sr)
@@ -409,10 +428,24 @@ def analyze_direction(abf, active_ch, passive_ch, direction, tag):
     row["_plot"] = {
         "mean_a": mt["mean_a"],
         "mean_p": mt["mean_p"],
+        "snips_a": mt["snips_a"],
         "snips_p": mt["snips_p"],
         "n_pre": mt["n_pre"],
+        "n_post": mt["n_post"],
         "sr": sr,
         "metrics": metrics,
+        "used_starts": mt["used_starts"],
+        "used_peaks_a": mt["used_peaks_a"],
+        "used_ap_index": mt["used_ap_index"],
+        "y_a": mt["y_a"],
+        "y_p": mt["y_p"],
+        "stim_start": mt["stim_start"],
+        "stim_stop": mt["stim_stop"],
+        "all_peaks_a": mt["all_peaks_a"],
+        "all_starts": mt["all_starts"],
+        "active_ch": active_ch,
+        "passive_ch": passive_ch,
+        "sweep": sweep,
     }
     return row
 
@@ -452,52 +485,228 @@ def _get_agg_plt():
     return plt
 
 
-def save_qc_png(row, out_dir, stem):
+def _draw_main_track(ax_a, ax_p, row):
+    """Main sweep: active/passive with used APs and detected spikelet peaks."""
     plot = row.get("_plot")
     if not plot:
-        return None
-    plt = _get_agg_plt()
+        ax_a.text(0.5, 0.5, row.get("skip_reason") or "no plot",
+                  transform=ax_a.transAxes, ha="center", va="center", color="C3")
+        ax_p.axis("off")
+        return
+    sr = plot["sr"]
+    y_a = np.asarray(plot["y_a"], dtype=float)
+    y_p = np.asarray(plot["y_p"], dtype=float)
+    t = np.arange(len(y_a)) / float(sr)
+    ss, se = int(plot["stim_start"]), int(plot["stim_stop"])
+    pad = int(0.05 * sr)
+    i0 = max(ss - pad, 0)
+    i1 = min(se + pad, len(t) - 1)
+
+    ax_a.plot(t[i0:i1], y_a[i0:i1], color="C0", lw=0.9, label=f"active ch{plot['active_ch']}")
+    ax_p.plot(t[i0:i1], y_p[i0:i1], color="C1", lw=0.9, label=f"passive ch{plot['passive_ch']}")
+    for ax in (ax_a, ax_p):
+        ax.axvline(t[min(ss, len(t) - 1)], color="0.4", ls="--", lw=0.8)
+        ax.axvline(t[min(se, len(t) - 1)], color="0.4", ls="--", lw=0.8)
+
+    used_set = set(plot.get("used_starts") or [])
+    # unused AP starts (gray), used (green) + AP peaks (blue)
+    labeled_u = labeled_used = labeled_pk = labeled_sp = False
+    for st, pk in zip(plot.get("all_starts") or [], plot.get("all_peaks_a") or []):
+        if st is None:
+            continue
+        if st in used_set:
+            continue
+        if 0 <= st < len(t):
+            ax_a.scatter(
+                t[st], y_a[st], c="0.55", s=22, marker="v", zorder=4,
+                label="AP start (not used)" if not labeled_u else None,
+            )
+            labeled_u = True
+
+    m = plot.get("metrics") or {}
+    t_peak_p_ms = m.get("t_peak_passive_ms")
+    shape = m.get("shape")
+    for st, pk, ap_i in zip(
+        plot.get("used_starts") or [],
+        plot.get("used_peaks_a") or [],
+        plot.get("used_ap_index") or [],
+    ):
+        if 0 <= st < len(t):
+            ax_a.scatter(
+                t[st], y_a[st], c="limegreen", s=36, marker="v", zorder=6,
+                label="AP start used" if not labeled_used else None,
+            )
+            labeled_used = True
+            # analysis window on passive
+            t0 = t[st]
+            ax_p.axvspan(
+                t0, t0 + WINDOW_MS / 1000.0, color="C4", alpha=0.12,
+            )
+        if 0 <= pk < len(t):
+            ax_a.scatter(
+                t[pk], y_a[pk], c="C0", s=30, marker="o", zorder=6,
+                edgecolors="k", linewidths=0.3,
+                label="AP peak used" if not labeled_pk else None,
+            )
+            labeled_pk = True
+        # detected spikelet peak on each used AP (same relative delay as meantrace)
+        if shape == "peak" and t_peak_p_ms is not None and 0 <= st < len(t):
+            ip = st + _ms_to_samples(t_peak_p_ms, sr)
+            if 0 <= ip < len(t):
+                ax_p.scatter(
+                    t[ip], y_p[ip], c="darkorange", s=42, marker="x", zorder=7,
+                    label="detected spikelet peak" if not labeled_sp else None,
+                )
+                labeled_sp = True
+        elif shape == "shelf" and 0 <= st < len(t):
+            # mark plateau window center
+            ip = st + _ms_to_samples(0.5 * (PLATEAU_START_MS + PLATEAU_END_MS), sr)
+            if 0 <= ip < len(t):
+                ax_p.scatter(
+                    t[ip], y_p[ip], c="C2", s=36, marker="D", zorder=7,
+                    label="plateau sample" if not labeled_sp else None,
+                )
+                labeled_sp = True
+
+    ax_a.set_ylabel("Active Vm (mV)")
+    ax_p.set_ylabel("Passive Vm (mV)")
+    ax_a.set_xlim(t[i0], t[i1])
+    ax_p.set_xlim(t[i0], t[i1])
+    ax_a.legend(loc="upper right", fontsize=7)
+    ax_p.legend(loc="upper right", fontsize=7)
+    ax_a.grid(True, alpha=0.25)
+    ax_p.grid(True, alpha=0.25)
+    ax_a.set_title(
+        f"{row.get('direction')}  sweep {row.get('sweep')} ({row.get('sweep_tier')})  "
+        f"used AP={row.get('n_AP_aligned')}  shape={shape}",
+        fontsize=10,
+    )
+
+
+def _draw_meantrace(ax, row):
+    plot = row.get("_plot")
+    if not plot:
+        ax.text(0.5, 0.5, row.get("skip_reason") or "no meantrace",
+                transform=ax.transAxes, ha="center", va="center", color="C3")
+        return
     mean_a = plot["mean_a"]
     mean_p = plot["mean_p"]
     n_pre = plot["n_pre"]
     sr = plot["sr"]
-    m = plot["metrics"]
+    m = plot.get("metrics") or {}
     t = (np.arange(len(mean_p)) - n_pre) / float(sr) * 1000.0
+    mp_s = _smooth(mean_p, sr)
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
     for sn in plot.get("snips_p") or []:
         if len(sn) == len(t):
-            ax.plot(t, sn, color="0.6", lw=0.5, alpha=0.35)
+            ax.plot(t, sn, color="0.6", lw=0.5, alpha=0.3)
     ax.plot(t, mean_p, color="C1", lw=2.2, label="mean passive")
-    ax.plot(t, _smooth(mean_p, sr), color="darkorange", lw=1.2, label="smoothed")
-    base = float(np.mean(_smooth(mean_p, sr)[:n_pre])) if n_pre else float(mean_p[0])
+    ax.plot(t, mp_s, color="darkorange", lw=1.2, label="smoothed")
+    base = float(np.mean(mp_s[:n_pre])) if n_pre else float(mp_s[0])
     ax.axhline(base, color="0.3", lw=0.8, label="baseline")
     ax.axvspan(-BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax.axvspan(0, WINDOW_MS, color="C4", alpha=0.1)
     ax.axvspan(PLATEAU_START_MS, PLATEAU_END_MS, color="C2", alpha=0.12, label="plateau win")
     ax.axvline(0, color="limegreen", ls="--", lw=1)
 
-    ax2 = ax.twinx()
-    ax2.plot(t, mean_a, color="C0", lw=1.5, alpha=0.85, label="mean active")
-    ax2.set_ylabel("Active Vm (mV)", color="C0")
-
+    # mark detected peak / plateau on meantrace
     shape = m.get("shape")
-    title = (
-        f"{stem} {row.get('direction')} sweep {row.get('sweep')}  "
-        f"shape={shape}  spike={m.get('amp_spike_mV')}  "
-        f"spikelet={m.get('amp_spikelet_mV')}  ratio={m.get('amp_ratio')}  "
-        f"delay={m.get('delay_ms')}"
-    )
-    ax.set_title(title, fontsize=10)
+    if shape == "peak" and m.get("t_peak_passive_ms") is not None:
+        tp = float(m["t_peak_passive_ms"])
+        ip = n_pre + _ms_to_samples(tp, sr)
+        ip = min(max(ip, 0), len(mp_s) - 1)
+        ax.scatter(
+            t[ip], mp_s[ip], c="darkorange", s=70, marker="o", zorder=8,
+            edgecolors="k", linewidths=0.5, label="detected peak",
+        )
+        ax.axvline(tp, color="darkorange", ls=":", lw=1.0)
+        if m.get("amp_spikelet_mV") is not None:
+            ax.annotate(
+                f"peak {m['amp_spikelet_mV']:.2f} mV",
+                (t[ip], mp_s[ip]), textcoords="offset points", xytext=(6, 6),
+                fontsize=8, color="0.15",
+            )
+    elif shape == "shelf":
+        tmid = 0.5 * (PLATEAU_START_MS + PLATEAU_END_MS)
+        ip = n_pre + _ms_to_samples(tmid, sr)
+        ip = min(max(ip, 0), len(mean_p) - 1)
+        ax.scatter(
+            t[ip], mean_p[ip], c="C2", s=60, marker="D", zorder=8,
+            edgecolors="k", linewidths=0.5, label="plateau amp",
+        )
+        if m.get("amp_spikelet_mV") is not None:
+            ax.annotate(
+                f"shelf {m['amp_spikelet_mV']:.2f} mV",
+                (t[ip], mean_p[ip]), textcoords="offset points", xytext=(6, 6),
+                fontsize=8, color="0.15",
+            )
+
+    ax2 = ax.twinx()
+    ax2.plot(t, mean_a, color="C0", lw=1.4, alpha=0.85, label="mean active")
+    if m.get("t_peak_active_ms") is not None:
+        ta = float(m["t_peak_active_ms"])
+        ia = n_pre + _ms_to_samples(ta, sr)
+        ia = min(max(ia, 0), len(mean_a) - 1)
+        ax2.scatter(
+            t[ia], mean_a[ia], c="C0", s=55, marker="v", zorder=8,
+            edgecolors="k", linewidths=0.4, label="AP peak",
+        )
+    ax2.set_ylabel("Active Vm (mV)", color="C0")
+    ax2.tick_params(axis="y", labelcolor="C0")
+
     ax.set_xlabel("Time from AP start (ms)")
     ax.set_ylabel("Passive Vm (mV)", color="C1")
-    ax.legend(loc="upper left", fontsize=7)
+    ax.set_title(
+        f"Meantrace  shape={shape}  spike={m.get('amp_spike_mV')}  "
+        f"spikelet={m.get('amp_spikelet_mV')}  ratio={m.get('amp_ratio')}  "
+        f"delay={m.get('delay_ms')}",
+        fontsize=9,
+    )
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=7)
     ax.grid(True, alpha=0.3)
+
+
+def save_file_qc_png(rows_12_21, out_dir, stem):
+    """
+    One QC figure per file: directions 12 and 21 stacked.
+    Each direction: main sweep track (active+passive) + meantrace with detected peak.
+    """
+    by_tag = {}
+    for r in rows_12_21:
+        by_tag[r.get("tag")] = r
+    if not by_tag:
+        return None
+
+    plt = _get_agg_plt()
+    fig = plt.figure(figsize=(14, 12))
+    # 2 directions × (active, passive, meantrace) = 6 rows
+    gs = fig.add_gridspec(6, 1, height_ratios=[1.0, 1.0, 1.2, 1.0, 1.0, 1.2], hspace=0.35)
+    order = (("12", "ch0→ch2"), ("21", "ch2→ch0"))
+    for di, (tag, label) in enumerate(order):
+        row = by_tag.get(tag) or {
+            "tag": tag, "direction": label, "skip_reason": "missing direction",
+        }
+        ax_a = fig.add_subplot(gs[di * 3 + 0])
+        ax_p = fig.add_subplot(gs[di * 3 + 1], sharex=ax_a)
+        ax_m = fig.add_subplot(gs[di * 3 + 2])
+        _draw_main_track(ax_a, ax_p, row)
+        _draw_meantrace(ax_m, row)
+        ax_a.set_title(
+            f"{stem}  |  {row.get('direction') or label}",
+            fontsize=11, fontweight="bold",
+        )
+
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{stem}_{row.get('tag')}_meantrace.png")
-    fig.tight_layout()
+    path = os.path.join(out_dir, f"{stem}_spikelet_QC.png")
+    try:
+        fig.tight_layout()
+    except Exception:
+        pass
     fig.savefig(path, dpi=140, facecolor="white")
     plt.close(fig)
+    print(f"  saved {path}")
     return path
 
 
@@ -515,42 +724,49 @@ def _parse_dt(s):
 
 
 def save_over_time_plot(rows, out_path, title=None):
-    """4 panels: amp spike, amp spikelet, ratio, delay vs recording time."""
+    """
+    Over-time figure: direction 12 on top (4 panels), 21 below (4 panels).
+    Metrics: amp spike, amp spikelet, ratio, delay.
+    """
     plt = _get_agg_plt()
-    # one point per file per direction
     by_dir = {"ch0->ch2": [], "ch2->ch0": []}
     for r in rows:
-        if r.get("_plot") is not None:
-            # strip plot payload if still present
-            pass
         d = r.get("direction")
         if d not in by_dir:
             continue
         dt = _parse_dt(r.get("recording_datetime"))
         by_dir[d].append((dt, r))
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
+    fig, axes = plt.subplots(8, 1, figsize=(11, 16), sharex=True)
     if title:
-        fig.suptitle(f"{title} — meantrace spikelet (auto peak/shelf)", fontsize=12)
+        fig.suptitle(
+            f"{title} — meantrace spikelet over time (12 above, 21 below)",
+            fontsize=12,
+        )
 
     metrics = (
         ("amp_spike_mV", "AP amp (mV)"),
-        ("amp_spikelet_mV", "Spikelet amp chosen (mV)"),
-        ("amp_ratio", "Amp ratio (spikelet/spike)"),
+        ("amp_spikelet_mV", "Spikelet amp (mV)"),
+        ("amp_ratio", "Ratio spikelet/spike"),
         ("delay_ms", "Delay (ms)"),
     )
-    styles = {
-        "ch0->ch2": ("o-", "C0", "12"),
-        "ch2->ch0": ("s-", "C1", "21"),
-    }
+    dir_blocks = (
+        ("ch0->ch2", "C0", "12 (ch0→ch2)", axes[0:4]),
+        ("ch2->ch0", "C1", "21 (ch2→ch0)", axes[4:8]),
+    )
     n_pts = 0
-    for ax, (key, ylab) in zip(axes, metrics):
-        for direction, items in by_dir.items():
-            items = sorted(
-                [(dt, r) for dt, r in items if dt is not None],
-                key=lambda x: x[0],
-            )
+    for direction, color, block_title, ax_block in dir_blocks:
+        items = sorted(
+            [(dt, r) for dt, r in by_dir[direction] if dt is not None],
+            key=lambda x: x[0],
+        )
+        ax_block[0].set_title(block_title, fontsize=11, fontweight="bold")
+        for ax, (key, ylab) in zip(ax_block, metrics):
             if not items:
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", color="0.5")
+                ax.set_ylabel(ylab)
+                ax.grid(True, alpha=0.3)
                 continue
             xs = [dt for dt, _ in items]
             ys = []
@@ -561,23 +777,19 @@ def save_over_time_plot(rows, out_path, title=None):
                 except (TypeError, ValueError):
                     fv = np.nan
                 ys.append(fv)
-            sty, color, lab = styles[direction]
-            ax.plot(xs, ys, sty, color=color, label=lab)
+            ax.plot(xs, ys, "o-", color=color, label=key)
             n_pts += sum(np.isfinite(ys))
-            # shape annotation on spikelet amp panel
             if key == "amp_spikelet_mV":
                 for x, y, (_, r) in zip(xs, ys, items):
                     if not np.isfinite(y):
                         continue
-                    sh = r.get("shape") or "?"
+                    sh = (r.get("shape") or "?")[0].upper()
                     ax.annotate(
-                        sh[0].upper(), xy=(x, y),
-                        textcoords="offset points", xytext=(3, 3),
-                        fontsize=7, color=color, alpha=0.8,
+                        sh, xy=(x, y), textcoords="offset points", xytext=(3, 3),
+                        fontsize=7, color=color, alpha=0.85,
                     )
-        ax.set_ylabel(ylab)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
+            ax.set_ylabel(ylab)
+            ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel("Recording time")
     fig.autofmt_xdate()
@@ -686,11 +898,14 @@ def analyze_folder(folder_path, out_dir=None, save_qc=True):
                 f"ratio={r.get('amp_ratio')} delay={r.get('delay_ms')} "
                 f"skip={r.get('skip_reason')}"
             )
-            if save_qc:
-                try:
-                    save_qc_png(r, out_dir, stem)
-                except Exception as exc:
-                    print(f"  QC plot error: {exc}")
+        if save_qc:
+            try:
+                save_file_qc_png(rows, out_dir, stem)
+            except Exception as exc:
+                print(f"  QC plot error: {exc}")
+                import traceback
+                traceback.print_exc()
+        for r in rows:
             r.pop("_plot", None)
             all_rows.append(r)
 
