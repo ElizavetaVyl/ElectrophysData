@@ -1225,7 +1225,7 @@ _SHORT_RAW_KEYS = (
 
 
 def _short_column_order():
-    """shapes together → raw 12/21 → baseline means → norms."""
+    """shapes → raw 12/21 → norms 12/21 (means = one separate row, not columns)."""
     cols = [
         "file", "recording_datetime", "t_rel_min", "is_baseline",
         "shape_12", "shape_21",
@@ -1235,15 +1235,15 @@ def _short_column_order():
             cols.append(f"{k}_{tag}")
     for tag in ("12", "21"):
         for k in _SHORT_RAW_KEYS:
-            cols.append(f"{k}_mean_{tag}")
-    for tag in ("12", "21"):
-        for k in _SHORT_RAW_KEYS:
             cols.append(f"{k}_norm_{tag}")
     return cols
 
 
 def _build_short_summary_rows(rows, baseline_means=None):
-    """One row per file: shapes, raw, baseline means, norms."""
+    """
+    One row per file: shapes, raw, norms.
+    Plus a single BASELINE_MEAN row (green) with average raw values.
+    """
     means_by_tag = {}
     if baseline_means:
         for direction, means in baseline_means.items():
@@ -1260,6 +1260,7 @@ def _build_short_summary_rows(rows, baseline_means=None):
             "recording_datetime": r.get("recording_datetime"),
             "t_rel_min": r.get("t_rel_min"),
             "is_baseline": bool(r.get("is_baseline")),
+            "_row_kind": "file",
         })
         if r.get("is_baseline"):
             ent["is_baseline"] = True
@@ -1270,8 +1271,6 @@ def _build_short_summary_rows(rows, baseline_means=None):
         for k in _SHORT_RAW_KEYS:
             ent[f"{k}_{tag}"] = r.get(k)
             ent[f"{k}_norm_{tag}"] = r.get(f"{k}_norm")
-            # baseline mean (same for every file in that direction)
-            ent[f"{k}_mean_{tag}"] = means_by_tag.get(tag, {}).get(k)
 
     ordered = sorted(
         by_file.values(),
@@ -1283,15 +1282,31 @@ def _build_short_summary_rows(rows, baseline_means=None):
     )
     cols = _short_column_order()
     out = []
+
+    # single line with baseline means in the raw-value columns
+    if means_by_tag:
+        mean_row = {c: None for c in cols}
+        mean_row["file"] = "BASELINE_MEAN"
+        mean_row["is_baseline"] = False
+        mean_row["_row_kind"] = "mean"
+        for tag, means in means_by_tag.items():
+            for k in _SHORT_RAW_KEYS:
+                mean_row[f"{k}_{tag}"] = means.get(k)
+                mean_row[f"{k}_norm_{tag}"] = 1.0 if means.get(k) is not None else None
+        out.append(mean_row)
+
     for ent in ordered:
-        out.append({c: ent.get(c) for c in cols})
+        ent = dict(ent)
+        ent.setdefault("_row_kind", "file")
+        out.append({c: ent.get(c) for c in cols + ["_row_kind"]})
     return out
 
 
 def _style_short_sheet(ws, rows_dicts):
     """
-    Baseline rows: yellow.
-    Mean columns: green. Norm columns: blue (applied after row fill).
+    Baseline file rows: yellow.
+    Single BASELINE_MEAN row: green.
+    Norm columns: blue.
     """
     from openpyxl.styles import PatternFill
 
@@ -1305,26 +1320,26 @@ def _style_short_sheet(ws, rows_dicts):
         start_color=NORM_FILL_HEX, end_color=NORM_FILL_HEX, fill_type="solid"
     )
     headers = [cell.value for cell in ws[1]]
-    mean_cols = [
-        i for i, h in enumerate(headers, start=1)
-        if h and "_mean_" in str(h)
-    ]
+    # drop helper col from sheet if present
+    if "_row_kind" in headers:
+        # should not be written; ignore if missing
+        pass
     norm_cols = [
         i for i, h in enumerate(headers, start=1)
         if h and "_norm_" in str(h)
     ]
-    # header tint for mean / norm
-    for c in mean_cols:
-        ws.cell(row=1, column=c).fill = fill_mean
     for c in norm_cols:
         ws.cell(row=1, column=c).fill = fill_norm
 
     for r_i, ent in enumerate(rows_dicts, start=2):
+        kind = ent.get("_row_kind")
+        if kind == "mean" or ent.get("file") == "BASELINE_MEAN":
+            for c in range(1, ws.max_column + 1):
+                ws.cell(row=r_i, column=c).fill = fill_mean
+            continue
         if ent.get("is_baseline"):
             for c in range(1, ws.max_column + 1):
                 ws.cell(row=r_i, column=c).fill = fill_bl
-        for c in mean_cols:
-            ws.cell(row=r_i, column=c).fill = fill_mean
         for c in norm_cols:
             ws.cell(row=r_i, column=c).fill = fill_norm
 
@@ -1435,7 +1450,10 @@ def save_excel(path, rows, baseline_means=None, meantraces=None):
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        pd.DataFrame(short_rows).to_excel(writer, sheet_name="Short", index=False)
+        short_df_rows = [
+            {k: v for k, v in r.items() if k != "_row_kind"} for r in short_rows
+        ]
+        pd.DataFrame(short_df_rows).to_excel(writer, sheet_name="Short", index=False)
         if bl_rows:
             pd.DataFrame(bl_rows).to_excel(
                 writer, sheet_name="Baseline_means", index=False,
