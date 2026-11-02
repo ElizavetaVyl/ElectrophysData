@@ -14,7 +14,7 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
    - **plateau** amp = mean passive in **8–15 ms** − baseline
 5. Auto **shape** (mutually exclusive — one only):
    - `peak` if local max with enough after-peak drop **and** late plateau is clearly below the peak
-   - else `shelf` if step amp ≥ 0.02 mV (peak columns cleared)
+   - else `shelf` if step amp ≥ 0.05 mV (peak columns cleared)
    - else `flat`
 6. Chosen `amp_spikelet_mV` / `amp_ratio` by shape (`peak` or `shelf`).
 7. **Two delays** (both exported when available):
@@ -59,9 +59,10 @@ QC marks:
 
 In `spikelet_meantrace_folder.py`:
 
-- `PEAK_PROMINENCE_MV` (default 0.05)
-- `SHELF_DROP_FRAC` (default 0.25) — peak must drop this fraction after max
+- `SMOOTH_MS` (default 0.5)
+- `PEAK_PROMINENCE_MV` (default 0.02)
+- `SHELF_DROP_FRAC` (default 0.02) — peak only if drop after max ≥ this; else shelf
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
-- `SPIKELET_ONSET_FRAC` (default 0.10) — onset / primary delay from AP start
+- `SPIKELET_ONSET_FRAC` (default 0.15) — onset / primary delay from AP start
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
-- `MIN_PLATEAU_AMP_MV` (default 0.02)
+- `MIN_PLATEAU_AMP_MV` (default 0.05)

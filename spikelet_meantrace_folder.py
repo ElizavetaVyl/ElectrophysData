@@ -35,7 +35,7 @@ SPIKE_DISTANCE = 10  # samples
 
 BASELINE_MS = 1.0
 WINDOW_MS = 15.0
-SMOOTH_MS = 0.3
+SMOOTH_MS = 0.5
 PEAK_PROMINENCE_MV = 0.02
 
 # Shelf step height = mean passive in this late window after AP start (ms)
@@ -43,13 +43,13 @@ PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
 # Spikelet / shelf onset from AP start: first time passive reaches this
 # fraction of spikelet amplitude (foot of the rise — used for delay_onset)
-SPIKELET_ONSET_FRAC = 0.10
+SPIKELET_ONSET_FRAC = 0.15
 # Late plateau landmark (QC / shelf amp context): ~arrival at flat level
 SHELF_PLATEAU_START_FRAC = 0.90
 
-# Shape rules
-SHELF_DROP_FRAC = 0.25  # if (Vmax-Vend)/peak_amp < this → treat as shelf even if peak found
-MIN_PLATEAU_AMP_MV = 0.02
+# Shape rules: peak only if drop after max ≥ this fraction; else shelf
+SHELF_DROP_FRAC = 0.02
+MIN_PLATEAU_AMP_MV = 0.05
 MIN_SPIKE_AMP_MV = 1.0
 
 OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
