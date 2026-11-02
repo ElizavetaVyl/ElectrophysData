@@ -10,7 +10,7 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
 2. Align **AP2+ only** to active AP start
 3. Average active/passive snippets (**meantrace**)
 4. Measure:
-   - **peak** spikelet amp (local peak, prominence 0.05 mV, need drop after top)
+   - **peak** spikelet amp (local peak, prominence 0.02 mV, need drop after top)
    - **plateau** amp = mean passive in **8–15 ms** − baseline
 5. Auto **shape** (mutually exclusive — one only):
    - `peak` if local max with enough after-peak drop **and** late plateau is clearly below the peak
@@ -64,4 +64,4 @@ In `spikelet_meantrace_folder.py`:
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
 - `SPIKELET_ONSET_FRAC` (default 0.10) — onset / primary delay from AP start
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
-- `MIN_PLATEAU_AMP_MV` (default 0.05)
+- `MIN_PLATEAU_AMP_MV` (default 0.02)
