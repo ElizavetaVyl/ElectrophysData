@@ -40,7 +40,10 @@ PEAK_PROMINENCE_MV = 0.025
 # Spikelet peak search: only within this many ms after active AP peak
 PEAK_SEARCH_AFTER_AP_MS = 7.0
 
-# Shelf step height = mean passive in this late window after AP start (ms)
+# Shelf step height: window starts this many ms AFTER active AP peak
+PLATEAU_START_AFTER_AP_PEAK_MS = 8.0
+PLATEAU_DUR_MS = 7.0  # mean over [peak+8, peak+8+dur]
+# legacy aliases (from AP start) kept only for docs/fallback display
 PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
 # Spikelet / shelf onset from AP start: first time passive reaches this
@@ -387,7 +390,7 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         "delay_peak_ms": None,
         "delay_mode": None,
         "peak_prominence_mV": PEAK_PROMINENCE_MV,
-        "plateau_window_ms": f"{PLATEAU_START_MS:g}-{PLATEAU_END_MS:g}",
+        "plateau_window_ms": None,
         "skip_reason": None,
         "t_peak_active_ms": None,
         "t_peak_passive_ms": None,
@@ -457,15 +460,20 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
     out["i_peak_active_rel"] = int(i_rel_a)
     out["baseline_passive_mV"] = _round(base_p)
 
-    # --- plateau / step amp ---
-    i_plat0 = n_pre + _ms_to_samples(PLATEAU_START_MS, sr)
-    i_plat1 = n_pre + _ms_to_samples(PLATEAU_END_MS, sr)
+    # --- plateau / step amp: from AP peak + 8 ms, duration PLATEAU_DUR_MS ---
+    t_plat0 = _samples_to_ms(int(i_rel_a), sr) + PLATEAU_START_AFTER_AP_PEAK_MS
+    t_plat1 = t_plat0 + PLATEAU_DUR_MS
+    i_plat0 = n_pre + _ms_to_samples(t_plat0, sr)
+    i_plat1 = n_pre + _ms_to_samples(t_plat1, sr)
     i_plat1 = min(i_plat1, len(mp))
+    out["plateau_window_ms"] = f"{t_plat0:.2f}-{t_plat1:.2f} (from AP onset; AP peak+{PLATEAU_START_AFTER_AP_PEAK_MS:g})"
+    out["plateau_start_ms"] = _round(t_plat0)
+    out["plateau_end_ms"] = _round(t_plat1)
     if i_plat1 > i_plat0 + 2:
         amp_plat = float(np.mean(mp[i_plat0:i_plat1])) - base_p
     else:
-        amp_plat = float(np.mean(mp[n_pre:])) - base_p
-    out["amp_spikelet_plateau_mV"] = _round(amp_plat)
+        amp_plat = float(np.mean(mp[max(n_pre, i_plat0):])) - base_p if i_plat0 < len(mp) else None
+    out["amp_spikelet_plateau_mV"] = _round(amp_plat) if amp_plat is not None else None
 
     # --- shape decision (mutually exclusive: peak XOR shelf) ---
     shelf_ok = amp_plat is not None and abs(amp_plat) >= MIN_PLATEAU_AMP_MV
@@ -788,8 +796,15 @@ def _draw_meantrace(ax, row):
     ax.axhline(base, color="0.3", lw=0.8, label="baseline")
     ax.axvspan(-BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax.axvspan(0, WINDOW_MS, color="C4", alpha=0.1)
-    ax.axvspan(PLATEAU_START_MS, PLATEAU_END_MS, color="C2", alpha=0.12, label="plateau win")
-    ax.axvline(0, color="limegreen", ls="--", lw=1.2, label="AP start")
+    # plateau window relative to AP peak (stored on metrics)
+    if m.get("plateau_start_ms") is not None and m.get("plateau_end_ms") is not None:
+        ax.axvspan(
+            float(m["plateau_start_ms"]), float(m["plateau_end_ms"]),
+            color="C2", alpha=0.12, label="plateau win (AP peak+8)",
+        )
+    else:
+        ax.axvspan(PLATEAU_START_MS, PLATEAU_END_MS, color="C2", alpha=0.12, label="plateau win")
+    ax.axvline(0, color="limegreen", ls="--", lw=1.2, label="AP onset (=0)")
 
     # mark onset + only the chosen shape landmark
     shape = m.get("shape")
@@ -1275,7 +1290,53 @@ def _style_baseline_rows(ws, rows_dicts):
             ws.cell(row=r_i, column=c).fill = fill
 
 
-def save_excel(path, rows):
+def _baseline_means_rows(baseline_means):
+    """Flat rows for Baseline_means sheet."""
+    if not baseline_means:
+        return []
+    out = []
+    for direction, means in baseline_means.items():
+        tag = "12" if direction == "ch0->ch2" else "21"
+        row = {"direction": direction, "tag": tag}
+        for k in NORM_KEYS:
+            row[k] = (means or {}).get(k)
+        out.append(row)
+    return out
+
+
+def _meantrace_long_rows(meantraces):
+    """
+    Long-format meantrace samples for plotting.
+    time_ms = 0 at AP onset (alignment reference).
+    """
+    rows = []
+    for mt in meantraces or []:
+        mean_a = np.asarray(mt.get("mean_a"), dtype=float)
+        mean_p = np.asarray(mt.get("mean_p"), dtype=float)
+        n_pre = int(mt.get("n_pre") or 0)
+        sr = float(mt.get("sr") or 1.0)
+        n = min(len(mean_a), len(mean_p))
+        if n <= 0:
+            continue
+        t_ms = (np.arange(n) - n_pre) * 1000.0 / sr
+        fn = mt.get("file")
+        direction = mt.get("direction")
+        tag = mt.get("tag")
+        is_bl = bool(mt.get("is_baseline"))
+        for i in range(n):
+            rows.append({
+                "file": fn,
+                "direction": direction,
+                "tag": tag,
+                "is_baseline": is_bl,
+                "time_ms": _round(float(t_ms[i])),
+                "Vm_spike_mV": _round(float(mean_a[i])),
+                "Vm_spikelet_mV": _round(float(mean_p[i])),
+            })
+    return rows
+
+
+def save_excel(path, rows, baseline_means=None, meantraces=None):
     import pandas as pd
 
     assign_t_rel_min(rows)
@@ -1307,7 +1368,6 @@ def save_excel(path, rows):
 
     short_rows = _build_short_summary_rows(rows)
     summary_rows = list(by_file.values())
-    # order summary by t_rel_min
     summary_rows.sort(
         key=lambda x: (
             x.get("t_rel_min") is None,
@@ -1315,16 +1375,25 @@ def save_excel(path, rows):
             str(x.get("file")),
         )
     )
+    bl_rows = _baseline_means_rows(baseline_means)
+    mt_rows = _meantrace_long_rows(meantraces)
 
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         pd.DataFrame(short_rows).to_excel(writer, sheet_name="Short", index=False)
+        if bl_rows:
+            pd.DataFrame(bl_rows).to_excel(
+                writer, sheet_name="Baseline_means", index=False,
+            )
         pd.DataFrame(clean).to_excel(writer, sheet_name="All_directions", index=False)
         pd.DataFrame(summary_rows).to_excel(
             writer, sheet_name="Summary_by_file", index=False,
         )
-        # baseline background on Short + Summary
+        if mt_rows:
+            pd.DataFrame(mt_rows).to_excel(
+                writer, sheet_name="Meantraces", index=False,
+            )
         _style_baseline_rows(writer.book["Short"], short_rows)
         _style_baseline_rows(writer.book["Summary_by_file"], summary_rows)
     print(f"Saved Excel: {path}")
@@ -1540,6 +1609,7 @@ def analyze_folder(
             print("No baseline selected — skipping normalization.")
 
     all_rows = []
+    meantraces = []
     print(f"Folder: {folder_path}")
     print(f"Output: {out_dir}")
     print(f"Files: {len(abf_files)}")
@@ -1574,7 +1644,18 @@ def analyze_folder(
                 import traceback
                 traceback.print_exc()
         for r in rows:
-            r.pop("_plot", None)
+            plot = r.pop("_plot", None)
+            if plot and plot.get("mean_a") is not None and plot.get("mean_p") is not None:
+                meantraces.append({
+                    "file": r.get("file") or fn,
+                    "direction": r.get("direction"),
+                    "tag": r.get("tag"),
+                    "mean_a": np.asarray(plot["mean_a"], dtype=float),
+                    "mean_p": np.asarray(plot["mean_p"], dtype=float),
+                    "n_pre": int(plot.get("n_pre") or 0),
+                    "sr": float(plot.get("sr") or 1.0),
+                    "is_baseline": False,
+                })
             all_rows.append(r)
 
     # scrub negatives (red × on raw plot), then optional baseline normalization
@@ -1585,6 +1666,11 @@ def analyze_folder(
     png_norm = None
     if baseline_files:
         _, baseline_means = apply_baseline_normalization(all_rows, baseline_files)
+        bl = _normalize_baseline_names(baseline_files)
+        for mt in meantraces:
+            fn = os.path.basename(str(mt.get("file") or ""))
+            stem_f = os.path.splitext(fn)[0]
+            mt["is_baseline"] = bool(fn in bl or stem_f in bl)
         png_norm = os.path.join(
             out_dir, f"{folder_name}_spikelet_meantrace_over_time_norm.png"
         )
@@ -1593,7 +1679,11 @@ def analyze_folder(
         )
 
     xlsx = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace.xlsx")
-    save_excel(xlsx, all_rows)
+    save_excel(
+        xlsx, all_rows,
+        baseline_means=baseline_means,
+        meantraces=meantraces,
+    )
     return {
         "excel": xlsx,
         "plot": png,

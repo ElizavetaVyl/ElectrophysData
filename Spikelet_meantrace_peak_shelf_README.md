@@ -45,7 +45,7 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 
 | File | Content |
 |------|---------|
-| `*_spikelet_meantrace.xlsx` | **Short** (file, t_rel_min, amps/delays, norms; baseline rows highlighted) + All_directions + Summary_by_file |
+| `*_spikelet_meantrace.xlsx` | **Short**; **Baseline_means**; All_directions; Summary_by_file; **Meantraces** (time from AP onset=0, Vm spike & spikelet) |
 | `*_spikelet_QC.png` | Per file: **12 above, 21 below** — main track + meantrace |
 | `*_spikelet_meantrace_over_time.png` | Raw over time; **baseline period shaded**; 12 & 21 overlay |
 | `*_spikelet_meantrace_over_time_norm.png` | Normalized over time (baseline = 1; baseline period shaded) |
@@ -68,7 +68,8 @@ In `spikelet_meantrace_folder.py`:
 - `PEAK_PROMINENCE_MV` (default 0.025)
 - `PEAK_SEARCH_AFTER_AP_MS` (default 7.0) — spikelet peak only in this window after AP peak
 - `SHELF_DROP_FRAC` (default 0.05) — peak only if drop after max ≥ this; else shelf
-- `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
+- `PLATEAU_START_AFTER_AP_PEAK_MS` (default 8) — shelf amp window starts 8 ms after AP peak
+- `PLATEAU_DUR_MS` (default 7) — shelf amp window length
 - `SPIKELET_ONSET_FRAC` (default 0.15) — onset / primary delay from AP start
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
 - `MIN_PLATEAU_AMP_MV` (default 0.05)
