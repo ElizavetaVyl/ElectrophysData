@@ -253,7 +253,7 @@ def _shelf_plateau_start_rel(mp_s, n_pre, base_p, amp_step, sr, frac=None):
 def _amp_frac_onset_rel(mp_s, n_pre, base_p, amp, sr, frac=None):
     """
     First sample after AP start (n_pre) where passive reaches
-    baseline + frac * amp_spikelet (default 10%).
+    baseline + frac * amp_spikelet (default SPIKELET_ONSET_FRAC).
 
     This is the shelf / spikelet onset used for delay_onset.
     """
