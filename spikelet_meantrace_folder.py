@@ -36,7 +36,7 @@ SPIKE_DISTANCE = 10  # samples
 BASELINE_MS = 1.0
 WINDOW_MS = 15.0
 SMOOTH_MS = 0.5
-PEAK_PROMINENCE_MV = 0.02
+PEAK_PROMINENCE_MV = 0.01
 
 # Shelf step height = mean passive in this late window after AP start (ms)
 PLATEAU_START_MS = 8.0
