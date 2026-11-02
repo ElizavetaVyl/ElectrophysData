@@ -16,14 +16,15 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
    - `peak` if peaked event with enough after-peak drop
    - else `shelf` if step amp ≥ 0.05 mV
    - else `flat`
-6. Chosen `amp_spikelet_mV`, `amp_ratio`, `delay_ms`:
-   - peak → delay = peak_passive − peak_active
-   - shelf → amp = step height (late window − baseline);  
-     **plateau start** = first time passive reaches ~90% of step height, then slope flattens  
-     (start of the shelf, not the foot of the rise);  
-     delay = **plateau_start − peak_active**
+6. Chosen `amp_spikelet_mV` / `amp_ratio` by shape (`peak` or `shelf`).
+7. **Two delays** (both exported when available):
+   - `delay_onset_ms` = spikelet onset − AP onset  
+     Spikelet onset = inflection (`d²V/dt²` sign change) before peak/anchor on meantrace  
+     — same idea as AP `spike_begin` / `cp_infl_points`
+   - `delay_peak_ms` = peak_passive − peak_active  
+   `delay_ms` = primary (peak delay if shape=peak, else onset delay)
 
-Also: mean **AP amp** on the same meantrace.
+Also: mean **AP amp** on the same meantrace. For shelf amp, plateau start (~90% step + flatten) is still marked for QC.
 
 ## Run
 
@@ -42,17 +43,18 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 | File | Content |
 |------|---------|
 | `*_spikelet_meantrace.xlsx` | `All_directions` + `Summary_by_file` |
-| `*_spikelet_QC.png` | Per file: **12 above, 21 below**. Each block = main sweep track (used APs + detected peaks) + meantrace with marked peak/plateau |
-| `*_spikelet_meantrace_over_time.png` | Over time: **12 (4 panels) above, 21 (4 panels) below** — amp spike, amp spikelet, ratio, delay |
+| `*_spikelet_QC.png` | Per file: **12 above, 21 below**. Each block = main sweep track + meantrace with onset / peak / plateau marks |
+| `*_spikelet_meantrace_over_time.png` | Over time: **12 (5 panels) above, 21 (5 panels) below** — amp spike, amp spikelet, ratio, delay_onset, delay_peak |
 
 On spikelet-amp over-time panels, letter **P** / **S** marks peak vs shelf.
 
-QC main track marks:
+QC marks:
 - green ▾ = AP start **used** in meantrace
 - gray ▾ = AP start not used
 - blue ○ = AP peak used
-- orange × = detected spikelet peak (shape=peak)
-- green ◆ = **plateau start** (shape=shelf; when the rise reaches the shelf / flattens)
+- purple ▲ = **spikelet onset** (d² inflection on meantrace)
+- orange × / ○ = spikelet peak
+- green ◆ = plateau start (shelf amp landmark)
 
 ## Tunable constants
 
