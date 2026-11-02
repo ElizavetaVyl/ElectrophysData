@@ -19,8 +19,9 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
 6. Chosen `amp_spikelet_mV`, `amp_ratio`, `delay_ms`:
    - peak → delay = peak_passive − peak_active
    - shelf → amp = step height (late window − baseline);  
-     **onset** = first time passive reaches `SHELF_ONSET_FRAC` (10%) of step above baseline;  
-     delay = **shelf_onset − peak_active** (not mid-plateau)
+     **plateau start** = first time passive reaches ~90% of step height, then slope flattens  
+     (start of the shelf, not the foot of the rise);  
+     delay = **plateau_start − peak_active**
 
 Also: mean **AP amp** on the same meantrace.
 
@@ -51,7 +52,7 @@ QC main track marks:
 - gray ▾ = AP start not used
 - blue ○ = AP peak used
 - orange × = detected spikelet peak (shape=peak)
-- green ◆ = **shelf onset** (shape=shelf; start of the step, not mid-plateau)
+- green ◆ = **plateau start** (shape=shelf; when the rise reaches the shelf / flattens)
 
 ## Tunable constants
 
@@ -60,5 +61,5 @@ In `spikelet_meantrace_folder.py`:
 - `PEAK_PROMINENCE_MV` (default 0.05)
 - `SHELF_DROP_FRAC` (default 0.25) — peak must drop this fraction after max
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
-- `SHELF_ONSET_FRAC` (default 0.10) — onset at 10% of shelf height
+- `SHELF_PLATEAU_START_FRAC` (default 0.90) — plateau start near 90% of shelf height
 - `MIN_PLATEAU_AMP_MV` (default 0.05)

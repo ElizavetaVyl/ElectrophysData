@@ -41,8 +41,9 @@ PEAK_PROMINENCE_MV = 0.05
 # Shelf step height = mean passive in this late window after AP start (ms)
 PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
-# Shelf onset = first time passive reaches this fraction of step height above baseline
-SHELF_ONSET_FRAC = 0.10
+# Start of plateau = first time passive reaches this fraction of step height
+# (high fraction ≈ when the rise arrives at the shelf, not when it leaves baseline)
+SHELF_PLATEAU_START_FRAC = 0.90
 
 # Shape rules
 SHELF_DROP_FRAC = 0.25  # if (Vmax-Vend)/peak_amp < this → treat as shelf even if peak found
@@ -189,36 +190,62 @@ def _frac_time_ms(trace, i0, i_end, baseline, amp, sr, frac=0.5):
     return None
 
 
-def _shelf_onset_rel(mp_s, n_pre, base_p, amp_step, sr, frac=None):
+def _shelf_plateau_start_rel(mp_s, n_pre, base_p, amp_step, sr, frac=None):
     """
-    Index relative to AP start (n_pre) of shelf onset on smoothed passive.
+    Index relative to AP start of the **start of the plateau** (not rise onset).
 
-    Onset = first sample after t=0 that reaches baseline + frac * step_amp.
-    Fallback: sample of max |dV/dt| in the early half of the window.
+    Primary: first sample after t=0 that reaches
+    baseline + SHELF_PLATEAU_START_FRAC * step_amp (default 90% of shelf height).
+
+    Refinement: from that crossing, walk forward while |dV/dt| is still large,
+    then take the first sample where the slope flattens (enter the shelf).
+    Fallback if 90% never reached: max |dV/dt| sample (rise), then search flatten.
     """
     if frac is None:
-        frac = SHELF_ONSET_FRAC
+        frac = SHELF_PLATEAU_START_FRAC
     if amp_step is None or abs(float(amp_step)) < 1e-9:
         return None
     amp_step = float(amp_step)
+    y = np.asarray(mp_s, dtype=float)
+    if len(y) <= n_pre + 3:
+        return None
     target = float(base_p) + float(frac) * amp_step
     rising = amp_step > 0
-    y = np.asarray(mp_s, dtype=float)
+    dy = np.diff(y)
+    # noise scale for "flat" slope from pre-baseline derivative
+    if n_pre >= 3:
+        pre_dy = dy[max(0, n_pre - _ms_to_samples(BASELINE_MS, sr)):n_pre]
+        slope_thr = max(1e-4, 3.0 * float(np.std(pre_dy))) if len(pre_dy) else 1e-3
+    else:
+        slope_thr = 1e-3
+
+    i_cross = None
     for i in range(n_pre, len(y)):
         v = float(y[i])
         if rising and v >= target:
-            return i - n_pre
+            i_cross = i
+            break
         if (not rising) and v <= target:
+            i_cross = i
+            break
+
+    if i_cross is None:
+        # never reached 90%: start search after steepest rise
+        seg_dy = dy[n_pre:]
+        if rising:
+            j = int(np.argmax(seg_dy))
+        else:
+            j = int(np.argmin(seg_dy))
+        i_cross = n_pre + j
+
+    # from crossing (or steepest), find first flattened sample
+    for i in range(i_cross, len(y) - 1):
+        s = float(dy[i])
+        if rising and s <= slope_thr:
             return i - n_pre
-    # fallback: steepest slope after t=0
-    if len(y) <= n_pre + 3:
-        return None
-    dy = np.diff(y[n_pre:])
-    if rising:
-        j = int(np.argmax(dy))
-    else:
-        j = int(np.argmin(dy))
-    return j
+        if (not rising) and s >= -slope_thr:
+            return i - n_pre
+    return i_cross - n_pre
 
 
 # -----------------------------------------------------------------------------
@@ -317,8 +344,8 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         "skip_reason": None,
         "t_peak_active_ms": None,
         "t_peak_passive_ms": None,
-        "t_shelf_onset_ms": None,
-        "shelf_onset_frac": SHELF_ONSET_FRAC,
+        "t_shelf_onset_ms": None,  # time of plateau start (reaches shelf)
+        "shelf_plateau_start_frac": SHELF_PLATEAU_START_FRAC,
     }
     if mean_a is None or mean_p is None:
         out["skip_reason"] = "no meantrace"
@@ -398,18 +425,18 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
     elif shelf_ok:
         shape = "shelf"
         amp_s = amp_plat  # shelf height (late step vs baseline)
-        i_onset_rel = _shelf_onset_rel(mp_s, n_pre, base_p, amp_plat, sr)
-        if i_onset_rel is None:
-            out["skip_reason"] = "shelf amp ok but onset not found"
+        i_plat_rel = _shelf_plateau_start_rel(mp_s, n_pre, base_p, amp_plat, sr)
+        if i_plat_rel is None:
+            out["skip_reason"] = "shelf amp ok but plateau start not found"
             out["shape"] = "flat"
             return out
-        t_onset = _samples_to_ms(int(i_onset_rel), sr)
-        out["t_shelf_onset_ms"] = _round(t_onset)
-        out["i_shelf_onset_rel"] = int(i_onset_rel)
-        # delay: shelf onset vs active AP peak (same active reference as peak mode)
-        delay = _round(t_onset - _samples_to_ms(int(i_rel_a), sr))
+        t_plat = _samples_to_ms(int(i_plat_rel), sr)
+        out["t_shelf_onset_ms"] = _round(t_plat)  # plateau-start time (legacy col name)
+        out["i_shelf_onset_rel"] = int(i_plat_rel)
+        # delay: start of plateau vs active AP peak
+        delay = _round(t_plat - _samples_to_ms(int(i_rel_a), sr))
         delay_mode = (
-            f"shelf_onset({SHELF_ONSET_FRAC:g}*step) - peak_active"
+            f"plateau_start({SHELF_PLATEAU_START_FRAC:g}*step+flatten) - peak_active"
         )
     else:
         shape = "flat"
@@ -600,7 +627,7 @@ def _draw_main_track(ax_a, ax_p, row):
             if 0 <= ip < len(t):
                 ax_p.scatter(
                     t[ip], y_p[ip], c="C2", s=42, marker="D", zorder=7,
-                    label="shelf onset" if not labeled_sp else None,
+                    label="plateau start" if not labeled_sp else None,
                 )
                 labeled_sp = True
 
@@ -668,12 +695,12 @@ def _draw_meantrace(ax, row):
         ip = min(max(ip, 0), len(mp_s) - 1)
         ax.scatter(
             t[ip], mp_s[ip], c="C2", s=70, marker="D", zorder=8,
-            edgecolors="k", linewidths=0.5, label="shelf onset",
+            edgecolors="k", linewidths=0.5, label="plateau start",
         )
         ax.axvline(ton, color="C2", ls=":", lw=1.0)
         amp_txt = m.get("amp_spikelet_mV")
         ax.annotate(
-            f"onset {ton:.2f} ms"
+            f"plateau start {ton:.2f} ms"
             + (f"  amp={amp_txt:.2f} mV" if amp_txt is not None else ""),
             (t[ip], mp_s[ip]), textcoords="offset points", xytext=(6, 6),
             fontsize=8, color="0.15",
@@ -861,7 +888,7 @@ EXCEL_KEYS = (
     "t_peak_active_ms",
     "t_peak_passive_ms",
     "t_shelf_onset_ms",
-    "shelf_onset_frac",
+    "shelf_plateau_start_frac",
     "peak_prominence_mV",
     "plateau_window_ms",
     "skip_reason",
