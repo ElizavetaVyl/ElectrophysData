@@ -18,13 +18,12 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
    - else `flat`
 6. Chosen `amp_spikelet_mV` / `amp_ratio` by shape (`peak` or `shelf`).
 7. **Two delays** (both exported when available):
-   - `delay_onset_ms` = spikelet onset − AP onset  
-     Spikelet onset = inflection (`d²V/dt²` sign change) before peak/anchor on meantrace  
-     — same idea as AP `spike_begin` / `cp_infl_points`
-   - `delay_peak_ms` = peak_passive − peak_active  
-   `delay_ms` = primary (peak delay if shape=peak, else onset delay)
+   - `delay_onset_ms` (**primary**) = time from **AP start** to first sample where  
+     passive reaches **10% of spikelet amplitude** (foot of the rise / shelf onset)
+   - `delay_peak_ms` = peak_passive − peak_active (kept for comparison)  
+   `delay_ms` = `delay_onset_ms` when available
 
-Also: mean **AP amp** on the same meantrace. For shelf amp, plateau start (~90% step + flatten) is still marked for QC.
+Also: mean **AP amp** on the same meantrace. Late plateau landmark (~90% step + flatten) is still marked for QC on shelf.
 
 ## Run
 
@@ -52,9 +51,9 @@ QC marks:
 - green ▾ = AP start **used** in meantrace
 - gray ▾ = AP start not used
 - blue ○ = AP peak used
-- purple ▲ = **spikelet onset** (d² inflection on meantrace)
-- orange × / ○ = spikelet peak
-- green ◆ = plateau start (shelf amp landmark)
+- purple ▲ = **onset 10% amp** (from AP start; primary delay)
+- orange × / ○ = spikelet peak (peak-to-peak delay)
+- green ◆ = late plateau start (~90%; QC landmark)
 
 ## Tunable constants
 
@@ -63,5 +62,6 @@ In `spikelet_meantrace_folder.py`:
 - `PEAK_PROMINENCE_MV` (default 0.05)
 - `SHELF_DROP_FRAC` (default 0.25) — peak must drop this fraction after max
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
-- `SHELF_PLATEAU_START_FRAC` (default 0.90) — plateau start near 90% of shelf height
+- `SPIKELET_ONSET_FRAC` (default 0.10) — onset / primary delay from AP start
+- `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
 - `MIN_PLATEAU_AMP_MV` (default 0.05)
