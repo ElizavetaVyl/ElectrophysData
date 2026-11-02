@@ -43,7 +43,7 @@ PLATEAU_START_MS = 8.0
 PLATEAU_END_MS = 15.0
 # Spikelet / shelf onset from AP start: first time passive reaches this
 # fraction of spikelet amplitude (foot of the rise — used for delay_onset)
-SPIKELET_ONSET_FRAC = 0.15
+SPIKELET_ONSET_FRAC = 0.20
 # Late plateau landmark (QC / shelf amp context): ~arrival at flat level
 SHELF_PLATEAU_START_FRAC = 0.90
 
@@ -899,27 +899,61 @@ def _parse_dt(s):
     return None
 
 
+def _file_tail_digits(name, n=4):
+    """Last digits of filename stem (for over-time labels)."""
+    stem = os.path.splitext(os.path.basename(str(name or "")))[0]
+    digits = "".join(ch for ch in stem if ch.isdigit())
+    if digits:
+        return digits[-n:] if len(digits) >= n else digits
+    return stem[-n:] if stem else "?"
+
+
+def _as_float(v):
+    if v is None:
+        return np.nan
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _scrub_negative_metrics(row):
+    """
+    Drop negative amp/ratio/delay values (invalid for this analysis).
+    Returns list of (key, bad_value) that were cleared — for red-X plotting.
+    """
+    keys = (
+        "amp_spike_mV",
+        "amp_spikelet_mV",
+        "amp_spikelet_peak_mV",
+        "amp_spikelet_plateau_mV",
+        "amp_ratio",
+        "delay_ms",
+        "delay_onset_ms",
+        "delay_peak_ms",
+    )
+    cleared = []
+    for k in keys:
+        v = _as_float(row.get(k))
+        if np.isfinite(v) and v < 0:
+            cleared.append((k, float(v)))
+            row[k] = None
+    if cleared and row.get("skip_reason") is None:
+        row["negatives_cleared"] = ",".join(f"{k}={v:.4g}" for k, v in cleared)
+    return cleared
+
+
 def save_over_time_plot(rows, out_path, title=None):
     """
-    Over-time figure: direction 12 on top (5 panels), 21 below (5 panels).
-    Metrics: amp spike, amp spikelet, ratio, delay_onset, delay_peak.
+    Over-time figure: one subplot per metric; both directions overlaid
+    (different colors). Valid points connected; negatives marked red ×.
+    Annotate last digits of filename next to points.
     """
     plt = _get_agg_plt()
-    by_dir = {"ch0->ch2": [], "ch2->ch0": []}
-    for r in rows:
-        d = r.get("direction")
-        if d not in by_dir:
-            continue
-        dt = _parse_dt(r.get("recording_datetime"))
-        by_dir[d].append((dt, r))
-
-    fig, axes = plt.subplots(10, 1, figsize=(11, 18), sharex=True)
-    if title:
-        fig.suptitle(
-            f"{title} — meantrace spikelet over time (12 above, 21 below)",
-            fontsize=12,
-        )
-
+    dir_style = (
+        ("ch0->ch2", "C0", "12 ch0→ch2"),
+        ("ch2->ch0", "C1", "21 ch2→ch0"),
+    )
     metrics = (
         ("amp_spike_mV", "AP amp (mV)"),
         ("amp_spikelet_mV", "Spikelet amp (mV)"),
@@ -927,46 +961,86 @@ def save_over_time_plot(rows, out_path, title=None):
         ("delay_onset_ms", "Delay onset (ms)"),
         ("delay_peak_ms", "Delay peak (ms)"),
     )
-    dir_blocks = (
-        ("ch0->ch2", "C0", "12 (ch0→ch2)", axes[0:5]),
-        ("ch2->ch0", "C1", "21 (ch2→ch0)", axes[5:10]),
-    )
-    n_pts = 0
-    for direction, color, block_title, ax_block in dir_blocks:
-        items = sorted(
-            [(dt, r) for dt, r in by_dir[direction] if dt is not None],
-            key=lambda x: x[0],
+
+    # scrub negatives in-place (Excel + plot share the same cleaned values)
+    neg_marks = []  # (dt, key, value, direction, file_tail)
+    metric_keys = {k for k, _ in metrics}
+    for r in rows:
+        dt = _parse_dt(r.get("recording_datetime"))
+        cleared = _scrub_negative_metrics(r)
+        if dt is None or not cleared:
+            continue
+        tail = _file_tail_digits(r.get("file"))
+        d = r.get("direction")
+        for k, v in cleared:
+            if k in metric_keys:
+                neg_marks.append((dt, k, v, d, tail))
+
+    by_dir = {"ch0->ch2": [], "ch2->ch0": []}
+    for r in rows:
+        d = r.get("direction")
+        if d not in by_dir:
+            continue
+        dt = _parse_dt(r.get("recording_datetime"))
+        if dt is None:
+            continue
+        by_dir[d].append((dt, r))
+
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 14), sharex=True)
+    if title:
+        fig.suptitle(
+            f"{title} — meantrace spikelet over time (12 & 21 overlay)",
+            fontsize=12,
         )
-        ax_block[0].set_title(block_title, fontsize=11, fontweight="bold")
-        for ax, (key, ylab) in zip(ax_block, metrics):
+
+    n_pts = 0
+    labeled_neg = False
+    for ax, (key, ylab) in zip(axes, metrics):
+        any_pts = False
+        for direction, color, label in dir_style:
+            items = sorted(by_dir[direction], key=lambda x: x[0])
             if not items:
-                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
-                        ha="center", va="center", color="0.5")
-                ax.set_ylabel(ylab)
-                ax.grid(True, alpha=0.3)
                 continue
-            xs = [dt for dt, _ in items]
-            ys = []
-            for _, r in items:
-                v = r.get(key)
-                try:
-                    fv = float(v) if v is not None else np.nan
-                except (TypeError, ValueError):
-                    fv = np.nan
-                ys.append(fv)
-            ax.plot(xs, ys, "o-", color=color, label=key)
-            n_pts += sum(np.isfinite(ys))
-            if key == "amp_spikelet_mV":
-                for x, y, (_, r) in zip(xs, ys, items):
-                    if not np.isfinite(y):
-                        continue
-                    sh = (r.get("shape") or "?")[0].upper()
-                    ax.annotate(
-                        sh, xy=(x, y), textcoords="offset points", xytext=(3, 3),
-                        fontsize=7, color=color, alpha=0.85,
-                    )
-            ax.set_ylabel(ylab)
-            ax.grid(True, alpha=0.3)
+            xs, ys, tails = [], [], []
+            for dt, r in items:
+                fv = _as_float(r.get(key))
+                xs.append(dt)
+                ys.append(fv if np.isfinite(fv) else np.nan)
+                tails.append(_file_tail_digits(r.get("file")))
+            # line only through finite (non-negative already scrubbed) points
+            ax.plot(xs, ys, "o-", color=color, label=label, lw=1.4, ms=5)
+            n_pts += int(np.sum(np.isfinite(ys)))
+            any_pts = True
+            for x, y, tail in zip(xs, ys, tails):
+                if not np.isfinite(y):
+                    continue
+                ax.annotate(
+                    tail, xy=(x, y), textcoords="offset points",
+                    xytext=(3, 4), fontsize=6, color=color, alpha=0.9,
+                )
+                if key == "amp_spikelet_mV":
+                    # tiny shape tag under file number
+                    pass
+        # red × for cleared negatives of this metric
+        for dt, k, v, d, tail in neg_marks:
+            if k != key:
+                continue
+            ax.scatter(
+                [dt], [v], marker="x", c="red", s=55, zorder=8, linewidths=1.5,
+                label="negative (removed)" if not labeled_neg else None,
+            )
+            ax.annotate(
+                tail, xy=(dt, v), textcoords="offset points",
+                xytext=(3, -9), fontsize=6, color="red", alpha=0.9,
+            )
+            labeled_neg = True
+            any_pts = True
+        if not any_pts:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", color="0.5")
+        ax.set_ylabel(ylab)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=7)
 
     axes[-1].set_xlabel("Recording time")
     fig.autofmt_xdate()
@@ -1097,10 +1171,11 @@ def analyze_folder(folder_path, out_dir=None, save_qc=True):
             r.pop("_plot", None)
             all_rows.append(r)
 
-    xlsx = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace.xlsx")
-    save_excel(xlsx, all_rows)
+    # over-time first: scrubs negatives (red ×) in-place, then Excel uses cleaned rows
     png = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace_over_time.png")
     save_over_time_plot(all_rows, png, title=folder_name)
+    xlsx = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace.xlsx")
+    save_excel(xlsx, all_rows)
     return {"excel": xlsx, "plot": png, "out_dir": out_dir, "rows": all_rows}
 
 

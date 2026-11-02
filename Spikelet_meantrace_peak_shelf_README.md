@@ -19,7 +19,7 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
 6. Chosen `amp_spikelet_mV` / `amp_ratio` by shape (`peak` or `shelf`).
 7. **Two delays** (both exported when available):
    - `delay_onset_ms` (**primary**) = time from **AP start** to first sample where  
-     passive reaches **15% of spikelet amplitude** (foot of the rise / shelf onset)
+     passive reaches **20% of spikelet amplitude** (foot of the rise / shelf onset)
    - `delay_peak_ms` = peak_passive − peak_active (kept for comparison)  
    `delay_ms` = `delay_onset_ms` when available
 
@@ -43,15 +43,15 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 |------|---------|
 | `*_spikelet_meantrace.xlsx` | `All_directions` + `Summary_by_file` |
 | `*_spikelet_QC.png` | Per file: **12 above, 21 below**. Each block = main sweep track + meantrace with onset / peak / plateau marks |
-| `*_spikelet_meantrace_over_time.png` | Over time: **12 (5 panels) above, 21 (5 panels) below** — amp spike, amp spikelet, ratio, delay_onset, delay_peak |
+| `*_spikelet_meantrace_over_time.png` | Over time: **5 panels** (amp spike, amp spikelet, ratio, delay_onset, delay_peak); **12 & 21 overlaid** (different colors); file-number labels; negatives as red × |
 
-On spikelet-amp over-time panels, letter **P** / **S** marks peak vs shelf.
+Negative amp/ratio/delay values are cleared from Excel and marked red × on the over-time plot.
 
 QC marks:
 - green ▾ = AP start **used** in meantrace
 - gray ▾ = AP start not used
 - blue ○ = AP peak used
-- purple ▲ = **onset 15% amp** (from AP start; primary delay)
+- purple ▲ = **onset 20% amp** (from AP start; primary delay)
 - orange × / ○ = spikelet peak (peak-to-peak delay)
 - green ◆ = late plateau start (~90%; QC landmark)
 
@@ -60,9 +60,9 @@ QC marks:
 In `spikelet_meantrace_folder.py`:
 
 - `SMOOTH_MS` (default 0.5)
-- `PEAK_PROMINENCE_MV` (default 0.02)
+- `PEAK_PROMINENCE_MV` (default 0.01)
 - `SHELF_DROP_FRAC` (default 0.02) — peak only if drop after max ≥ this; else shelf
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
-- `SPIKELET_ONSET_FRAC` (default 0.15) — onset / primary delay from AP start
+- `SPIKELET_ONSET_FRAC` (default 0.20) — onset / primary delay from AP start
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
 - `MIN_PLATEAU_AMP_MV` (default 0.05)
