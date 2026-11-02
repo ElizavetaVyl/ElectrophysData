@@ -359,7 +359,7 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
     Peak + plateau metrics on meantrace; auto shape and chosen amp.
 
     Delays (both when available):
-      delay_onset_ms = t(10% of spikelet amp from AP start) − t_AP_start
+      delay_onset_ms = t(SPIKELET_ONSET_FRAC * amp from AP start) − t_AP_start
         AP start is t=0 by alignment; this is the primary delay.
       delay_peak_ms  = t_peak_passive − t_peak_active  (kept for comparison)
     """
@@ -487,7 +487,7 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
             out["t_shelf_onset_ms"] = _round(_samples_to_ms(int(i_plat_rel), sr))
             out["i_shelf_onset_rel"] = int(i_plat_rel)
 
-    # --- spikelet onset: 10% of spikelet amp from AP start (primary delay) ---
+    # --- spikelet onset: frac of spikelet amp from AP start (primary delay) ---
     i_on_p = _amp_frac_onset_rel(mp_s, n_pre, base_p, amp_s, sr, frac=SPIKELET_ONSET_FRAC)
     delay_onset = None
     if i_on_p is not None:
@@ -506,7 +506,7 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         )
         out["delay_peak_ms"] = delay_peak
 
-    # primary delay = onset (10% amp from AP start)
+    # primary delay = onset (frac * amp from AP start)
     if delay_onset is not None:
         delay = delay_onset
         delay_mode = (
@@ -701,13 +701,14 @@ def _draw_main_track(ax_a, ax_p, row):
                 label="AP peak used" if not labeled_pk else None,
             )
             labeled_pk = True
-        # only the chosen shape marker (+ shared 10% onset)
+        # only the chosen shape marker (+ shared frac onset)
+        _on_lbl = f"onset {SPIKELET_ONSET_FRAC:.0%} amp"
         if t_on_p_ms is not None and 0 <= st < len(t):
             io = st + _ms_to_samples(t_on_p_ms, sr)
             if 0 <= io < len(t):
                 ax_p.scatter(
                     t[io], y_p[io], c="purple", s=36, marker="^", zorder=7,
-                    label="onset 10% amp" if not labeled_on else None,
+                    label=_on_lbl if not labeled_on else None,
                 )
                 labeled_on = True
         if shape == "peak" and t_peak_p_ms is not None and 0 <= st < len(t):
@@ -774,13 +775,14 @@ def _draw_meantrace(ax, row):
         ton_sp = float(m["t_spikelet_onset_ms"])
         io = n_pre + _ms_to_samples(ton_sp, sr)
         io = min(max(io, 0), len(mp_s) - 1)
+        _on_lbl = f"onset {SPIKELET_ONSET_FRAC:.0%} amp"
         ax.scatter(
             t[io], mp_s[io], c="purple", s=70, marker="^", zorder=8,
-            edgecolors="k", linewidths=0.5, label="onset 10% amp",
+            edgecolors="k", linewidths=0.5, label=_on_lbl,
         )
         ax.axvline(ton_sp, color="purple", ls="--", lw=1.0)
         ax.annotate(
-            f"onset10% {ton_sp:.2f} ms",
+            f"{_on_lbl} {ton_sp:.2f} ms",
             (t[io], mp_s[io]), textcoords="offset points", xytext=(6, -12),
             fontsize=8, color="purple",
         )
