@@ -37,6 +37,8 @@ BASELINE_MS = 1.0
 WINDOW_MS = 15.0
 SMOOTH_MS = 0.5
 PEAK_PROMINENCE_MV = 0.025
+# Spikelet peak search: only within this many ms after active AP peak
+PEAK_SEARCH_AFTER_AP_MS = 7.0
 
 # Shelf step height = mean passive in this late window after AP start (ms)
 PLATEAU_START_MS = 8.0
@@ -425,23 +427,33 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         out["skip_reason"] = f"amp_spike < {MIN_SPIKE_AMP_MV} mV"
         return out
 
-    # --- peak spikelet ---
-    seg_p = mp[n_pre:]
+    # --- peak spikelet (only within PEAK_SEARCH_AFTER_AP_MS after AP peak) ---
     base_p = float(np.mean(mp_s[:n_pre])) if n_pre > 0 else float(mp_s[0])
-    i_rel_p = _local_peak_index(seg_p, sr, prominence=PEAK_PROMINENCE_MV)
+    n_peak_win = _ms_to_samples(PEAK_SEARCH_AFTER_AP_MS, sr)
+    i_search0 = n_pre + int(i_rel_a)
+    i_search1 = min(i_search0 + n_peak_win + 1, len(mp_s))
+    out["peak_search_window_ms"] = (
+        f"{_samples_to_ms(int(i_rel_a), sr):.2f}-"
+        f"{_samples_to_ms(int(i_rel_a) + n_peak_win, sr):.2f}"
+    )
+    i_rel_p = None
     amp_peak = None
     drop_frac = None
     i_peak_abs = None
-    if i_rel_p is not None:
-        i_peak_abs = n_pre + int(i_rel_p)
-        amp_peak = float(mp_s[i_peak_abs]) - base_p
-        out["amp_spikelet_peak_mV"] = _round(amp_peak)
-        out["t_peak_passive_ms"] = _round(_samples_to_ms(i_rel_p, sr))
-        out["i_peak_passive_rel"] = int(i_rel_p)
-        # drop from peak to end of window (on smoothed)
-        vend = float(mp_s[-1])
-        if amp_peak not in (None, 0):
-            drop_frac = (float(mp_s[i_peak_abs]) - vend) / abs(float(amp_peak))
+    if i_search1 > i_search0 + 2:
+        seg_peak = mp_s[i_search0:i_search1]
+        j_local = _local_peak_index(seg_peak, sr, prominence=PEAK_PROMINENCE_MV)
+        if j_local is not None:
+            i_peak_abs = i_search0 + int(j_local)
+            i_rel_p = i_peak_abs - n_pre
+            amp_peak = float(mp_s[i_peak_abs]) - base_p
+            out["amp_spikelet_peak_mV"] = _round(amp_peak)
+            out["t_peak_passive_ms"] = _round(_samples_to_ms(i_rel_p, sr))
+            out["i_peak_passive_rel"] = int(i_rel_p)
+            # drop from peak to end of analysis window (on smoothed)
+            vend = float(mp_s[-1])
+            if amp_peak not in (None, 0):
+                drop_frac = (float(mp_s[i_peak_abs]) - vend) / abs(float(amp_peak))
     out["i_peak_active_rel"] = int(i_rel_a)
     out["baseline_passive_mV"] = _round(base_p)
 

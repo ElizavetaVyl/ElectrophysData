@@ -64,6 +64,7 @@ In `spikelet_meantrace_folder.py`:
 
 - `SMOOTH_MS` (default 0.5)
 - `PEAK_PROMINENCE_MV` (default 0.025)
+- `PEAK_SEARCH_AFTER_AP_MS` (default 7.0) — spikelet peak only in this window after AP peak
 - `SHELF_DROP_FRAC` (default 0.05) — peak only if drop after max ≥ this; else shelf
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
 - `SPIKELET_ONSET_FRAC` (default 0.15) — onset / primary delay from AP start
