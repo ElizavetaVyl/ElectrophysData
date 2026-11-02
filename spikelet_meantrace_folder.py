@@ -1011,6 +1011,7 @@ def save_over_time_plot(rows, out_path, title=None, normalized=False):
                 neg_marks.append((dt, k, v, d, tail))
 
     by_dir = {"ch0->ch2": [], "ch2->ch0": []}
+    bl_dts = []
     for r in rows:
         d = r.get("direction")
         if d not in by_dir:
@@ -1019,6 +1020,9 @@ def save_over_time_plot(rows, out_path, title=None, normalized=False):
         if dt is None:
             continue
         by_dir[d].append((dt, r))
+        if r.get("is_baseline"):
+            bl_dts.append(dt)
+    bl_span = (min(bl_dts), max(bl_dts)) if bl_dts else None
 
     fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 14), sharex=True)
     if title:
@@ -1030,8 +1034,15 @@ def save_over_time_plot(rows, out_path, title=None, normalized=False):
     n_pts = 0
     labeled_neg = False
     labeled_bl = False
+    labeled_bl_bg = False
     for ax, (key, ylab) in zip(axes, metrics):
         any_pts = False
+        if bl_span is not None:
+            ax.axvspan(
+                bl_span[0], bl_span[1], color="0.75", alpha=0.35, zorder=0,
+                label="baseline period" if not labeled_bl_bg else None,
+            )
+            labeled_bl_bg = True
         if normalized:
             ax.axhline(1.0, color="0.5", ls="--", lw=0.9, alpha=0.8)
         for direction, color, label in dir_style:
@@ -1107,6 +1118,7 @@ def save_over_time_plot(rows, out_path, title=None, normalized=False):
 EXCEL_KEYS = (
     "file",
     "recording_datetime",
+    "t_rel_min",
     "direction",
     "sweep",
     "sweep_tier",
@@ -1141,10 +1153,132 @@ EXCEL_KEYS = (
     "skip_reason",
 )
 
+# Short summary: last baseline file = 0 min; each file step = ±3 min
+T_REL_STEP_MIN = 3.0
+BASELINE_FILL_HEX = "FFF2CC"  # light yellow
+
+
+def assign_t_rel_min(rows, step_min=None):
+    """
+    Relative time by file order: last baseline file = 0,
+    each earlier file −step_min, each later file +step_min.
+    Writes t_rel_min onto every row (same value for both directions).
+    """
+    if step_min is None:
+        step_min = T_REL_STEP_MIN
+    # unique files with best datetime + baseline flag
+    info = {}
+    for r in rows:
+        f = r.get("file")
+        if not f:
+            continue
+        dt = _parse_dt(r.get("recording_datetime"))
+        rec = info.setdefault(f, {"file": f, "dt": None, "is_baseline": False})
+        if dt is not None and (rec["dt"] is None or dt < rec["dt"]):
+            rec["dt"] = dt
+        if r.get("is_baseline"):
+            rec["is_baseline"] = True
+    ordered = sorted(
+        info.values(),
+        key=lambda x: (x["dt"] is None, x["dt"] or datetime.min, str(x["file"])),
+    )
+    last_bl = None
+    for i, rec in enumerate(ordered):
+        if rec["is_baseline"]:
+            last_bl = i
+    t_map = {}
+    if last_bl is None:
+        for i, rec in enumerate(ordered):
+            t_map[rec["file"]] = _round(i * float(step_min))
+    else:
+        for i, rec in enumerate(ordered):
+            t_map[rec["file"]] = _round((i - last_bl) * float(step_min))
+    for r in rows:
+        r["t_rel_min"] = t_map.get(r.get("file"))
+    return t_map
+
+
+def _build_short_summary_rows(rows):
+    """One row per file: t_rel_min, amps/delays raw then norm for 12 and 21."""
+    by_file = {}
+    for r in rows:
+        f = r.get("file")
+        if not f:
+            continue
+        ent = by_file.setdefault(f, {
+            "file": f,
+            "recording_datetime": r.get("recording_datetime"),
+            "t_rel_min": r.get("t_rel_min"),
+            "is_baseline": bool(r.get("is_baseline")),
+        })
+        if r.get("is_baseline"):
+            ent["is_baseline"] = True
+        if ent.get("t_rel_min") is None:
+            ent["t_rel_min"] = r.get("t_rel_min")
+        tag = "12" if r.get("direction") == "ch0->ch2" else "21"
+        for k in (
+            "shape",
+            "amp_spike_mV",
+            "amp_spikelet_mV",
+            "amp_ratio",
+            "delay_onset_ms",
+            "delay_peak_ms",
+            "amp_spike_mV_norm",
+            "amp_spikelet_mV_norm",
+            "amp_ratio_norm",
+            "delay_onset_ms_norm",
+            "delay_peak_ms_norm",
+        ):
+            ent[f"{k}_{tag}"] = r.get(k)
+
+    ordered = sorted(
+        by_file.values(),
+        key=lambda x: (
+            x.get("t_rel_min") is None,
+            x.get("t_rel_min") if x.get("t_rel_min") is not None else 0,
+            str(x.get("file")),
+        ),
+    )
+    # stable column order
+    cols = [
+        "file", "recording_datetime", "t_rel_min", "is_baseline",
+        "shape_12", "amp_spike_mV_12", "amp_spikelet_mV_12", "amp_ratio_12",
+        "delay_onset_ms_12", "delay_peak_ms_12",
+        "shape_21", "amp_spike_mV_21", "amp_spikelet_mV_21", "amp_ratio_21",
+        "delay_onset_ms_21", "delay_peak_ms_21",
+        "amp_spike_mV_norm_12", "amp_spikelet_mV_norm_12", "amp_ratio_norm_12",
+        "delay_onset_ms_norm_12", "delay_peak_ms_norm_12",
+        "amp_spike_mV_norm_21", "amp_spikelet_mV_norm_21", "amp_ratio_norm_21",
+        "delay_onset_ms_norm_21", "delay_peak_ms_norm_21",
+    ]
+    out = []
+    for ent in ordered:
+        out.append({c: ent.get(c) for c in cols})
+    return out
+
+
+def _style_baseline_rows(ws, rows_dicts):
+    """Light fill for baseline-period rows (is_baseline True)."""
+    from openpyxl.styles import PatternFill
+
+    fill = PatternFill(start_color=BASELINE_FILL_HEX, end_color=BASELINE_FILL_HEX, fill_type="solid")
+    # header is row 1; data starts at 2
+    # find is_baseline column
+    headers = {cell.value: idx for idx, cell in enumerate(ws[1], start=1)}
+    ib_col = headers.get("is_baseline")
+    if ib_col is None:
+        return
+    for r_i, ent in enumerate(rows_dicts, start=2):
+        if not ent.get("is_baseline"):
+            continue
+        for c in range(1, ws.max_column + 1):
+            ws.cell(row=r_i, column=c).fill = fill
+
 
 def save_excel(path, rows):
     import pandas as pd
 
+    assign_t_rel_min(rows)
     clean = []
     for r in rows:
         clean.append({k: r.get(k) for k in EXCEL_KEYS})
@@ -1155,9 +1289,11 @@ def save_excel(path, rows):
         by_file.setdefault(f, {
             "file": f,
             "recording_datetime": r.get("recording_datetime"),
+            "t_rel_min": r.get("t_rel_min"),
         })
         tag = "12" if r.get("direction") == "ch0->ch2" else "21"
         by_file[f]["is_baseline"] = r.get("is_baseline")
+        by_file[f]["t_rel_min"] = r.get("t_rel_min")
         for k in (
             "sweep", "shape", "amp_spike_mV", "amp_spikelet_peak_mV",
             "amp_spikelet_plateau_mV", "amp_spikelet_mV", "amp_ratio",
@@ -1169,13 +1305,28 @@ def save_excel(path, rows):
         ):
             by_file[f][f"{k}_{tag}"] = r.get(k)
 
+    short_rows = _build_short_summary_rows(rows)
+    summary_rows = list(by_file.values())
+    # order summary by t_rel_min
+    summary_rows.sort(
+        key=lambda x: (
+            x.get("t_rel_min") is None,
+            x.get("t_rel_min") if x.get("t_rel_min") is not None else 0,
+            str(x.get("file")),
+        )
+    )
+
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        pd.DataFrame(short_rows).to_excel(writer, sheet_name="Short", index=False)
         pd.DataFrame(clean).to_excel(writer, sheet_name="All_directions", index=False)
-        pd.DataFrame(list(by_file.values())).to_excel(
+        pd.DataFrame(summary_rows).to_excel(
             writer, sheet_name="Summary_by_file", index=False,
         )
+        # baseline background on Short + Summary
+        _style_baseline_rows(writer.book["Short"], short_rows)
+        _style_baseline_rows(writer.book["Summary_by_file"], summary_rows)
     print(f"Saved Excel: {path}")
     return path
 

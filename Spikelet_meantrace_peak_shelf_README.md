@@ -45,10 +45,12 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 
 | File | Content |
 |------|---------|
-| `*_spikelet_meantrace.xlsx` | raw + `*_norm` + `is_baseline` |
+| `*_spikelet_meantrace.xlsx` | **Short** (file, t_rel_min, amps/delays, norms; baseline rows highlighted) + All_directions + Summary_by_file |
 | `*_spikelet_QC.png` | Per file: **12 above, 21 below** — main track + meantrace |
-| `*_spikelet_meantrace_over_time.png` | Raw over time (12 & 21 overlay, file tails, red × for negatives) |
-| `*_spikelet_meantrace_over_time_norm.png` | Normalized over time (baseline mean = 1; baseline files as □) |
+| `*_spikelet_meantrace_over_time.png` | Raw over time; **baseline period shaded**; 12 & 21 overlay |
+| `*_spikelet_meantrace_over_time_norm.png` | Normalized over time (baseline = 1; baseline period shaded) |
+
+`t_rel_min`: last baseline file = **0**; each file before **−3 min**, each after **+3 min** (by file order).
 
 QC marks:
 - green ▾ = AP start **used** in meantrace
