@@ -6,8 +6,8 @@ Run:
 or import analyze_folder() from a notebook.
 
 For each ABF × direction (ch0→ch2, ch2→ch0):
-  1) pick primary sweep (first with ≥4 APs, else 3, else 2, else 1)
-  2) align AP2+ (AP1 only on 1-AP sweeps) on active AP start
+  1) pick primary sweep (first with ≥4 APs, else 3, else 2; 1-AP ignored)
+  2) align AP2+ on active AP start
   3) average active/passive snippets (meantrace)
   4) measure peak amp (local peak + prominence) AND plateau/step amp
   5) auto shape = peak | shelf | flat → chosen amp/delay
@@ -141,8 +141,8 @@ def cp_spike_begin(ind_peaks, ind_infls):
 
 
 def select_primary_sweep(abf, voltage_ch, start, stop):
-    """First sweep with ≥4 APs; else 3, else 2, else 1."""
-    for min_aps, tier in ((4, ">=4"), (3, "3"), (2, "2"), (1, "1")):
+    """First sweep with ≥4 APs; else 3, else 2. Single-AP sweeps are skipped."""
+    for min_aps, tier in ((4, ">=4"), (3, "3"), (2, "2")):
         for sn in abf.sweepList:
             abf.setSweep(sweepNumber=sn, channel=voltage_ch)
             peaks, _ = find_peaks(
@@ -227,7 +227,7 @@ def _shelf_onset_rel(mp_s, n_pre, base_p, amp_step, sr, frac=None):
 
 def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr):
     """
-    Align AP2+ (or AP1 if only one AP) to active AP start.
+    Align AP2+ to active AP start. Single-AP sweeps are not analyzed.
     Returns dict with mean_a, mean_p, n_pre, n_post, n_aligned, or reason.
     """
     n_pre = _ms_to_samples(BASELINE_MS, sr)
@@ -236,11 +236,10 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
     ind_infls = cp_infl_points(abf, sweep, active_ch, stim_start, stim_stop)
     ap_starts = cp_spike_begin(ind_peaks, ind_infls)
     n_ap = int(len(ind_peaks))
-    if n_ap < 1:
-        return None, "no APs in stim window"
+    if n_ap < 2:
+        return None, f"need ≥2 APs for spikelet meantrace (got {n_ap})"
 
-    use_ap1 = n_ap == 1
-    ap_indices = range(0, 1) if use_ap1 else range(1, n_ap)
+    ap_indices = range(1, n_ap)  # AP1 excluded
 
     abf.setSweep(sweepNumber=sweep, channel=active_ch)
     y_a = np.asarray(abf.sweepY, dtype=float)
@@ -286,7 +285,6 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
         "n_post": n_post,
         "n_aligned": len(snips_p),
         "n_ap": n_ap,
-        "use_ap1": use_ap1,
         "used_starts": used_starts,
         "used_peaks_a": used_peaks_a,
         "used_ap_index": used_ap_index,
@@ -446,7 +444,7 @@ def analyze_direction(abf, active_ch, passive_ch, direction, tag):
         return {
             "direction": direction,
             "tag": tag,
-            "skip_reason": "no sweep with APs",
+            "skip_reason": "no sweep with ≥2 APs (1-AP not analyzed)",
         }
     mt, reason = build_meantrace(
         abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr,
@@ -462,7 +460,6 @@ def analyze_direction(abf, active_ch, passive_ch, direction, tag):
         row["skip_reason"] = reason
         return row
     row["n_AP_aligned"] = mt["n_aligned"]
-    row["ap1_fallback"] = mt["use_ap1"]
     metrics = measure_meantrace(mt["mean_a"], mt["mean_p"], mt["n_pre"], sr)
     row.update(metrics)
     row["_plot"] = {
@@ -853,7 +850,6 @@ EXCEL_KEYS = (
     "sweep_tier",
     "n_AP_active",
     "n_AP_aligned",
-    "ap1_fallback",
     "shape",
     "amp_spike_mV",
     "amp_spikelet_peak_mV",

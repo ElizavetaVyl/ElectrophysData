@@ -6,8 +6,8 @@ Standalone folder analysis — **not** wired into the main CC pipeline.
 
 For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
 
-1. Primary sweep = first with ≥4 APs (else 3 → 2 → 1)
-2. Align AP2+ (AP1 only on 1-AP sweeps) to active AP start
+1. Primary sweep = first with ≥4 APs (else 3 → 2). **1-AP sweeps are skipped** (not analyzed)
+2. Align **AP2+ only** to active AP start
 3. Average active/passive snippets (**meantrace**)
 4. Measure:
    - **peak** spikelet amp (local peak, prominence 0.05 mV, need drop after top)
