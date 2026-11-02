@@ -445,7 +445,10 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         amp_plat = float(np.mean(mp[n_pre:])) - base_p
     out["amp_spikelet_plateau_mV"] = _round(amp_plat)
 
-    # --- shape decision ---
+    # --- shape decision (mutually exclusive: peak XOR shelf) ---
+    shelf_ok = amp_plat is not None and abs(amp_plat) >= MIN_PLATEAU_AMP_MV
+    # True peak = local max that drops enough toward the late window / end.
+    # If late plateau stays close to the "peak", treat as shelf (bump on step).
     peaked = (
         i_rel_p is not None
         and amp_peak is not None
@@ -453,14 +456,11 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         and drop_frac is not None
         and drop_frac >= SHELF_DROP_FRAC
     )
-    shelf_ok = amp_plat is not None and abs(amp_plat) >= MIN_PLATEAU_AMP_MV
-
-    i_plat_rel = None
-    if shelf_ok:
-        i_plat_rel = _shelf_plateau_start_rel(mp_s, n_pre, base_p, amp_plat, sr)
-        if i_plat_rel is not None:
-            out["t_shelf_onset_ms"] = _round(_samples_to_ms(int(i_plat_rel), sr))
-            out["i_shelf_onset_rel"] = int(i_plat_rel)
+    if peaked and shelf_ok and amp_peak > 0:
+        # residual plateau vs peak height
+        residual = abs(amp_plat) / abs(amp_peak)
+        if residual >= (1.0 - SHELF_DROP_FRAC):
+            peaked = False
 
     if peaked:
         shape = "peak"
@@ -473,6 +473,20 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         out["shape"] = "flat"
         return out
 
+    # Keep only the chosen mode's landmarks / amps for export + QC
+    if shape == "peak":
+        out["amp_spikelet_plateau_mV"] = None
+        out["t_shelf_onset_ms"] = None
+        out["i_shelf_onset_rel"] = None
+    else:  # shelf
+        out["amp_spikelet_peak_mV"] = None
+        out["t_peak_passive_ms"] = None
+        out["i_peak_passive_rel"] = None
+        i_plat_rel = _shelf_plateau_start_rel(mp_s, n_pre, base_p, amp_plat, sr)
+        if i_plat_rel is not None:
+            out["t_shelf_onset_ms"] = _round(_samples_to_ms(int(i_plat_rel), sr))
+            out["i_shelf_onset_rel"] = int(i_plat_rel)
+
     # --- spikelet onset: 10% of spikelet amp from AP start (primary delay) ---
     i_on_p = _amp_frac_onset_rel(mp_s, n_pre, base_p, amp_s, sr, frac=SPIKELET_ONSET_FRAC)
     delay_onset = None
@@ -484,15 +498,15 @@ def measure_meantrace(mean_a, mean_p, n_pre, sr):
         delay_onset = _round(t_on_p)
         out["delay_onset_ms"] = delay_onset
 
-    # --- peak-to-peak delay (kept for comparison) ---
+    # --- peak-to-peak delay only for shape=peak ---
     delay_peak = None
-    if i_rel_p is not None:
+    if shape == "peak" and i_rel_p is not None:
         delay_peak = _round(
             _samples_to_ms(int(i_rel_p) - int(i_rel_a), sr)
         )
         out["delay_peak_ms"] = delay_peak
 
-    # primary delay = onset (10% amp from AP start), not peak max
+    # primary delay = onset (10% amp from AP start)
     if delay_onset is not None:
         delay = delay_onset
         delay_mode = (
@@ -633,6 +647,7 @@ def _draw_main_track(ax_a, ax_p, row):
     used_set = set(plot.get("used_starts") or [])
     # unused AP starts (gray), used (green) + AP peaks (blue)
     labeled_u = labeled_used = labeled_pk = labeled_sp = False
+    labeled_ap_line = False
     for st, pk in zip(plot.get("all_starts") or [], plot.get("all_peaks_a") or []):
         if st is None:
             continue
@@ -657,9 +672,22 @@ def _draw_main_track(ax_a, ax_p, row):
     ):
         if 0 <= st < len(t):
             ax_a.scatter(
-                t[st], y_a[st], c="limegreen", s=36, marker="v", zorder=6,
+                t[st], y_a[st], c="limegreen", s=48, marker="v", zorder=6,
+                edgecolors="k", linewidths=0.4,
                 label="AP start used" if not labeled_used else None,
             )
+            # also mark AP start on passive panel + vertical guide
+            ax_p.scatter(
+                t[st], y_p[st], c="limegreen", s=36, marker="v", zorder=6,
+                edgecolors="k", linewidths=0.3,
+                label="AP start" if not labeled_used else None,
+            )
+            ax_a.axvline(
+                t[st], color="limegreen", ls="--", lw=0.8, alpha=0.7,
+                label="AP start line" if not labeled_ap_line else None,
+            )
+            ax_p.axvline(t[st], color="limegreen", ls="--", lw=0.8, alpha=0.7)
+            labeled_ap_line = True
             labeled_used = True
             # analysis window on passive
             t0 = t[st]
@@ -673,7 +701,7 @@ def _draw_main_track(ax_a, ax_p, row):
                 label="AP peak used" if not labeled_pk else None,
             )
             labeled_pk = True
-        # spikelet onset (inflection) + peak / plateau markers from meantrace timing
+        # only the chosen shape marker (+ shared 10% onset)
         if t_on_p_ms is not None and 0 <= st < len(t):
             io = st + _ms_to_samples(t_on_p_ms, sr)
             if 0 <= io < len(t):
@@ -682,7 +710,7 @@ def _draw_main_track(ax_a, ax_p, row):
                     label="onset 10% amp" if not labeled_on else None,
                 )
                 labeled_on = True
-        if t_peak_p_ms is not None and 0 <= st < len(t):
+        if shape == "peak" and t_peak_p_ms is not None and 0 <= st < len(t):
             ip = st + _ms_to_samples(t_peak_p_ms, sr)
             if 0 <= ip < len(t):
                 ax_p.scatter(
@@ -738,9 +766,9 @@ def _draw_meantrace(ax, row):
     ax.axvspan(-BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax.axvspan(0, WINDOW_MS, color="C4", alpha=0.1)
     ax.axvspan(PLATEAU_START_MS, PLATEAU_END_MS, color="C2", alpha=0.12, label="plateau win")
-    ax.axvline(0, color="limegreen", ls="--", lw=1)
+    ax.axvline(0, color="limegreen", ls="--", lw=1.2, label="AP start")
 
-    # mark onset / peak / plateau on meantrace
+    # mark onset + only the chosen shape landmark
     shape = m.get("shape")
     if m.get("t_spikelet_onset_ms") is not None:
         ton_sp = float(m["t_spikelet_onset_ms"])
@@ -756,7 +784,7 @@ def _draw_meantrace(ax, row):
             (t[io], mp_s[io]), textcoords="offset points", xytext=(6, -12),
             fontsize=8, color="purple",
         )
-    if m.get("t_peak_passive_ms") is not None:
+    if shape == "peak" and m.get("t_peak_passive_ms") is not None:
         tp = float(m["t_peak_passive_ms"])
         ip = n_pre + _ms_to_samples(tp, sr)
         ip = min(max(ip, 0), len(mp_s) - 1)
@@ -771,7 +799,7 @@ def _draw_meantrace(ax, row):
                 (t[ip], mp_s[ip]), textcoords="offset points", xytext=(6, 6),
                 fontsize=8, color="0.15",
             )
-    if shape == "shelf" and m.get("t_shelf_onset_ms") is not None:
+    elif shape == "shelf" and m.get("t_shelf_onset_ms") is not None:
         ton = float(m["t_shelf_onset_ms"])
         ip = n_pre + _ms_to_samples(ton, sr)
         ip = min(max(ip, 0), len(mp_s) - 1)
@@ -783,12 +811,18 @@ def _draw_meantrace(ax, row):
 
     ax2 = ax.twinx()
     ax2.plot(t, mean_a, color="C0", lw=1.4, alpha=0.85, label="mean active")
+    # AP start at t=0 (alignment reference)
+    i0_ap = min(max(n_pre, 0), len(mean_a) - 1)
+    ax2.scatter(
+        t[i0_ap], mean_a[i0_ap], c="limegreen", s=70, marker="v", zorder=9,
+        edgecolors="k", linewidths=0.5, label="AP start",
+    )
     if m.get("t_peak_active_ms") is not None:
         ta = float(m["t_peak_active_ms"])
         ia = n_pre + _ms_to_samples(ta, sr)
         ia = min(max(ia, 0), len(mean_a) - 1)
         ax2.scatter(
-            t[ia], mean_a[ia], c="C0", s=55, marker="v", zorder=8,
+            t[ia], mean_a[ia], c="C0", s=55, marker="o", zorder=8,
             edgecolors="k", linewidths=0.4, label="AP peak",
         )
     ax2.set_ylabel("Active Vm (mV)", color="C0")
