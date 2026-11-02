@@ -33,7 +33,11 @@ python spikelet_meantrace_folder.py
 python spikelet_meantrace_folder.py /path/to/abf/folder
 ```
 
-Or notebook: `Spikelet meantrace peak-shelf.ipynb` (cells 0 → 1).
+A **clickable checklist** asks which `.abf` files are the **baseline period**.
+Normalization (per direction): `value_norm = value / mean(baseline files)`.
+
+Or notebook: `Spikelet meantrace peak-shelf.ipynb` — lists files, then opens the same picker.
+You can also pass `baseline_files=[...]` / set `BASELINE_FILES` in the notebook.
 
 ## Outputs
 
@@ -41,11 +45,10 @@ Folder `Spikelet_meantrace_peak_shelf/`:
 
 | File | Content |
 |------|---------|
-| `*_spikelet_meantrace.xlsx` | `All_directions` + `Summary_by_file` |
-| `*_spikelet_QC.png` | Per file: **12 above, 21 below**. Each block = main sweep track + meantrace with onset / peak / plateau marks |
-| `*_spikelet_meantrace_over_time.png` | Over time: **5 panels** (amp spike, amp spikelet, ratio, delay_onset, delay_peak); **12 & 21 overlaid** (different colors); file-number labels; negatives as red × |
-
-Negative amp/ratio/delay values are cleared from Excel and marked red × on the over-time plot.
+| `*_spikelet_meantrace.xlsx` | raw + `*_norm` + `is_baseline` |
+| `*_spikelet_QC.png` | Per file: **12 above, 21 below** — main track + meantrace |
+| `*_spikelet_meantrace_over_time.png` | Raw over time (12 & 21 overlay, file tails, red × for negatives) |
+| `*_spikelet_meantrace_over_time_norm.png` | Normalized over time (baseline mean = 1; baseline files as □) |
 
 QC marks:
 - green ▾ = AP start **used** in meantrace
@@ -60,8 +63,8 @@ QC marks:
 In `spikelet_meantrace_folder.py`:
 
 - `SMOOTH_MS` (default 0.5)
-- `PEAK_PROMINENCE_MV` (default 0.01)
-- `SHELF_DROP_FRAC` (default 0.02) — peak only if drop after max ≥ this; else shelf
+- `PEAK_PROMINENCE_MV` (default 0.025)
+- `SHELF_DROP_FRAC` (default 0.05) — peak only if drop after max ≥ this; else shelf
 - `PLATEAU_START_MS` / `PLATEAU_END_MS` (default 8–15) — window for shelf **height**
 - `SPIKELET_ONSET_FRAC` (default 0.15) — onset / primary delay from AP start
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark

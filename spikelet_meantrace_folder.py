@@ -48,7 +48,7 @@ SPIKELET_ONSET_FRAC = 0.15
 SHELF_PLATEAU_START_FRAC = 0.90
 
 # Shape rules: peak only if drop after max ≥ this fraction; else shelf
-SHELF_DROP_FRAC = 0.02
+SHELF_DROP_FRAC = 0.05
 MIN_PLATEAU_AMP_MV = 0.05
 MIN_SPIKE_AMP_MV = 1.0
 
@@ -56,6 +56,16 @@ OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
 DIRECTIONS = (
     ("ch0->ch2", 0, 2, "12"),
     ("ch2->ch0", 2, 0, "21"),
+)
+
+# Metrics normalized by mean of user-selected baseline files (per direction)
+NORM_KEYS = (
+    "amp_spike_mV",
+    "amp_spikelet_mV",
+    "amp_ratio",
+    "delay_ms",
+    "delay_onset_ms",
+    "delay_peak_ms",
 )
 
 
@@ -943,24 +953,36 @@ def _scrub_negative_metrics(row):
     return cleared
 
 
-def save_over_time_plot(rows, out_path, title=None):
+def save_over_time_plot(rows, out_path, title=None, normalized=False):
     """
     Over-time figure: one subplot per metric; both directions overlaid
     (different colors). Valid points connected; negatives marked red ×.
     Annotate last digits of filename next to points.
+    If normalized=True, plot *_norm columns (baseline mean = 1).
     """
     plt = _get_agg_plt()
     dir_style = (
         ("ch0->ch2", "C0", "12 ch0→ch2"),
         ("ch2->ch0", "C1", "21 ch2→ch0"),
     )
-    metrics = (
-        ("amp_spike_mV", "AP amp (mV)"),
-        ("amp_spikelet_mV", "Spikelet amp (mV)"),
-        ("amp_ratio", "Ratio spikelet/spike"),
-        ("delay_onset_ms", "Delay onset (ms)"),
-        ("delay_peak_ms", "Delay peak (ms)"),
-    )
+    if normalized:
+        metrics = (
+            ("amp_spike_mV_norm", "AP amp / baseline"),
+            ("amp_spikelet_mV_norm", "Spikelet amp / baseline"),
+            ("amp_ratio_norm", "Ratio / baseline"),
+            ("delay_onset_ms_norm", "Delay onset / baseline"),
+            ("delay_peak_ms_norm", "Delay peak / baseline"),
+        )
+        title_bit = "normalized to baseline"
+    else:
+        metrics = (
+            ("amp_spike_mV", "AP amp (mV)"),
+            ("amp_spikelet_mV", "Spikelet amp (mV)"),
+            ("amp_ratio", "Ratio spikelet/spike"),
+            ("delay_onset_ms", "Delay onset (ms)"),
+            ("delay_peak_ms", "Delay peak (ms)"),
+        )
+        title_bit = "raw"
 
     # scrub negatives in-place (Excel + plot share the same cleaned values)
     neg_marks = []  # (dt, key, value, direction, file_tail)
@@ -989,26 +1011,43 @@ def save_over_time_plot(rows, out_path, title=None):
     fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 14), sharex=True)
     if title:
         fig.suptitle(
-            f"{title} — meantrace spikelet over time (12 & 21 overlay)",
+            f"{title} — meantrace over time ({title_bit}; 12 & 21 overlay)",
             fontsize=12,
         )
 
     n_pts = 0
     labeled_neg = False
+    labeled_bl = False
     for ax, (key, ylab) in zip(axes, metrics):
         any_pts = False
+        if normalized:
+            ax.axhline(1.0, color="0.5", ls="--", lw=0.9, alpha=0.8)
         for direction, color, label in dir_style:
             items = sorted(by_dir[direction], key=lambda x: x[0])
             if not items:
                 continue
-            xs, ys, tails = [], [], []
+            xs, ys, tails, is_bl = [], [], [], []
             for dt, r in items:
                 fv = _as_float(r.get(key))
                 xs.append(dt)
                 ys.append(fv if np.isfinite(fv) else np.nan)
                 tails.append(_file_tail_digits(r.get("file")))
-            # line only through finite (non-negative already scrubbed) points
-            ax.plot(xs, ys, "o-", color=color, label=label, lw=1.4, ms=5)
+                is_bl.append(bool(r.get("is_baseline")))
+            ax.plot(xs, ys, "-", color=color, label=label, lw=1.4, alpha=0.85)
+            # non-baseline points
+            xs_n = [x for x, b in zip(xs, is_bl) if not b]
+            ys_n = [y for y, b in zip(ys, is_bl) if not b]
+            ax.plot(xs_n, ys_n, "o", color=color, ms=5)
+            # baseline points: square markers
+            xs_b = [x for x, b in zip(xs, is_bl) if b]
+            ys_b = [y for y, b in zip(ys, is_bl) if b]
+            if xs_b:
+                ax.plot(
+                    xs_b, ys_b, "s", color=color, ms=7, markerfacecolor="none",
+                    markeredgewidth=1.4,
+                    label=("baseline file" if not labeled_bl else None),
+                )
+                labeled_bl = True
             n_pts += int(np.sum(np.isfinite(ys)))
             any_pts = True
             for x, y, tail in zip(xs, ys, tails):
@@ -1018,23 +1057,21 @@ def save_over_time_plot(rows, out_path, title=None):
                     tail, xy=(x, y), textcoords="offset points",
                     xytext=(3, 4), fontsize=6, color=color, alpha=0.9,
                 )
-                if key == "amp_spikelet_mV":
-                    # tiny shape tag under file number
-                    pass
-        # red × for cleared negatives of this metric
-        for dt, k, v, d, tail in neg_marks:
-            if k != key:
-                continue
-            ax.scatter(
-                [dt], [v], marker="x", c="red", s=55, zorder=8, linewidths=1.5,
-                label="negative (removed)" if not labeled_neg else None,
-            )
-            ax.annotate(
-                tail, xy=(dt, v), textcoords="offset points",
-                xytext=(3, -9), fontsize=6, color="red", alpha=0.9,
-            )
-            labeled_neg = True
-            any_pts = True
+        # red × for cleared negatives of this metric (raw plot only)
+        if not normalized:
+            for dt, k, v, d, tail in neg_marks:
+                if k != key:
+                    continue
+                ax.scatter(
+                    [dt], [v], marker="x", c="red", s=55, zorder=8, linewidths=1.5,
+                    label="negative (removed)" if not labeled_neg else None,
+                )
+                ax.annotate(
+                    tail, xy=(dt, v), textcoords="offset points",
+                    xytext=(3, -9), fontsize=6, color="red", alpha=0.9,
+                )
+                labeled_neg = True
+                any_pts = True
         if not any_pts:
             ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
                     ha="center", va="center", color="0.5")
@@ -1082,6 +1119,13 @@ EXCEL_KEYS = (
     "shelf_plateau_start_frac",
     "peak_prominence_mV",
     "plateau_window_ms",
+    "is_baseline",
+    "amp_spike_mV_norm",
+    "amp_spikelet_mV_norm",
+    "amp_ratio_norm",
+    "delay_ms_norm",
+    "delay_onset_ms_norm",
+    "delay_peak_ms_norm",
     "skip_reason",
 )
 
@@ -1101,11 +1145,14 @@ def save_excel(path, rows):
             "recording_datetime": r.get("recording_datetime"),
         })
         tag = "12" if r.get("direction") == "ch0->ch2" else "21"
+        by_file[f]["is_baseline"] = r.get("is_baseline")
         for k in (
             "sweep", "shape", "amp_spike_mV", "amp_spikelet_peak_mV",
             "amp_spikelet_plateau_mV", "amp_spikelet_mV", "amp_ratio",
             "delay_ms", "delay_onset_ms", "delay_peak_ms", "delay_mode",
             "t_spikelet_onset_ms", "t_shelf_onset_ms", "t_peak_passive_ms",
+            "amp_spike_mV_norm", "amp_spikelet_mV_norm", "amp_ratio_norm",
+            "delay_ms_norm", "delay_onset_ms_norm", "delay_peak_ms_norm",
             "skip_reason", "n_AP_aligned",
         ):
             by_file[f][f"{k}_{tag}"] = r.get(k)
@@ -1121,17 +1168,213 @@ def save_excel(path, rows):
     return path
 
 
-def analyze_folder(folder_path, out_dir=None, save_qc=True):
+def list_abf_files(folder_path):
+    folder_path = os.path.abspath(folder_path)
+    return sorted(
+        f for f in os.listdir(folder_path) if f.lower().endswith(".abf")
+    )
+
+
+def _normalize_baseline_names(baseline_files):
+    if not baseline_files:
+        return set()
+    out = set()
+    for f in baseline_files:
+        bn = os.path.basename(str(f))
+        out.add(bn)
+        out.add(os.path.splitext(bn)[0])
+    return out
+
+
+def apply_baseline_normalization(rows, baseline_files):
+    """
+    For each direction and each NORM_KEYS metric:
+      norm = value / mean(values of baseline files)
+    Sets is_baseline and *_norm columns in-place.
+    Returns (rows, baseline_means).
+    """
+    bl = _normalize_baseline_names(baseline_files)
+    for r in rows:
+        fn = os.path.basename(str(r.get("file") or ""))
+        stem = os.path.splitext(fn)[0]
+        r["is_baseline"] = bool(fn in bl or stem in bl)
+        for k in NORM_KEYS:
+            r[f"{k}_norm"] = None
+
+    baseline_means = {}
+    for direction in ("ch0->ch2", "ch2->ch0"):
+        baseline_means[direction] = {}
+        for key in NORM_KEYS:
+            vals = []
+            for r in rows:
+                if r.get("direction") != direction or not r.get("is_baseline"):
+                    continue
+                v = _as_float(r.get(key))
+                if np.isfinite(v):
+                    vals.append(v)
+            mean_v = float(np.mean(vals)) if vals else np.nan
+            baseline_means[direction][key] = (
+                None if not np.isfinite(mean_v) or abs(mean_v) < 1e-12 else mean_v
+            )
+
+    for r in rows:
+        d = r.get("direction")
+        means = baseline_means.get(d) or {}
+        for key in NORM_KEYS:
+            v = _as_float(r.get(key))
+            m = means.get(key)
+            if m is None or not np.isfinite(v):
+                r[f"{key}_norm"] = None
+            else:
+                r[f"{key}_norm"] = _round(v / m)
+
+    print("Baseline files:", sorted({
+        os.path.basename(str(r.get("file")))
+        for r in rows if r.get("is_baseline")
+    }))
+    for d, means in baseline_means.items():
+        bits = [
+            f"{k}={means[k]:.4g}" for k in NORM_KEYS
+            if means.get(k) is not None
+        ]
+        print(f"  baseline mean {d}: " + (", ".join(bits) if bits else "none"))
+    return rows, baseline_means
+
+
+def _ask_baseline_files(file_list, preselect=None):
+    """
+    Clickable checklist of .abf files (tkinter).
+    Returns list of selected filenames, or [] if cancelled / none.
+    """
+    files = list(file_list or [])
+    if not files:
+        return []
+    pre = set(_normalize_baseline_names(preselect or []))
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception as exc:
+        print("Baseline picker unavailable (tkinter):", exc)
+        return _ask_baseline_files_console(files)
+
+    selected = []
+
+    root = tk.Tk()
+    root.title("Select BASELINE files (mean = 1.0 for normalization)")
+    root.attributes("-topmost", True)
+    root.geometry("640x520")
+
+    frm = ttk.Frame(root, padding=8)
+    frm.pack(fill="both", expand=True)
+    ttk.Label(
+        frm,
+        text="Click files that belong to the baseline period.\n"
+             "Normalization: value / mean(baseline) per direction.",
+    ).pack(anchor="w", pady=(0, 6))
+
+    canvas = tk.Canvas(frm, borderwidth=0)
+    scroll = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    inner.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=scroll.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    vars_ = []
+    for fn in files:
+        var = tk.BooleanVar(value=(fn in pre or os.path.splitext(fn)[0] in pre))
+        chk = ttk.Checkbutton(inner, text=fn, variable=var)
+        chk.pack(anchor="w", pady=1)
+        vars_.append((fn, var))
+
+    btns = ttk.Frame(root, padding=8)
+    btns.pack(fill="x")
+
+    def _all(val):
+        for _, var in vars_:
+            var.set(val)
+
+    def _ok():
+        selected.clear()
+        selected.extend(fn for fn, var in vars_ if var.get())
+        root.destroy()
+
+    def _cancel():
+        selected.clear()
+        root.destroy()
+
+    ttk.Button(btns, text="Select all", command=lambda: _all(True)).pack(side="left")
+    ttk.Button(btns, text="Clear", command=lambda: _all(False)).pack(side="left", padx=4)
+    ttk.Button(btns, text="Cancel", command=_cancel).pack(side="right")
+    ttk.Button(btns, text="OK — use as baseline", command=_ok).pack(side="right", padx=4)
+    root.mainloop()
+    return list(selected)
+
+
+def _ask_baseline_files_console(files):
+    print("\nABF files (enter numbers for baseline, e.g. 1,2,5 or ranges 1-3):")
+    for i, fn in enumerate(files, 1):
+        print(f"  {i:3d}. {fn}")
+    try:
+        raw = input("Baseline selection (empty = skip normalization): ").strip()
+    except EOFError:
+        return []
+    if not raw:
+        return []
+    pick = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                for n in range(int(a), int(b) + 1):
+                    pick.add(n)
+            except ValueError:
+                continue
+        else:
+            try:
+                pick.add(int(part))
+            except ValueError:
+                continue
+    return [files[i - 1] for i in sorted(pick) if 1 <= i <= len(files)]
+
+
+def analyze_folder(
+    folder_path,
+    out_dir=None,
+    save_qc=True,
+    baseline_files=None,
+    ask_baseline=True,
+):
+    """
+    Analyze all .abf in folder.
+
+    baseline_files: optional list of filenames for normalization baseline.
+    ask_baseline: if True and baseline_files is None, open clickable picker.
+    """
     folder_path = os.path.abspath(folder_path)
     folder_name = os.path.basename(folder_path.rstrip("\\/"))
     if out_dir is None:
         out_dir = os.path.join(folder_path, OUT_SUBDIR)
     os.makedirs(out_dir, exist_ok=True)
 
-    abf_files = sorted(f for f in os.listdir(folder_path) if f.lower().endswith(".abf"))
+    abf_files = list_abf_files(folder_path)
     if not abf_files:
         print("No .abf files in", folder_path)
         return None
+
+    if baseline_files is None and ask_baseline:
+        print("Select baseline files for normalization…")
+        baseline_files = _ask_baseline_files(abf_files)
+        if baseline_files:
+            print("Selected baseline:", baseline_files)
+        else:
+            print("No baseline selected — skipping normalization.")
 
     all_rows = []
     print(f"Folder: {folder_path}")
@@ -1171,12 +1414,32 @@ def analyze_folder(folder_path, out_dir=None, save_qc=True):
             r.pop("_plot", None)
             all_rows.append(r)
 
-    # over-time first: scrubs negatives (red ×) in-place, then Excel uses cleaned rows
+    # scrub negatives (red × on raw plot), then optional baseline normalization
     png = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace_over_time.png")
-    save_over_time_plot(all_rows, png, title=folder_name)
+    save_over_time_plot(all_rows, png, title=folder_name, normalized=False)
+
+    baseline_means = None
+    png_norm = None
+    if baseline_files:
+        _, baseline_means = apply_baseline_normalization(all_rows, baseline_files)
+        png_norm = os.path.join(
+            out_dir, f"{folder_name}_spikelet_meantrace_over_time_norm.png"
+        )
+        save_over_time_plot(
+            all_rows, png_norm, title=folder_name, normalized=True,
+        )
+
     xlsx = os.path.join(out_dir, f"{folder_name}_spikelet_meantrace.xlsx")
     save_excel(xlsx, all_rows)
-    return {"excel": xlsx, "plot": png, "out_dir": out_dir, "rows": all_rows}
+    return {
+        "excel": xlsx,
+        "plot": png,
+        "plot_norm": png_norm,
+        "out_dir": out_dir,
+        "rows": all_rows,
+        "baseline_files": list(baseline_files or []),
+        "baseline_means": baseline_means,
+    }
 
 
 def _ask_folder():
