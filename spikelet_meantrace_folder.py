@@ -865,6 +865,27 @@ def _draw_meantrace(ax, row):
     ax.plot(t, mp_s, color="darkorange", lw=1.2, label="smoothed")
     base = float(np.mean(mp_s[:n_pre])) if n_pre else float(mp_s[0])
     ax.axhline(base, color="0.3", lw=0.8, label="baseline")
+    # noise from original passive sweep (pre-stim σ); show ±σ and ±kσ around baseline
+    noise_sigma = row.get("noise_sigma_mV")
+    if noise_sigma is None:
+        noise_sigma = m.get("noise_sigma_mV")
+    noise_thr = row.get("noise_amp_threshold_mV")
+    if noise_thr is None:
+        noise_thr = m.get("noise_amp_threshold_mV")
+    if noise_sigma is not None and np.isfinite(float(noise_sigma)):
+        sig = float(noise_sigma)
+        ax.axhspan(base - sig, base + sig, color="0.55", alpha=0.18, label=f"±1σ ({sig:.3g} mV)")
+        ax.axhline(base + sig, color="0.45", ls=":", lw=0.9)
+        ax.axhline(base - sig, color="0.45", ls=":", lw=0.9)
+        if noise_thr is not None and np.isfinite(float(noise_thr)):
+            thr = float(noise_thr)
+            k = row.get("noise_sigma_k", m.get("noise_sigma_k", NOISE_SIGMA_K))
+            ax.axhline(
+                base + thr, color="crimson", ls="--", lw=1.1,
+                label=f"+{k:g}σ thr ({thr:.3g} mV)",
+            )
+            ax.axhline(base - thr, color="crimson", ls="--", lw=1.1)
+            ax.axhspan(base - thr, base + thr, color="crimson", alpha=0.06)
     ax.axvspan(-BASELINE_MS, 0, color="0.7", alpha=0.25)
     ax.axvspan(0, WINDOW_MS, color="C4", alpha=0.1)
     # plateau window relative to AP peak (stored on metrics)
@@ -938,12 +959,18 @@ def _draw_meantrace(ax, row):
     ax2.set_ylabel("Active Vm (mV)", color="C0")
     ax2.tick_params(axis="y", labelcolor="C0")
 
-    ax.set_xlabel("Time from AP start (ms)")
+    ax.set_xlabel("Time from AP onset (ms)")
     ax.set_ylabel("Passive Vm (mV)", color="C1")
+    noise_txt = ""
+    if noise_sigma is not None and np.isfinite(float(noise_sigma)):
+        noise_txt = f"  σ={float(noise_sigma):.3g}"
+        if noise_thr is not None and np.isfinite(float(noise_thr)):
+            noise_txt += f"  2σ={float(noise_thr):.3g} mV"
     ax.set_title(
         f"Meantrace  shape={shape}  spike={m.get('amp_spike_mV')}  "
         f"spikelet={m.get('amp_spikelet_mV')}  ratio={m.get('amp_ratio')}  "
-        f"d_on={m.get('delay_onset_ms')}  d_pk={m.get('delay_peak_ms')}",
+        f"d_on={m.get('delay_onset_ms')}  d_pk={m.get('delay_peak_ms')}"
+        f"{noise_txt}",
         fontsize=9,
     )
     h1, l1 = ax.get_legend_handles_labels()
