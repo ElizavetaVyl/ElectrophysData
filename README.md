@@ -2,13 +2,6 @@
 
 Jupyter notebooks used to measure passive and active properties of patch-clamp recordings (Axon ABF files) and to run the group statistics for those measurements and for live/dead, cell-size, and cell-density counts.
 
-Replace the fields below before the repository is cited from a paper.
-
-- **Manuscript:** [title]
-- **Authors:** [names]
-- **Journal / year:** [journal, year]
-- **DOI:** [doi]
-
 Raw ABF recordings are not included. Each notebook reads either a folder of `.abf` files or numbers typed into the notebook.
 
 ## Notebooks in this release
@@ -19,6 +12,7 @@ Raw ABF recordings are not included. Each notebook reads either a folder of `.ab
 | LIVE DEAD cell statistics calculations | Within-group time course and between-group tests for viability, size, and density | Numbers typed into the cells | Printed tables |
 | statistics for 2 Groups | Two-group descriptive statistics, normality, Mann–Whitney, effect sizes | Excel with columns `group1`, `group2` | Excel of test results |
 | statistics for 3 groups | Three-group Kruskal–Wallis, pairwise tests, multiplicity correction | Excel or CSV with three columns | Printed pairwise table |
+| Cm tau calculations | Membrane time constant and capacitance for every ABF in one folder, with a check plot per file | Folder of `.abf` files | Excel with tau (ms), capacitance (pF), and the sweep used; one plot per file |
 | Tau Cm calculations | Membrane time constant and capacitance from one ABF object | A pyABF object and Rin in MΩ | tau (ms), capacitance (pF), sweep index |
 | TRN RBs | Rebound burst / low-threshold spike metrics after the current step | Folder of `.abf` files | `results.xlsx` and one QC figure per file |
 
@@ -114,6 +108,14 @@ Each pair of columns then gets:
 
 Mann–Whitney p values are corrected across the three pairs by Bonferroni and by Benjamini–Hochberg. The star column uses the Bonferroni p value with thresholds 0.05, 0.01, and 0.001, each divided by the number of pairs. The pairwise table is displayed. Saving it to Excel is left commented at the bottom of the cell.
 
+## Cm tau calculations
+
+Cm tau calculations measures tau and capacitance for every `.abf` file in a folder. Set `folder_path` to the directory where the Excel file is written, and `my_search_ch` to `0` or `2`, then choose the folder of recordings in the dialog.
+
+For each file the notebook reads the sampling rate from the ABF header (`dataRate`) and passes it into `tau_and_capacitance`. The function keeps the sweep whose voltage change, from the sample at the start index to the sample at the stop index, is negative and falls between −50 and −10 mV, choosing the sweep closest to −10 mV. Tau is the time from the start index until the trace reaches 63% of that change. Capacitance in pF is `tau_ms / Rin_rel × 1000`, with `Rin_rel` in MΩ from the subthreshold sweeps.
+
+Each file opens a figure titled “Вычисление Tau”: the voltage trace in milliseconds, a line at 63% of the change, a line at the end voltage, and a vertical line at tau. The figure is shown in the notebook and is not written to disk. The table columns are file name, `my_tau_ms`, `my_capacitance_pF`, and `my_best_sweep`. A failed file is printed and skipped. The table is saved once after the loop.
+
 ## Tau Cm calculations
 
 Tau Cm calculations contains only `tau_and_capacitance`. It does not open files. Pass a pyABF object, the voltage channel, the index before the step, the index after the step, and Rin in MΩ.
@@ -140,11 +142,3 @@ For each ABF it estimates:
 - holding voltage, injected current, and membrane potential from the command and voltage channels.
 
 The QC figure has three panels (voltage, first derivative, second derivative) and is saved under `folder_path` using the ABF id as the file name. Numeric results are appended to `results.xlsx` in that same folder. Create the empty workbook by running the table cell before the loop. A failed file is printed and skipped.
-
-## Citation
-
-[Add the citation of the paper, or of this repository, once the manuscript is accepted.]
-
-## License
-
-No license is set yet. Add a `LICENSE` file before public release so others can reuse the notebooks. A permissive license such as MIT or BSD-3-Clause is a common choice for analysis code; the journal may also ask for one.
