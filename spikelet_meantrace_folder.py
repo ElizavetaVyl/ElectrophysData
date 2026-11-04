@@ -56,6 +56,9 @@ SHELF_PLATEAU_START_FRAC = 0.90
 SHELF_DROP_FRAC = 0.05
 MIN_PLATEAU_AMP_MV = 0.05
 MIN_SPIKE_AMP_MV = 1.0
+# Noise gate: σ of passive Vm before stimulus; reject spikelet if |amp| < k·σ
+PRESTIM_NOISE_MS = 100.0
+NOISE_SIGMA_K = 2.0
 
 OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
 DIRECTIONS = (
@@ -132,6 +135,27 @@ def recording_datetime_str(abf):
     if isinstance(dt, datetime):
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     return str(dt)
+
+
+def prestim_noise_sigma(abf, sweep, voltage_ch, stim_start, sr, window_ms=None):
+    """
+    Noise σ (mV) on the original voltage sweep before stimulus.
+    Uses the last `window_ms` before stim_start (default PRESTIM_NOISE_MS).
+    """
+    if window_ms is None:
+        window_ms = PRESTIM_NOISE_MS
+    abf.setSweep(sweepNumber=int(sweep), channel=int(voltage_ch))
+    y = np.asarray(abf.sweepY, dtype=float)
+    i1 = int(max(0, min(int(stim_start), len(y))))
+    n_win = _ms_to_samples(window_ms, sr)
+    i0 = max(0, i1 - n_win)
+    if i1 - i0 < 5:
+        # fallback: whatever exists before stim
+        i0 = 0
+    seg = y[i0:i1]
+    if seg.size < 5:
+        return None
+    return float(np.std(seg))
 
 
 def cp_infl_points(abf, sweep, voltage_ch, start, stop):
@@ -589,8 +613,55 @@ def analyze_direction(abf, active_ch, passive_ch, direction, tag):
         row["skip_reason"] = reason
         return row
     row["n_AP_aligned"] = mt["n_aligned"]
+    # noise σ on passive Vm of this sweep, before stimulus
+    noise_sigma = prestim_noise_sigma(abf, sweep, passive_ch, stim_start, sr)
+    row["noise_sigma_mV"] = _round(noise_sigma)
+    row["noise_sigma_k"] = NOISE_SIGMA_K
+    noise_thr = (
+        float(NOISE_SIGMA_K) * float(noise_sigma)
+        if noise_sigma is not None and np.isfinite(noise_sigma)
+        else None
+    )
+    row["noise_amp_threshold_mV"] = _round(noise_thr)
+
     metrics = measure_meantrace(mt["mean_a"], mt["mean_p"], mt["n_pre"], sr)
     row.update(metrics)
+
+    # reject spikelet if |chosen amp| < k·σ (noise of original passive sweep)
+    amp_s = row.get("amp_spikelet_mV")
+    if (
+        amp_s is not None
+        and noise_thr is not None
+        and abs(float(amp_s)) < float(noise_thr)
+        and row.get("shape") in ("peak", "shelf")
+    ):
+        row["rejected_amp_spikelet_mV"] = amp_s
+        row["shape"] = "flat"
+        row["amp_spikelet_mV"] = None
+        row["amp_ratio"] = None
+        row["delay_ms"] = None
+        row["delay_onset_ms"] = None
+        row["delay_peak_ms"] = None
+        row["delay_mode"] = None
+        row["t_spikelet_onset_ms"] = None
+        row["t_peak_passive_ms"] = None
+        row["t_shelf_onset_ms"] = None
+        row["amp_spikelet_peak_mV"] = None
+        row["amp_spikelet_plateau_mV"] = None
+        row["skip_reason"] = (
+            f"|amp| < {NOISE_SIGMA_K:g}σ_noise "
+            f"({_round(amp_s)} < {_round(noise_thr)} mV)"
+        )
+        # sync QC metrics with rejected state
+        for k in (
+            "shape", "amp_spikelet_mV", "amp_ratio", "delay_ms",
+            "delay_onset_ms", "delay_peak_ms", "delay_mode",
+            "t_spikelet_onset_ms", "t_peak_passive_ms", "t_shelf_onset_ms",
+            "amp_spikelet_peak_mV", "amp_spikelet_plateau_mV", "skip_reason",
+            "rejected_amp_spikelet_mV",
+        ):
+            metrics[k] = row.get(k)
+
     row["_plot"] = {
         "mean_a": mt["mean_a"],
         "mean_p": mt["mean_p"],
@@ -1159,6 +1230,10 @@ EXCEL_KEYS = (
     "peak_prominence_mV",
     "plateau_window_ms",
     "is_baseline",
+    "noise_sigma_mV",
+    "noise_sigma_k",
+    "noise_amp_threshold_mV",
+    "rejected_amp_spikelet_mV",
     "amp_spike_mV_norm",
     "amp_spikelet_mV_norm",
     "amp_ratio_norm",
