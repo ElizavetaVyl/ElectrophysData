@@ -125,7 +125,7 @@ The function:
 - sets tau to the time from `pre_start` until the trace reaches 63% of that change;
 - converts tau and the passed Rin (`Rin_rel`, MΩ) to capacitance in pF.
 
-Sampling rate defaults to 10 kHz when the argument is omitted.
+Sampling rate is read from the ABF header (`file.dataRate`), the same way Cell Properties reads `my_file.dataRate`. Pass `sampling_rate` only to override that value. The 125 ms baseline and the conversion of tau to milliseconds both use this rate, so a 10 kHz default would scale tau and capacitance on a recording made at another rate.
 
 ## TRN RBs
 
