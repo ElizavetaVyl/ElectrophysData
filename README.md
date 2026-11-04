@@ -15,13 +15,13 @@ Raw ABF recordings are not included. Each notebook reads either a folder of `.ab
 
 | Notebook | What it does | Input | Output |
 | --- | --- | --- | --- |
-| `Cell Properties for one folder.ipynb` | Active and passive properties for every ABF in one folder | Folder of `.abf` files | `results_depolarisation.xlsx` and one PNG per file |
-| `FWHM recalculation cuz of bad filtering.ipynb` | Same spike helpers, plus a batch estimate of membrane time constant and capacitance | Folder of `.abf` files | Excel with tau, capacitance, and the sweep used |
-| `Tau Cm calculations.ipynb` | Function only: membrane time constant and capacitance from one ABF object | Called from other notebooks | tau (ms), capacitance (pF), sweep index |
-| `TRN RBs all files in a folder.ipynb` | Rebound burst / low-threshold spike metrics after the current step | Folder of `.abf` files | `results.xlsx` and one QC figure per file |
-| `LIVE DEAD Cell Statistics calculations.ipynb` | Within-group time course and between-group tests for viability, size, and density | Numbers typed into the cells | Printed tables |
-| `Statistics for 2 Groups.ipynb` | Two-group descriptive statistics, normality, Mann–Whitney, effect sizes | Excel with columns `group1`, `group2` | Excel of test results |
-| `Statistics for 3 groups.ipynb` | Three-group Kruskal–Wallis, pairwise tests, multiplicity correction | Excel or CSV with three columns | Printed pairwise table |
+| Cell Properties | Active and passive properties for every ABF in one folder | Folder of `.abf` files | `results_depolarisation.xlsx` and one PNG per file |
+| FWHM recalculation (filtering) | Same spike helpers, plus a batch estimate of membrane time constant and capacitance | Folder of `.abf` files | Excel with tau, capacitance, and the sweep used |
+| LIVE DEAD cell statistics calculations | Within-group time course and between-group tests for viability, size, and density | Numbers typed into the cells | Printed tables |
+| statistics for 2 Groups | Two-group descriptive statistics, normality, Mann–Whitney, effect sizes | Excel with columns `group1`, `group2` | Excel of test results |
+| statistics for 3 groups | Three-group Kruskal–Wallis, pairwise tests, multiplicity correction | Excel or CSV with three columns | Printed pairwise table |
+| Tau Cm calculations | Function only: membrane time constant and capacitance from one ABF object | Called from other notebooks | tau (ms), capacitance (pF), sweep index |
+| TRN RBs | Rebound burst / low-threshold spike metrics after the current step | Folder of `.abf` files | `results.xlsx` and one QC figure per file |
 
 Other `.ipynb` files in this repository are earlier working copies. They are not required for the analyses above.
 
@@ -53,11 +53,11 @@ Windows taken around the step:
 
 - 125 ms immediately before the step (baseline);
 - the last 250 ms of the step (steady level);
-- 500 ms after the step in the cell-properties notebook, 750 ms after the step in the rebound-burst notebook.
+- 500 ms after the step in Cell Properties, 750 ms after the step in TRN RBs.
 
 Voltage is treated as mV and current as pA. Input resistance in MΩ is `ΔV / ΔI × 1000`. Capacitance in pF is `tau_ms / Rin_MΩ × 1000`.
 
-## Cell properties for one folder
+## Cell Properties
 
 Run the cells from top to bottom.
 
@@ -77,9 +77,9 @@ Columns written to Excel: file name, AP2/AP1 ratio, attenuation trend, initial f
 
 A failed file is printed and skipped. The table is saved once after the loop.
 
-## FWHM recalculation notebook
+## FWHM recalculation (filtering)
 
-`FWHM recalculation cuz of bad filtering.ipynb` defines the same spike, Rin, and FWHM helpers as the cell-properties notebook, and also defines `tau_and_capacitance`.
+FWHM recalculation (filtering) defines the same spike, Rin, and FWHM helpers as Cell Properties, and also defines `tau_and_capacitance`.
 
 The batch cell does not write FWHM. It loops over a chosen folder and saves only:
 
@@ -91,40 +91,11 @@ Set `folder_path` (output directory) and `my_search_ch` before the loop. In the 
 
 The tau routine in this notebook searches sweeps whose voltage step falls between −50 and −10 mV and keeps the sweep closest to −10 mV. Tau is the time from the analysed index to 63% of that voltage change. Capacitance uses the relative Rin (MΩ) from `IV_Rin`.
 
-Half-width of the first spike for a whole folder is the FWHM column of `Cell Properties for one folder.ipynb`.
+Half-width of the first spike for a whole folder is the FWHM column of Cell Properties.
 
-## Tau and capacitance
+## LIVE DEAD cell statistics calculations
 
-`Tau Cm calculations.ipynb` contains only `tau_and_capacitance`. It does not open files. Pass a pyABF object, the voltage channel, the index before the step, the index after the step, and Rin in MΩ.
-
-The function:
-
-- keeps the sweep whose negative voltage change lies in `search_range` (default −35 to −10 mV) and is closest to zero;
-- takes the baseline as the mean of the first 125 ms from `pre_start`, and the peak change as the minimum between `pre_start` and `post_stop`;
-- sets tau to the time from `pre_start` until the trace reaches 63% of that change;
-- converts tau and Rin to capacitance in pF.
-
-The capacitance line reads a name `Rin_abs`, which is not an argument of the function. Define `Rin_abs` in the notebook before the call, or edit that line to use the argument `Rin_rel`. The copy of this function in `FWHM recalculation cuz of bad filtering.ipynb` already uses `Rin_rel`.
-
-Sampling rate defaults to 10 kHz when the argument is omitted.
-
-## Rebound bursts (TRN)
-
-`TRN RBs all files in a folder.ipynb` measures the rebound that follows the current step. The analysed window starts at the end of the step. Sweep number and voltage channel are set in the notebook (`my_sweep = 0`, `my_search_ch = 0` in this copy).
-
-For each ABF it estimates:
-
-- start of the rebound from the minimum of the smoothed first derivative before the first spike;
-- end of the rebound from the later region where the smoothed first and second derivatives are near zero;
-- width of the low-threshold spike (LTS) in ms, number of spikes in the burst, initial rate (first two spikes), rate across all spikes, and rate excluding the first interval;
-- voltage at spike threshold, amplitude of the first spike, LTS amplitude, and the amplitude ratio of spike 2 to spike 1;
-- holding voltage, injected current, and membrane potential from the command and voltage channels.
-
-The QC figure has three panels (voltage, first derivative, second derivative) and is saved under `folder_path` using the ABF id as the file name. Numeric results are appended to `results.xlsx` in that same folder. Create the empty workbook by running the table cell before the loop. A failed file is printed and skipped.
-
-## Live/dead, size, and density
-
-`LIVE DEAD Cell Statistics calculations.ipynb` is four self-contained analyses. Replace the lists at the top of a cell with the values for that run. Group labels in the output are `ctrl` and `drug`. Days that exist in only one group are omitted from the between-group test.
+LIVE DEAD cell statistics calculations contains four self-contained analyses. Replace the lists at the top of a cell with the values for that run. Group labels in the output are `ctrl` and `drug`. Days that exist in only one group are omitted from the between-group test.
 
 | Cell | Data as stored in the notebook | Within each group, across days | Between groups, each day |
 | --- | --- | --- | --- |
@@ -135,9 +106,9 @@ The QC figure has three panels (voltage, first derivative, second derivative) an
 
 Stars printed next to a p value: `****` < 0.0001, `***` < 0.001, `**` < 0.01, `*` < 0.05, otherwise `ns`. Results are printed, not written to a file.
 
-## Two groups
+## statistics for 2 Groups
 
-`Statistics for 2 Groups.ipynb` reads the first sheet of an Excel file. It uses two numeric columns named `group1` and `group2`. Empty cells are dropped.
+statistics for 2 Groups reads the first sheet of an Excel file. It uses two numeric columns named `group1` and `group2`. Empty cells are dropped.
 
 For each column it reports n, mean, sample standard deviation, median, interquartile range, minimum, and maximum; a Shapiro–Wilk test; and a D’Agostino–Pearson test when n ≥ 20.
 
@@ -148,9 +119,9 @@ The comparison is a two-sided Mann–Whitney U test. Effect sizes, computed on t
 
 The output path is set by `results.to_excel(...)` near the end of the first cell. The import cell is below the analysis cell; run the imports first, or move them above the analysis.
 
-## Three groups
+## statistics for 3 groups
 
-`Statistics for 3 groups.ipynb` reads an Excel sheet or a CSV (`use_excel`). Set `input_file` and `cols` to the three column names. Non-numeric cells are dropped.
+statistics for 3 groups reads an Excel sheet or a CSV (`use_excel`). Set `input_file` and `cols` to the three column names. Non-numeric cells are dropped.
 
 The notebook prints n, median, and IQR per column, a Shapiro–Wilk test (n ≥ 3), and a Kruskal–Wallis test. Effect size is epsilon-squared, `(H − k + 1) / (n − k)`.
 
@@ -161,6 +132,35 @@ Each pair of columns then gets:
 - Cliff’s delta.
 
 Mann–Whitney p values are corrected across the three pairs by Bonferroni and by Benjamini–Hochberg. The star column uses the Bonferroni p value with thresholds 0.05, 0.01, and 0.001, each divided by the number of pairs. The pairwise table is displayed. Saving it to Excel is left commented at the bottom of the cell.
+
+## Tau Cm calculations
+
+Tau Cm calculations contains only `tau_and_capacitance`. It does not open files. Pass a pyABF object, the voltage channel, the index before the step, the index after the step, and Rin in MΩ.
+
+The function:
+
+- keeps the sweep whose negative voltage change lies in `search_range` (default −35 to −10 mV) and is closest to zero;
+- takes the baseline as the mean of the first 125 ms from `pre_start`, and the peak change as the minimum between `pre_start` and `post_stop`;
+- sets tau to the time from `pre_start` until the trace reaches 63% of that change;
+- converts tau and Rin to capacitance in pF.
+
+The capacitance line reads a name `Rin_abs`, which is not an argument of the function. Define `Rin_abs` in the notebook before the call, or edit that line to use the argument `Rin_rel`. The copy of this function in FWHM recalculation (filtering) already uses `Rin_rel`.
+
+Sampling rate defaults to 10 kHz when the argument is omitted.
+
+## TRN RBs
+
+TRN RBs measures the rebound that follows the current step. The analysed window starts at the end of the step. Sweep number and voltage channel are set in the notebook (`my_sweep = 0`, `my_search_ch = 0` in this copy).
+
+For each ABF it estimates:
+
+- start of the rebound from the minimum of the smoothed first derivative before the first spike;
+- end of the rebound from the later region where the smoothed first and second derivatives are near zero;
+- width of the low-threshold spike (LTS) in ms, number of spikes in the burst, initial rate (first two spikes), rate across all spikes, and rate excluding the first interval;
+- voltage at spike threshold, amplitude of the first spike, LTS amplitude, and the amplitude ratio of spike 2 to spike 1;
+- holding voltage, injected current, and membrane potential from the command and voltage channels.
+
+The QC figure has three panels (voltage, first derivative, second derivative) and is saved under `folder_path` using the ABF id as the file name. Numeric results are appended to `results.xlsx` in that same folder. Create the empty workbook by running the table cell before the loop. A failed file is printed and skipped.
 
 ## Citation
 
