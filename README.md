@@ -15,15 +15,12 @@ Raw ABF recordings are not included. Each notebook reads either a folder of `.ab
 
 | Notebook | What it does | Input | Output |
 | --- | --- | --- | --- |
-| Cell Properties | Active and passive properties for every ABF in one folder | Folder of `.abf` files | `results_depolarisation.xlsx` and one PNG per file |
-| FWHM recalculation (filtering) | Same spike helpers, plus a batch estimate of membrane time constant and capacitance | Folder of `.abf` files | Excel with tau, capacitance, and the sweep used |
+| Cell Properties | Active and passive properties for every ABF in one folder, including FWHM of the first spike | Folder of `.abf` files | `results_depolarisation.xlsx` and one PNG per file |
 | LIVE DEAD cell statistics calculations | Within-group time course and between-group tests for viability, size, and density | Numbers typed into the cells | Printed tables |
 | statistics for 2 Groups | Two-group descriptive statistics, normality, Mann–Whitney, effect sizes | Excel with columns `group1`, `group2` | Excel of test results |
 | statistics for 3 groups | Three-group Kruskal–Wallis, pairwise tests, multiplicity correction | Excel or CSV with three columns | Printed pairwise table |
-| Tau Cm calculations | Function only: membrane time constant and capacitance from one ABF object | Called from other notebooks | tau (ms), capacitance (pF), sweep index |
+| Tau Cm calculations | Membrane time constant and capacitance from one ABF object | A pyABF object and Rin in MΩ | tau (ms), capacitance (pF), sweep index |
 | TRN RBs | Rebound burst / low-threshold spike metrics after the current step | Folder of `.abf` files | `results.xlsx` and one QC figure per file |
-
-Other `.ipynb` files in this repository are earlier working copies. They are not required for the analyses above.
 
 ## Setup
 
@@ -34,7 +31,7 @@ python -m pip install -r requirements.txt
 jupyter notebook
 ```
 
-A clean install of this file on Python 3.12 resolved to numpy 1.26.4, scipy 1.17.1, pandas 3.0.6, matplotlib 3.11.2, pyABF 2.3.8, statsmodels 0.15.0, scikit-posthocs 0.17.1, and notebook 7.6.4. Imports used by the seven notebooks were checked against that environment. The notebooks were not re-run, because they need the original ABF files and a desktop folder dialog.
+A clean install of this file on Python 3.12 resolved to numpy 1.26.4, scipy 1.17.1, pandas 3.0.6, matplotlib 3.11.2, pyABF 2.3.8, statsmodels 0.15.0, scikit-posthocs 0.17.1, and notebook 7.6.4. Imports used by these notebooks were checked against that environment. The notebooks were not re-run, because they need the original ABF files and a desktop folder dialog.
 
 `PySimpleGUI` is pinned to 4.60.5.1, a re-upload of the last PySimpleGUI 4 release (LGPL-3.0). Releases 5 and 6 stop on import unless a license key is set. The batch notebooks import the package; the folder dialog itself uses tkinter.
 
@@ -76,22 +73,6 @@ For each file the notebook:
 Columns written to Excel: file name, AP2/AP1 ratio, attenuation trend, initial frequency (Hz), late frequency (Hz), mean frequency (Hz), frequency ratio, FWHM (ms), delay of the first spike (ms), absolute and relative Rin (MΩ), resting voltage from the fit (mV), holding voltage (mV), injected current (pA), R² of the absolute Rin fit.
 
 A failed file is printed and skipped. The table is saved once after the loop.
-
-## FWHM recalculation (filtering)
-
-FWHM recalculation (filtering) defines the same spike, Rin, and FWHM helpers as Cell Properties, and also defines `tau_and_capacitance`.
-
-The batch cell does not write FWHM. It loops over a chosen folder and saves only:
-
-- `my_tau_ms`
-- `my_capacitance_pF`
-- `my_best_sweep`
-
-Set `folder_path` (output directory) and `my_search_ch` before the loop. In the copy in this repository the batch channel is `2`, and the Excel file is named `Tau_mPFC_Ch2.xlsx`.
-
-The tau routine in this notebook searches sweeps whose voltage step falls between −50 and −10 mV and keeps the sweep closest to −10 mV. Tau is the time from the analysed index to 63% of that voltage change. Capacitance uses the relative Rin (MΩ) from `IV_Rin`.
-
-Half-width of the first spike for a whole folder is the FWHM column of Cell Properties.
 
 ## LIVE DEAD cell statistics calculations
 
@@ -142,9 +123,7 @@ The function:
 - keeps the sweep whose negative voltage change lies in `search_range` (default −35 to −10 mV) and is closest to zero;
 - takes the baseline as the mean of the first 125 ms from `pre_start`, and the peak change as the minimum between `pre_start` and `post_stop`;
 - sets tau to the time from `pre_start` until the trace reaches 63% of that change;
-- converts tau and Rin to capacitance in pF.
-
-The capacitance line reads a name `Rin_abs`, which is not an argument of the function. Define `Rin_abs` in the notebook before the call, or edit that line to use the argument `Rin_rel`. The copy of this function in FWHM recalculation (filtering) already uses `Rin_rel`.
+- converts tau and the passed Rin (`Rin_rel`, MΩ) to capacitance in pF.
 
 Sampling rate defaults to 10 kHz when the argument is omitted.
 
