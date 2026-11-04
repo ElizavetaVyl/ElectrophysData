@@ -829,6 +829,25 @@ def _draw_main_track(ax_a, ax_p, row):
                 )
                 labeled_sp = True
 
+    # show prestim noise band on passive (where σ was measured)
+    noise_sigma = row.get("noise_sigma_mV")
+    noise_thr = row.get("noise_amp_threshold_mV")
+    if noise_sigma is not None and np.isfinite(float(noise_sigma)) and ss > 0:
+        n_win = _ms_to_samples(PRESTIM_NOISE_MS, sr)
+        j0 = max(0, ss - n_win)
+        prestim = y_p[j0:ss]
+        if len(prestim) >= 5:
+            mu = float(np.mean(prestim))
+            sig = float(noise_sigma)
+            thr = float(noise_thr) if noise_thr is not None else 2.0 * sig
+            t_lo, t_hi = t[j0], t[min(ss, len(t) - 1)]
+            ax_p.axhspan(mu - sig, mu + sig, color="0.55", alpha=0.2, zorder=0)
+            ax_p.axhline(mu + thr, color="crimson", ls="--", lw=1.0, alpha=0.9,
+                         label=f"±{NOISE_SIGMA_K:g}σ thr")
+            ax_p.axhline(mu - thr, color="crimson", ls="--", lw=1.0, alpha=0.9)
+            ax_p.axvspan(t_lo, t_hi, color="crimson", alpha=0.08, zorder=0,
+                         label="prestim noise win")
+
     ax_a.set_ylabel("Active Vm (mV)")
     ax_p.set_ylabel("Passive Vm (mV)")
     ax_a.set_xlim(t[i0], t[i1])
@@ -837,9 +856,14 @@ def _draw_main_track(ax_a, ax_p, row):
     ax_p.legend(loc="upper right", fontsize=7)
     ax_a.grid(True, alpha=0.25)
     ax_p.grid(True, alpha=0.25)
+    noise_txt = ""
+    if noise_sigma is not None and np.isfinite(float(noise_sigma)):
+        noise_txt = f"  σ={float(noise_sigma):.3g} mV"
+        if noise_thr is not None:
+            noise_txt += f"  thr={float(noise_thr):.3g}"
     ax_a.set_title(
         f"{row.get('direction')}  sweep {row.get('sweep')} ({row.get('sweep_tier')})  "
-        f"used AP={row.get('n_AP_aligned')}  shape={shape}",
+        f"used AP={row.get('n_AP_aligned')}  shape={shape}{noise_txt}",
         fontsize=10,
     )
 
