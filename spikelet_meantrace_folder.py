@@ -1806,7 +1806,7 @@ def analyze_folder(
     folder_path = os.path.abspath(folder_path)
     folder_name = os.path.basename(folder_path.rstrip("\\/"))
     if out_dir is None:
-        out_dir = os.path.join(folder_path, OUT_SUBDIR)
+        out_dir = os.path.join(folder_path, _out_subdir_name())
     os.makedirs(out_dir, exist_ok=True)
 
     abf_files = list_abf_files(folder_path)
