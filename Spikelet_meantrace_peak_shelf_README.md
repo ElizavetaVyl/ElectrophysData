@@ -41,7 +41,7 @@ You can also pass `baseline_files=[...]` / set `BASELINE_FILES` in the notebook.
 
 ## Outputs
 
-Folder `Spikelet_meantrace_peak_shelf_noise_k{K}/` (e.g. `…_noise_k2` for k=2):
+Folder `Spikelet_meantrace_peak_shelf_noise_k{K}/` (e.g. `…_noise_k1p5` for k=1.5):
 
 | File | Content |
 |------|---------|
@@ -74,4 +74,4 @@ In `spikelet_meantrace_folder.py`:
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
 - `MIN_PLATEAU_AMP_MV` (default 0.05)
 - `PRESTIM_NOISE_MS` (default 100) — window before stimulus for noise σ on passive Vm
-- `NOISE_SIGMA_K` (default 2) — reject spikelet if `|amp| < k·σ`
+- `NOISE_SIGMA_K` (default 1.5) — reject spikelet if `|amp| < k·σ`
