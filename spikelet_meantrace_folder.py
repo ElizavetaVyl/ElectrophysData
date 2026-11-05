@@ -60,7 +60,14 @@ MIN_SPIKE_AMP_MV = 1.0
 PRESTIM_NOISE_MS = 100.0
 NOISE_SIGMA_K = 2.5
 
-OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
+def _out_subdir_name():
+    """Output folder name includes noise-filter tag (k·σ)."""
+    k = float(NOISE_SIGMA_K)
+    k_tag = f"{k:g}".replace(".", "p")
+    return f"Spikelet_meantrace_peak_shelf_noise_k{k_tag}"
+
+
+OUT_SUBDIR = _out_subdir_name()
 DIRECTIONS = (
     ("ch0->ch2", 0, 2, "12"),
     ("ch2->ch0", 2, 0, "21"),

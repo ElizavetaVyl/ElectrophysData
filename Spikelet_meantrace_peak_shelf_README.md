@@ -41,7 +41,7 @@ You can also pass `baseline_files=[...]` / set `BASELINE_FILES` in the notebook.
 
 ## Outputs
 
-Folder `Spikelet_meantrace_peak_shelf/`:
+Folder `Spikelet_meantrace_peak_shelf_noise_k{K}/` (e.g. `…_noise_k2p5` for k=2.5):
 
 | File | Content |
 |------|---------|
