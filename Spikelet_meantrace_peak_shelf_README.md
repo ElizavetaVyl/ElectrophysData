@@ -74,4 +74,4 @@ In `spikelet_meantrace_folder.py`:
 - `SHELF_PLATEAU_START_FRAC` (default 0.90) — late plateau QC landmark
 - `MIN_PLATEAU_AMP_MV` (default 0.05)
 - `PRESTIM_NOISE_MS` (default 100) — window before stimulus for noise σ on passive Vm
-- `NOISE_SIGMA_K` (default 2) — reject spikelet if `|amp| < k·σ`
+- `NOISE_SIGMA_K` (default 2.5) — reject spikelet if `|amp| < k·σ`

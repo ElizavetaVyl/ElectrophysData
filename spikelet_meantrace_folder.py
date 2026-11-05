@@ -58,7 +58,7 @@ MIN_PLATEAU_AMP_MV = 0.05
 MIN_SPIKE_AMP_MV = 1.0
 # Noise gate: σ of passive Vm before stimulus; reject spikelet if |amp| < k·σ
 PRESTIM_NOISE_MS = 100.0
-NOISE_SIGMA_K = 2.0
+NOISE_SIGMA_K = 2.5
 
 OUT_SUBDIR = "Spikelet_meantrace_peak_shelf"
 DIRECTIONS = (
