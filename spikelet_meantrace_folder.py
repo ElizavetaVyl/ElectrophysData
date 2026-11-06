@@ -36,6 +36,8 @@ SPIKE_DISTANCE = 10  # samples
 BASELINE_MS = 1.0
 WINDOW_MS = 15.0
 SMOOTH_MS = 0.5
+# Subtract each snippet's pre-AP mean before averaging (time + voltage align)
+ALIGN_SNIPPETS_BY_VOLTAGE = True
 PEAK_PROMINENCE_MV = 0.025
 # Spikelet peak search: only within this many ms after active AP peak
 PEAK_SEARCH_AFTER_AP_MS = 7.0
@@ -366,8 +368,14 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
             prev = ap_starts[i - 1] if i - 1 < len(ap_starts) else np.nan
             if np.isfinite(prev) and (i_start - int(prev)) < (n_pre + n_post):
                 continue
-        snips_a.append(y_a[i_start - n_pre:i_start + n_post])
-        snips_p.append(y_p[i_start - n_pre:i_start + n_post])
+        sa = np.asarray(y_a[i_start - n_pre:i_start + n_post], dtype=float)
+        sp = np.asarray(y_p[i_start - n_pre:i_start + n_post], dtype=float)
+        if ALIGN_SNIPPETS_BY_VOLTAGE and n_pre > 0:
+            # voltage-align: subtract pre-AP mean so snippets meet near 0 at baseline
+            sa = sa - float(np.mean(sa[:n_pre]))
+            sp = sp - float(np.mean(sp[:n_pre]))
+        snips_a.append(sa)
+        snips_p.append(sp)
         used_starts.append(i_start)
         used_peaks_a.append(int(ind_peaks[i]))
         used_ap_index.append(i + 1)
@@ -382,6 +390,7 @@ def build_meantrace(abf, sweep, active_ch, passive_ch, stim_start, stim_stop, sr
         "mean_p": mean_p,
         "snips_a": snips_a,
         "snips_p": snips_p,
+        "voltage_aligned": bool(ALIGN_SNIPPETS_BY_VOLTAGE),
         "n_pre": n_pre,
         "n_post": n_post,
         "n_aligned": len(snips_p),

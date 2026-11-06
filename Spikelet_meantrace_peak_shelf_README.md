@@ -8,7 +8,7 @@ For each `.abf` × direction (`ch0→ch2`, `ch2→ch0`):
 
 1. Primary sweep = first with ≥4 APs (else 3 → 2). **1-AP sweeps are skipped** (not analyzed)
 2. Align **AP2+ only** to active AP start
-3. Average active/passive snippets (**meantrace**)
+3. Average active/passive snippets (**meantrace**): aligned in **time** to AP onset and in **voltage** (subtract each snippet’s pre-AP mean before averaging)
 4. Measure:
    - **peak** spikelet amp (local peak, prominence 0.025 mV, need drop after top)
    - **plateau** amp = mean passive in **8–15 ms** − baseline
@@ -65,6 +65,7 @@ QC marks:
 In `spikelet_meantrace_folder.py`:
 
 - `SMOOTH_MS` (default 0.5)
+- `ALIGN_SNIPPETS_BY_VOLTAGE` (default True) — subtract pre-AP mean per snippet before meantrace
 - `PEAK_PROMINENCE_MV` (default 0.025)
 - `PEAK_SEARCH_AFTER_AP_MS` (default 7.0) — spikelet peak only in this window after AP peak
 - `SHELF_DROP_FRAC` (default 0.05) — peak only if drop after max ≥ this; else shelf
