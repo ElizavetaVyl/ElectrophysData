@@ -13,6 +13,7 @@ Pipeline (as in FWHM batch cell):
 Usage:
   python compute_rin_cm_tau.py --folder PATH_TO_ABFS
   python compute_rin_cm_tau.py --file one_cell.abf --channels 0
+  python compute_rin_cm_tau.py --folder PATH --no-plot   # numbers only
 """
 
 from __future__ import annotations
@@ -33,7 +34,14 @@ def _import_deps():
         from scipy.signal import find_peaks
     except ImportError as e:
         raise SystemExit("Need scipy: pip install scipy") from e
-    return pyabf, find_peaks
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        raise SystemExit("Need matplotlib: pip install matplotlib") from e
+    return pyabf, find_peaks, plt
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +160,7 @@ def compute_rin(
     rin_abs = np.nan
     r2 = np.nan
     v_zero = np.nan
+    slope = intercept = np.nan
     if len(voltage_range_ind_list) >= 2:
         i_arr = np.asarray(currents_list, dtype=float)[voltage_range_ind_list]
         v_arr = np.asarray(voltages_list, dtype=float)[voltage_range_ind_list]
@@ -169,7 +178,12 @@ def compute_rin(
         "R2_Rin": r2,
         "V_zero_I_mV": v_zero,
         "n_IV_points": len(voltage_range_ind_list),
-        "n_sweeps_in_IV": my_sweep,  # exclusive upper bound as in notebook
+        "n_sweeps_in_IV": my_sweep,
+        "_plot_I": np.asarray(currents_list, dtype=float),
+        "_plot_V": np.asarray(voltages_list, dtype=float),
+        "_plot_fit_idx": np.asarray(voltage_range_ind_list, dtype=int),
+        "_plot_slope": slope,
+        "_plot_intercept": intercept,
     }
 
 
@@ -209,14 +223,21 @@ def compute_tau_cm(
                 trace = np.asarray(abf.sweepY[window_start:window_stop], dtype=float).copy()
                 v_pre, v_min = voltage_pre, voltage_at_stop
 
+    empty = {
+        "tau_ms": np.nan,
+        "Cm_pF": np.nan,
+        "tau_sweep": np.nan,
+        "delta_V_mV": np.nan,
+        "note": "no sweep with ΔV in search_range",
+        "_plot_trace": None,
+        "_plot_v_pre": np.nan,
+        "_plot_v_min": np.nan,
+        "_plot_v63": np.nan,
+        "_plot_fs": sampling_rate,
+    }
+
     if best_sweep is None or trace is None:
-        return {
-            "tau_ms": np.nan,
-            "Cm_pF": np.nan,
-            "tau_sweep": np.nan,
-            "delta_V_mV": np.nan,
-            "note": "no sweep with ΔV in search_range",
-        }
+        return empty
 
     v_63 = v_pre + 0.63 * (v_min - v_pre)
     tau_samples = None
@@ -226,11 +247,14 @@ def compute_tau_cm(
             break
     if tau_samples is None:
         return {
-            "tau_ms": np.nan,
-            "Cm_pF": np.nan,
+            **empty,
             "tau_sweep": best_sweep,
             "delta_V_mV": float(np.round(v_min - v_pre, 3)),
             "note": "63% level not reached",
+            "_plot_trace": trace,
+            "_plot_v_pre": v_pre,
+            "_plot_v_min": v_min,
+            "_plot_v63": v_63,
         }
 
     tau_ms = float(tau_samples / sampling_rate * 1000.0)
@@ -245,10 +269,107 @@ def compute_tau_cm(
         "tau_sweep": best_sweep,
         "delta_V_mV": float(np.round(v_min - v_pre, 3)),
         "note": "",
+        "_plot_trace": trace,
+        "_plot_v_pre": v_pre,
+        "_plot_v_min": v_min,
+        "_plot_v63": v_63,
+        "_plot_fs": sampling_rate,
     }
 
 
-def analyze_channel(abf, find_peaks, voltage_channel: int) -> dict:
+def save_check_figure(row: dict, out_path: Path, plt) -> None:
+    """IV fit + τ trace side by side (for visual QC)."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+
+    # --- IV ---
+    ax = axes[0]
+    I = row.get("_plot_I")
+    V = row.get("_plot_V")
+    fit_idx = row.get("_plot_fit_idx")
+    slope = row.get("_plot_slope")
+    intercept = row.get("_plot_intercept")
+    if I is not None and V is not None and len(I) > 0:
+        ax.scatter(I, V, color="0.55", s=28, label="all IV", zorder=2)
+        if fit_idx is not None and len(fit_idx) > 0:
+            ax.scatter(
+                I[fit_idx],
+                V[fit_idx],
+                color="C0",
+                s=36,
+                label="−85…−50 mV",
+                zorder=3,
+            )
+        if (
+            fit_idx is not None
+            and len(fit_idx) >= 2
+            and np.isfinite(slope)
+            and np.isfinite(intercept)
+        ):
+            x_fit = np.linspace(float(np.min(I[fit_idx])), float(np.max(I[fit_idx])), 100)
+            y_fit = slope * x_fit + intercept
+            ax.plot(
+                x_fit,
+                y_fit,
+                color="C3",
+                lw=1.8,
+                label=f"fit Rin_abs={row.get('Rin_abs_MOhm')} MΩ",
+            )
+        ax.axhspan(-85, -50, color="C0", alpha=0.08, zorder=0)
+    ax.set_xlabel("I (pA)")
+    ax.set_ylabel("V (mV)")
+    ax.set_title(
+        f"IV  Rin_rel={row.get('Rin_rel_MOhm')} MΩ  R²={row.get('R2_Rin')}"
+    )
+    ax.legend(fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    # --- τ ---
+    ax = axes[1]
+    trace = row.get("_plot_trace")
+    fs = row.get("_plot_fs") or row.get("sampling_Hz") or 10000
+    if trace is not None:
+        t_ms = np.arange(len(trace)) / float(fs) * 1000.0
+        ax.plot(t_ms, trace, color="0.2", lw=1.2, label=f"sweep {row.get('tau_sweep')}")
+        v63 = row.get("_plot_v63")
+        vmin = row.get("_plot_v_min")
+        if np.isfinite(v63):
+            ax.axhline(v63, color="C3", ls="--", lw=1.2, label="63% ΔV")
+        if np.isfinite(vmin):
+            ax.axhline(vmin, color="0.3", ls="--", lw=1.0, label="ΔV end")
+        tau = row.get("tau_ms")
+        if np.isfinite(tau):
+            ax.axvline(tau, color="C2", ls="--", lw=1.2, label=f"τ = {tau} ms")
+        ax.legend(fontsize=8, loc="best")
+    else:
+        ax.text(0.5, 0.5, row.get("note") or "no τ sweep", ha="center", va="center")
+    ax.set_xlabel("Time (ms)")
+    ax.set_ylabel("V (mV)")
+    ax.set_title(
+        f"τ / Cm  ΔV={row.get('delta_V_mV')} mV  Cm={row.get('Cm_pF')} pF"
+    )
+    ax.grid(True, alpha=0.3)
+
+    abf_id = row.get("abf_id") or Path(str(row.get("file", "file"))).stem
+    ch = row.get("voltage_channel")
+    fig.suptitle(f"{abf_id}  voltage ch{ch}", fontsize=11)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def _strip_plot_keys(row: dict) -> dict:
+    return {k: v for k, v in row.items() if not str(k).startswith("_plot_")}
+
+
+def analyze_channel(
+    abf,
+    find_peaks,
+    voltage_channel: int,
+    *,
+    plot_dir: Path | None,
+    plt,
+) -> dict:
     current_channel = voltage_channel + 1
     if current_channel >= int(abf.channelCount):
         return {
@@ -283,7 +404,7 @@ def analyze_channel(abf, find_peaks, voltage_channel: int) -> dict:
         int(abf.dataRate),
     )
 
-    return {
+    row = {
         "voltage_channel": voltage_channel,
         "current_channel": current_channel,
         "sampling_Hz": int(abf.dataRate),
@@ -292,8 +413,24 @@ def analyze_channel(abf, find_peaks, voltage_channel: int) -> dict:
         **tau_cm,
     }
 
+    if plot_dir is not None and "error" not in row:
+        abf_id = getattr(abf, "abfID", "abf")
+        fig_path = plot_dir / f"{abf_id}_ch{voltage_channel}_rin_tau.png"
+        save_check_figure(row, fig_path, plt)
+        row["plot_file"] = str(fig_path.name)
 
-def analyze_file(path: Path, channels: list[int], pyabf, find_peaks) -> list[dict]:
+    return row
+
+
+def analyze_file(
+    path: Path,
+    channels: list[int],
+    pyabf,
+    find_peaks,
+    *,
+    plot_dir: Path | None,
+    plt,
+) -> list[dict]:
     abf = pyabf.ABF(str(path))
     rows = []
     for ch in channels:
@@ -307,17 +444,20 @@ def analyze_file(path: Path, channels: list[int], pyabf, find_peaks) -> list[dic
                 }
             )
             continue
-        row = analyze_channel(abf, find_peaks, ch)
+        row = analyze_channel(
+            abf, find_peaks, ch, plot_dir=plot_dir, plt=plt
+        )
         row["file"] = path.name
         row["abf_id"] = abf.abfID
         rows.append(row)
         status = row.get("error") or row.get("note") or "ok"
+        plot_note = f"  plot={row.get('plot_file')}" if row.get("plot_file") else ""
         print(
             f"  {path.name}  ch{ch}: "
             f"Rin_abs={row.get('Rin_abs_MOhm', np.nan)}  "
             f"Rin_rel={row.get('Rin_rel_MOhm', np.nan)}  "
             f"τ={row.get('tau_ms', np.nan)}  "
-            f"Cm={row.get('Cm_pF', np.nan)}  [{status}]"
+            f"Cm={row.get('Cm_pF', np.nan)}  [{status}]{plot_note}"
         )
     return rows
 
@@ -338,12 +478,22 @@ def parse_args():
         default=None,
         help="Output Excel (default: <folder>/rin_cm_tau_results.xlsx)",
     )
+    p.add_argument(
+        "--plot-dir",
+        default=None,
+        help="Folder for QC plots (default: <out_dir>/rin_cm_tau_plots)",
+    )
+    p.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip saving IV/τ check figures",
+    )
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    pyabf, find_peaks = _import_deps()
+    pyabf, find_peaks, plt = _import_deps()
     channels = [int(x.strip()) for x in args.channels.split(",") if x.strip() != ""]
 
     if args.file:
@@ -375,16 +525,33 @@ def main():
     if not files:
         raise SystemExit("No .abf files found.")
 
+    plot_dir = None
+    if not args.no_plot:
+        plot_dir = Path(args.plot_dir) if args.plot_dir else out_dir / "rin_cm_tau_plots"
+
     print(f"Files: {len(files)}; channels: {channels}")
+    if plot_dir is not None:
+        print(f"QC plots → {plot_dir}")
+
     rows: list[dict] = []
     for f in files:
         try:
-            rows.extend(analyze_file(f, channels, pyabf, find_peaks))
+            rows.extend(
+                analyze_file(
+                    f,
+                    channels,
+                    pyabf,
+                    find_peaks,
+                    plot_dir=plot_dir,
+                    plt=plt,
+                )
+            )
         except Exception as e:
             print(f"  FAIL {f.name}: {e}")
             rows.append({"file": f.name, "error": str(e)})
 
-    df = pd.DataFrame(rows)
+    clean_rows = [_strip_plot_keys(r) for r in rows]
+    df = pd.DataFrame(clean_rows)
     preferred = [
         "file",
         "abf_id",
@@ -398,6 +565,7 @@ def main():
         "tau_sweep",
         "R2_Rin",
         "n_IV_points",
+        "plot_file",
         "note",
         "error",
     ]
@@ -409,6 +577,8 @@ def main():
     out_path = Path(args.out) if args.out else out_dir / "rin_cm_tau_results.xlsx"
     df.to_excel(out_path, index=False)
     print(f"\nSaved: {out_path}")
+    if plot_dir is not None:
+        print(f"Plots: {plot_dir}  (IV left, τ right — сверка как в FWHM)")
     print("Fill Excel: Rin_rel_MOhm (or Rin_abs) → Rin; Cm_pF → Cm; tau_ms → τ.")
 
 
