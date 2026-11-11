@@ -5816,8 +5816,25 @@ def directed_delay_vs_rin_recv(
     return directed_delay_vs_recv_param(df, y12, y21, "Rin_1", "Rin_2")
 
 
+def _ols_line_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Simple OLS line over x-range; None if too few finite points."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) < 3 or np.allclose(x, x[0]):
+        return None
+    slope, intercept = np.polyfit(x, y, 1)
+    x_line = np.array([float(np.min(x)), float(np.max(x))])
+    y_line = slope * x_line + intercept
+    return x_line, y_line
+
+
 def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
-    """Onset / peak delay vs receiver Rin (directed) + light-gray LOWESS trend."""
+    """
+    Onset / peak delay vs receiver Rin (directed).
+    Straight OLS line as a visual guide for the Spearman trend (ρ annotated on panel).
+    """
     need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"], "Rin_1", "Rin_2"]
     if any(c not in df.columns for c in need):
         print("Skipping delays vs Rin_recv: delay/Rin columns not found.")
@@ -5849,18 +5866,21 @@ def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
                 mark_missing=False, y_label=ylab,
                 x_label=r"$R_{in,\mathrm{recv}}$ [M$\Omega$]",
             )
-            if len(both) >= 5:
-                xs, ys = lowess_smooth(
+            if len(both) >= 3:
+                line = _ols_line_xy(
                     both["x"].to_numpy(dtype=float),
                     both["y"].to_numpy(dtype=float),
-                    frac=0.5,
                 )
-                ax.plot(
-                    xs, ys, color="0.72", lw=2.0, zorder=2, solid_capstyle="round",
-                    label="LOWESS",
-                )
+                if line is not None:
+                    ax.plot(
+                        line[0], line[1], color="0.65", lw=1.6, zorder=2,
+                        solid_capstyle="round",
+                    )
         handles = [
-            Line2D([0], [0], color="0.72", lw=2.0, label="LOWESS trend"),
+            Line2D(
+                [0], [0], color="0.65", lw=1.6,
+                label="OLS line (illustration; ρ = Spearman)",
+            ),
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         cbar = add_age_colorbar(
@@ -5874,7 +5894,7 @@ def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
             r"Onset / peak delay vs receiver $R_{in}$"
             "\n"
             r"$1\!\to\!2$: $R_{in,2}$; $2\!\to\!1$: $R_{in,1}$; "
-            r"light gray: LOWESS; "
+            r"gray line: OLS illustration (not the Spearman slope); "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -5931,17 +5951,6 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
                     vmin=vmin, max_age=max_age, mt_val=mt_val,
                     mark_missing=False, y_label=ylab, x_label=xlab,
                 )
-                if len(both) >= 5:
-                    xs, ys = lowess_smooth(
-                        both["x"].to_numpy(dtype=float),
-                        both["y"].to_numpy(dtype=float),
-                        frac=0.5,
-                    )
-                    ax.plot(xs, ys, color="0.72", lw=2.0, zorder=2)
-        handles = [
-            Line2D([0], [0], color="0.72", lw=2.0, label="LOWESS"),
-        ]
-        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         cbar = add_age_colorbar(
             fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
@@ -5954,7 +5963,6 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
             "\n"
             r"$1\!\to\!2$: cell 2; $2\!\to\!1$: cell 1; "
             r"$\tau$ [ms] $=R_{in}$ [M$\Omega$]$\cdot C_m$ [pF]$/1000$; "
-            r"light gray: LOWESS; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -6438,9 +6446,6 @@ def plot_delay_delta_vs_drin(df: pd.DataFrame, out_dir: Path):
                     x, y, c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
                     edgecolors="white", linewidths=0.35, zorder=2,
                 )
-            if len(d) >= 5:
-                xs, ys = lowess_smooth(x, y, frac=0.5)
-                ax.plot(xs, ys, color="0.72", lw=2.0, zorder=3)
             same = (x * y) > 0
             nonzero = (x != 0) & (y != 0)
             n_nz = int(nonzero.sum())
@@ -6471,10 +6476,6 @@ def plot_delay_delta_vs_drin(df: pd.DataFrame, out_dir: Path):
             ax.set_ylabel(ylabel)
             _style_pub_ax(ax)
 
-        handles = [
-            Line2D([0], [0], color="0.72", lw=2.0, label="LOWESS"),
-        ]
-        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         cbar = add_age_colorbar(
             fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
@@ -6485,7 +6486,7 @@ def plot_delay_delta_vs_drin(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Signed $\Delta$ delay vs receiver $\Delta R_{in}$"
             "\n"
-            r"shaded: same sign; both delay directions required; light gray: LOWESS; "
+            r"shaded: same sign; both delay directions required; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
