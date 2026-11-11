@@ -6232,81 +6232,9 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "36_delays_by_Rin_Tau_quartiles.png")
 
 
-def _style_marginal_ax(ax, *, which: str) -> None:
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    ax.spines["left"].set_linewidth(0.7)
-    ax.spines["bottom"].set_linewidth(0.7)
-    ax.tick_params(labelsize=7, length=2.5, width=0.6)
-    if which == "top":
-        ax.tick_params(labelbottom=False)
-        ax.set_yticks([])
-        ax.set_ylabel("")
-    else:
-        ax.tick_params(labelleft=False)
-        ax.set_xticks([])
-        ax.set_xlabel("")
-
-
-def _draw_marginal_distributions(
-    ax_top,
-    ax_right,
-    x: np.ndarray,
-    y: np.ndarray,
-    *,
-    xlim: tuple[float, float],
-    ylim: tuple[float, float],
-) -> None:
-    """Hist + thin KDE on top (x=onset) and right (y=peak)."""
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    m = np.isfinite(x) & np.isfinite(y)
-    x, y = x[m], y[m]
-    if len(x) == 0:
-        return
-    n_bins = int(np.clip(round(np.sqrt(len(x))), 5, 14))
-    ax_top.hist(
-        x,
-        bins=n_bins,
-        range=xlim,
-        density=True,
-        color="0.62",
-        edgecolor="white",
-        linewidth=0.6,
-        alpha=0.9,
-    )
-    ax_right.hist(
-        y,
-        bins=n_bins,
-        range=ylim,
-        density=True,
-        orientation="horizontal",
-        color="0.62",
-        edgecolor="white",
-        linewidth=0.6,
-        alpha=0.9,
-    )
-    if len(x) >= 5:
-        try:
-            xs = np.linspace(xlim[0], xlim[1], 200)
-            kde_x = stats.gaussian_kde(x)
-            ax_top.plot(xs, kde_x(xs), color="crimson", lw=1.1, zorder=3)
-        except Exception:
-            pass
-    if len(y) >= 5:
-        try:
-            ys = np.linspace(ylim[0], ylim[1], 200)
-            kde_y = stats.gaussian_kde(y)
-            ax_right.plot(kde_y(ys), ys, color="crimson", lw=1.1, zorder=3)
-        except Exception:
-            pass
-    ax_top.set_xlim(*xlim)
-    ax_right.set_ylim(*ylim)
-    _style_marginal_ax(ax_top, which="top")
-    _style_marginal_ax(ax_right, which="right")
-
-
-def _onset_peak_panel_limits(x: np.ndarray, y: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
+def _onset_peak_panel_limits(
+    x: np.ndarray, y: np.ndarray
+) -> tuple[tuple[float, float], tuple[float, float]]:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     m = np.isfinite(x) & np.isfinite(y)
@@ -6321,8 +6249,124 @@ def _onset_peak_panel_limits(x: np.ndarray, y: np.ndarray) -> tuple[tuple[float,
     )
 
 
+def _add_projections_and_axis_densities(
+    ax,
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    dens_frac: float = 0.12,
+) -> None:
+    """
+    Compact on-axis decorations:
+      - light projections of each point onto bottom/left axes
+      - small hist+KDE densities drawn along those same axes
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) == 0:
+        return
+
+    xlim, ylim = _onset_peak_panel_limits(x, y)
+    xmin, xmax = xlim
+    ymin, ymax = ylim
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    xspan = max(xmax - xmin, 1e-6)
+    yspan = max(ymax - ymin, 1e-6)
+
+    # projections
+    for xi, yi in zip(x, y):
+        ax.plot(
+            [xi, xi],
+            [ymin, yi],
+            color="0.55",
+            lw=0.4,
+            alpha=0.16,
+            solid_capstyle="butt",
+            zorder=0,
+        )
+        ax.plot(
+            [xmin, xi],
+            [yi, yi],
+            color="0.55",
+            lw=0.4,
+            alpha=0.16,
+            solid_capstyle="butt",
+            zorder=0,
+        )
+
+    n_bins = int(np.clip(round(np.sqrt(len(x))), 5, 12))
+    # bottom density (onset)
+    counts_x, edges_x = np.histogram(x, bins=n_bins, range=xlim, density=True)
+    max_cx = float(np.max(counts_x)) if len(counts_x) else 1.0
+    scale_y = dens_frac * yspan / max(max_cx, 1e-12)
+    lefts = edges_x[:-1]
+    widths = np.diff(edges_x)
+    ax.bar(
+        lefts,
+        counts_x * scale_y,
+        width=widths,
+        bottom=ymin,
+        align="edge",
+        color="0.55",
+        alpha=0.35,
+        edgecolor="none",
+        zorder=1,
+        clip_on=False,
+    )
+    if len(x) >= 5:
+        try:
+            xs = np.linspace(xmin, xmax, 180)
+            dens = stats.gaussian_kde(x)(xs)
+            ax.plot(
+                xs,
+                ymin + dens * scale_y,
+                color="crimson",
+                lw=0.9,
+                alpha=0.9,
+                zorder=2,
+            )
+        except Exception:
+            pass
+
+    # left density (peak)
+    counts_y, edges_y = np.histogram(y, bins=n_bins, range=ylim, density=True)
+    max_cy = float(np.max(counts_y)) if len(counts_y) else 1.0
+    scale_x = dens_frac * xspan / max(max_cy, 1e-12)
+    bottoms = edges_y[:-1]
+    heights = np.diff(edges_y)
+    ax.barh(
+        bottoms,
+        counts_y * scale_x,
+        height=heights,
+        left=xmin,
+        align="edge",
+        color="0.55",
+        alpha=0.35,
+        edgecolor="none",
+        zorder=1,
+        clip_on=False,
+    )
+    if len(y) >= 5:
+        try:
+            ys = np.linspace(ymin, ymax, 180)
+            dens = stats.gaussian_kde(y)(ys)
+            ax.plot(
+                xmin + dens * scale_x,
+                ys,
+                color="crimson",
+                lw=0.9,
+                alpha=0.9,
+                zorder=2,
+            )
+        except Exception:
+            pass
+
+
 def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
-    """Onset delay vs peak delay (directed + pair mean) with marginal distributions."""
+    """Onset delay vs peak delay (directed + pair mean): projections + compact on-axis dens."""
     need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
     if any(c not in df.columns for c in need):
         print("Skipping onset vs peak: delay columns not found.")
@@ -6335,17 +6379,6 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
     both, _ = directed_xy(sub, on12, on21, pk12, pk21)
     print(f"\nOnset vs peak delay: directed n={len(both)}")
 
-    pair_ok = (
-        "DelayOnset_pair_mean" in sub.columns
-        and "DelayPeak_pair_mean" in sub.columns
-    )
-    d_pair = None
-    if pair_ok:
-        d_pair = sub[
-            sub["DelayOnset_pair_mean"].notna() & sub["DelayPeak_pair_mean"].notna()
-        ].copy()
-        print(f"  pair mean n={len(d_pair)}")
-
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -6353,92 +6386,67 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig = plt.figure(figsize=(11.2, 5.4))
-        outer = fig.add_gridspec(
-            1, 2, width_ratios=[1.0, 1.0], wspace=0.32,
-            left=0.07, right=0.88, top=0.82, bottom=0.12,
-        )
-        main_axes = []
+        fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.6), constrained_layout=True)
 
-        # --- directed ---
-        g0 = outer[0].subgridspec(
-            2, 2, width_ratios=[4.0, 1.05], height_ratios=[1.05, 4.0],
-            wspace=0.04, hspace=0.04,
-        )
-        ax_top0 = fig.add_subplot(g0[0, 0])
-        ax0 = fig.add_subplot(g0[1, 0], sharex=ax_top0)
-        ax_right0 = fig.add_subplot(g0[1, 1], sharey=ax0)
-        main_axes.append(ax0)
-
+        ax = axes[0]
         _scatter_directed_with_missing_rug(
-            ax0, both, pd.DataFrame(),
-            vmin=vmin, max_age=max_age, mt_val=mt_val,
+            ax,
+            both,
+            pd.DataFrame(),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
             mark_missing=False,
             y_label=PARAM_YLABELS["DelayPeak"],
             x_label=PARAM_YLABELS["DelayOnset"],
         )
         if len(both):
-            xlim0, ylim0 = _onset_peak_panel_limits(
+            _add_projections_and_axis_densities(
+                ax,
                 both["x"].to_numpy(dtype=float),
                 both["y"].to_numpy(dtype=float),
             )
-            ax0.set_xlim(*xlim0)
-            ax0.set_ylim(*ylim0)
-            _draw_marginal_distributions(
-                ax_top0,
-                ax_right0,
-                both["x"].to_numpy(dtype=float),
-                both["y"].to_numpy(dtype=float),
-                xlim=xlim0,
-                ylim=ylim0,
-            )
-        else:
-            ax_top0.set_visible(False)
-            ax_right0.set_visible(False)
-        ax_top0.set_title(r"Directed $\{12,21\}$", fontsize=10, color="0.25", pad=4)
+        ax.set_title(r"Directed $\{12,21\}$", fontsize=10, color="0.25")
 
-        # --- pair mean ---
-        g1 = outer[1].subgridspec(
-            2, 2, width_ratios=[4.0, 1.05], height_ratios=[1.05, 4.0],
-            wspace=0.04, hspace=0.04,
-        )
-        ax_top1 = fig.add_subplot(g1[0, 0])
-        ax1 = fig.add_subplot(g1[1, 0], sharex=ax_top1)
-        ax_right1 = fig.add_subplot(g1[1, 1], sharey=ax1)
-        main_axes.append(ax1)
-
-        if d_pair is not None and len(d_pair):
+        ax = axes[1]
+        if (
+            "DelayOnset_pair_mean" in sub.columns
+            and "DelayPeak_pair_mean" in sub.columns
+        ):
+            d = sub[
+                sub["DelayOnset_pair_mean"].notna()
+                & sub["DelayPeak_pair_mean"].notna()
+            ].copy()
+            print(f"  pair mean n={len(d)}")
             _scatter_pair_mean_panel(
-                ax1, d_pair,
-                x_mean=d_pair["DelayOnset_pair_mean"].to_numpy(dtype=float),
-                y_mean=d_pair["DelayPeak_pair_mean"].to_numpy(dtype=float),
-                vmin=vmin, max_age=max_age, mt_val=mt_val,
+                ax,
+                d,
+                x_mean=d["DelayOnset_pair_mean"].to_numpy(dtype=float),
+                y_mean=d["DelayPeak_pair_mean"].to_numpy(dtype=float),
+                vmin=vmin,
+                max_age=max_age,
+                mt_val=mt_val,
                 xlabel=PARAM_YLABELS["DelayOnset"] + r" pair mean",
                 ylabel=PARAM_YLABELS["DelayPeak"] + r" pair mean",
             )
-            xlim1, ylim1 = _onset_peak_panel_limits(
-                d_pair["DelayOnset_pair_mean"].to_numpy(dtype=float),
-                d_pair["DelayPeak_pair_mean"].to_numpy(dtype=float),
-            )
-            ax1.set_xlim(*xlim1)
-            ax1.set_ylim(*ylim1)
-            _draw_marginal_distributions(
-                ax_top1,
-                ax_right1,
-                d_pair["DelayOnset_pair_mean"].to_numpy(dtype=float),
-                d_pair["DelayPeak_pair_mean"].to_numpy(dtype=float),
-                xlim=xlim1,
-                ylim=ylim1,
-            )
+            if len(d):
+                _add_projections_and_axis_densities(
+                    ax,
+                    d["DelayOnset_pair_mean"].to_numpy(dtype=float),
+                    d["DelayPeak_pair_mean"].to_numpy(dtype=float),
+                )
         else:
-            ax1.set_visible(False)
-            ax_top1.set_visible(False)
-            ax_right1.set_visible(False)
-        ax_top1.set_title(r"Pair mean (both sides)", fontsize=10, color="0.25", pad=4)
+            ax.set_visible(False)
+        ax.set_title(r"Pair mean (both sides)", fontsize=10, color="0.25")
 
         cbar = add_age_colorbar(
-            fig, main_axes, vmin=vmin, max_age=max_age, mt_val=mt_val,
-            age_ticks=age_ticks, has_mt=has_mt,
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
         )
         cbar.outline.set_linewidth(0.6)
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
@@ -6446,11 +6454,10 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Onset delay vs peak delay"
             "\n"
-            r"margins: delay distributions (hist + KDE); "
+            r"projections + compact densities on axes; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
-            y=0.98,
         )
         savefig(fig, out_dir, "29_delay_onset_vs_peak.png")
 
