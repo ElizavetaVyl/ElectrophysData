@@ -663,9 +663,13 @@ def _draw_width_bin_panel(
     edge_kind: str,
     seed_key: str,
     y_lim: tuple[float, float] | None = None,
+    connect_means: bool = False,
+    spearman_xy: tuple[np.ndarray, np.ndarray] | None = None,
 ):
     """Jittered points + mean±SEM + median; light KW on bins with n≥3 only."""
     n_bins = len(meta)
+    mean_xs: list[float] = []
+    mean_ys: list[float] = []
     for i, ((name, lo, hi, _n), vals) in enumerate(zip(meta, samples)):
         if len(vals) == 0:
             continue
@@ -683,9 +687,10 @@ def _draw_width_bin_panel(
             linewidths=0.35,
             zorder=2,
         )
+        mu = float(np.mean(vals))
         ax.errorbar(
             [xpos],
-            [float(np.mean(vals))],
+            [mu],
             yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
             fmt="o",
             color="crimson",
@@ -701,23 +706,48 @@ def _draw_width_bin_panel(
             markersize=5,
             zorder=4,
         )
+        mean_xs.append(float(xpos))
+        mean_ys.append(mu)
+
+    if connect_means and len(mean_xs) >= 2:
+        ax.plot(
+            mean_xs,
+            mean_ys,
+            color="crimson",
+            lw=1.0,
+            alpha=0.85,
+            zorder=2.5,
+        )
+
+    stats_bits: list[str] = []
+    if spearman_xy is not None:
+        sx, sy = spearman_xy
+        sx = np.asarray(sx, dtype=float)
+        sy = np.asarray(sy, dtype=float)
+        m = np.isfinite(sx) & np.isfinite(sy)
+        if int(m.sum()) >= 3:
+            rho, p_sp = stats.spearmanr(sx[m], sy[m])
+            stats_bits.append(f"Spearman ρ={rho:.2f}\n{format_p(p_sp)}\n$n$={int(m.sum())}")
 
     nonempty = [s for s in samples if len(s) >= 3]
     if len(nonempty) >= 2:
         try:
             _h, p_kw = stats.kruskal(*nonempty)
-            ax.text(
-                0.98,
-                0.96,
-                f"KW {format_p(p_kw)}\n(bins n≥3)",
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                color="0.35",
-            )
+            stats_bits.append(f"KW {format_p(p_kw)}\n(bins n≥3)")
         except ValueError:
             pass
+
+    if stats_bits:
+        ax.text(
+            0.98,
+            0.96,
+            "\n".join(stats_bits),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=7.5,
+            color="0.35",
+        )
 
     tick_labels = []
     for _name, lo, hi, n in meta:
@@ -3934,6 +3964,7 @@ def _scatter_pair_mean_panel(
     mt_val: float,
     xlabel: str,
     ylabel: str,
+    thin_trend: bool = False,
 ):
     m = np.isfinite(x_mean) & np.isfinite(y_mean)
     d = sub.loc[m]
@@ -3947,6 +3978,17 @@ def _scatter_pair_mean_panel(
         x_mean[m], y_mean[m], c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
         edgecolors="white", linewidths=0.35, zorder=2,
     )
+    if thin_trend:
+        line = _ols_line_xy(x_mean[m], y_mean[m])
+        if line is not None:
+            ax.plot(
+                line[0],
+                line[1],
+                color="0.25",
+                lw=0.8,
+                alpha=0.85,
+                zorder=1.5,
+            )
     if int(m.sum()) >= 3:
         rho, p = stats.spearmanr(x_mean[m], y_mean[m])
         ax.text(
@@ -4042,6 +4084,7 @@ def plot_cca_vs_cc_gj(df: pd.DataFrame, out_dir: Path):
                 axes[0, c], sub, x_mean=x_mean, y_mean=y_both,
                 vmin=vmin, max_age=max_age, mt_val=mt_val,
                 xlabel=xlab + r" pair mean", ylabel=r"$CC_a$ pair mean (both sides)",
+                thin_trend=True,
             )
             print(
                 f"  both-only vs {mean_col}: n="
@@ -4052,6 +4095,7 @@ def plot_cca_vs_cc_gj(df: pd.DataFrame, out_dir: Path):
                 vmin=vmin, max_age=max_age, mt_val=mt_val,
                 xlabel=xlab + r" pair mean",
                 ylabel=r"$CC_a$ mean (missing→0)",
+                thin_trend=True,
             )
             print(
                 f"  zero-fill vs {mean_col}: n="
@@ -4070,6 +4114,7 @@ def plot_cca_vs_cc_gj(df: pd.DataFrame, out_dir: Path):
             r"$CC_a$ vs $CC$ / $G_j$ — pair means"
             "\n"
             r"top: mean only if both $CC_a$; bottom: missing side = 0; "
+            r"thin line: OLS guide; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -6059,15 +6104,27 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
                     ylabel=ylab,
                     edge_kind=edge_kind,
                     seed_key=f"36|{ylab}|{xlab}",
+                    connect_means=True,
+                    spearman_xy=(
+                        long["x"].to_numpy(dtype=float),
+                        long["y"].to_numpy(dtype=float),
+                    ),
                 )
                 ax.set_xlabel(rf"{xlab} bin [{unit}] (width={width:g})")
                 if r == 0:
                     ax.set_title(xlab, fontsize=10, color="0.25")
+                # console summary with continuous Spearman
+                x_all = long["x"].to_numpy(dtype=float)
+                y_all = long["y"].to_numpy(dtype=float)
+                m_sp = np.isfinite(x_all) & np.isfinite(y_all)
+                sp_txt = ""
+                if int(m_sp.sum()) >= 3:
+                    rho, p_sp = stats.spearmanr(x_all[m_sp], y_all[m_sp])
+                    sp_txt = f"; Spearman ρ={rho:.2f} {format_p(p_sp)}"
                 print(
                     f"  {ylab} vs {xlab}: "
-                    + ", ".join(
-                        f"{name} n={n}" for name, _lo, _hi, n in meta
-                    )
+                    + ", ".join(f"{name} n={n}" for name, _lo, _hi, n in meta)
+                    + sp_txt
                 )
 
         handles = [
@@ -6099,11 +6156,51 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             rf"directed; equal intervals on $x$ "
             rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms; "
             r"empty bins omitted); "
+            r"Spearman on continuous $x$; KW across bins; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "36_delays_by_Rin_Tau_quartiles.png")
+
+
+def _add_axis_projections(ax, x: np.ndarray, y: np.ndarray) -> None:
+    """
+    Light projections of each point onto the bottom (x) and left (y) axes,
+    plus denser rug ticks — shows 1D spread without an identity diagonal.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) == 0:
+        return
+    xpad = max((float(np.max(x)) - float(np.min(x))) * 0.08, 0.05)
+    ypad = max((float(np.max(y)) - float(np.min(y))) * 0.08, 0.05)
+    xmin, xmax = float(np.min(x)) - xpad, float(np.max(x)) + xpad
+    ymin, ymax = float(np.min(y)) - ypad, float(np.max(y)) + ypad
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    for xi, yi in zip(x, y):
+        ax.plot(
+            [xi, xi], [ymin, yi],
+            color="0.55", lw=0.45, alpha=0.18, solid_capstyle="butt", zorder=0,
+        )
+        ax.plot(
+            [xmin, xi], [yi, yi],
+            color="0.55", lw=0.45, alpha=0.18, solid_capstyle="butt", zorder=0,
+        )
+    # rug ticks on the axes
+    rug = 0.012 * (ymax - ymin)
+    ax.plot(
+        x, np.full_like(x, ymin) + rug * 0.15,
+        "|", color="0.35", markersize=6, alpha=0.55, zorder=1,
+    )
+    rug_x = 0.012 * (xmax - xmin)
+    ax.plot(
+        np.full_like(y, xmin) + rug_x * 0.15, y,
+        "_", color="0.35", markersize=6, alpha=0.55, zorder=1,
+    )
 
 
 def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
@@ -6136,12 +6233,11 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
             x_label=PARAM_YLABELS["DelayOnset"],
         )
         if len(both):
-            lo = float(np.nanmin([both["x"].min(), both["y"].min()]))
-            hi = float(np.nanmax([both["x"].max(), both["y"].max()]))
-            pad = max((hi - lo) * 0.08, 0.05)
-            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="0.35", ls="--", lw=0.9, zorder=1)
-            ax.set_xlim(lo - pad, hi + pad)
-            ax.set_ylim(lo - pad, hi + pad)
+            _add_axis_projections(
+                ax,
+                both["x"].to_numpy(dtype=float),
+                both["y"].to_numpy(dtype=float),
+            )
         ax.set_title(r"Directed $\{12,21\}$", fontsize=10, color="0.25")
 
         ax = axes[1]
@@ -6162,19 +6258,11 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
                 ylabel=PARAM_YLABELS["DelayPeak"] + r" pair mean",
             )
             if len(d):
-                lo = float(np.nanmin(
-                    [d["DelayOnset_pair_mean"].min(), d["DelayPeak_pair_mean"].min()]
-                ))
-                hi = float(np.nanmax(
-                    [d["DelayOnset_pair_mean"].max(), d["DelayPeak_pair_mean"].max()]
-                ))
-                pad = max((hi - lo) * 0.08, 0.05)
-                ax.plot(
-                    [lo - pad, hi + pad], [lo - pad, hi + pad],
-                    color="0.35", ls="--", lw=0.9, zorder=1,
+                _add_axis_projections(
+                    ax,
+                    d["DelayOnset_pair_mean"].to_numpy(dtype=float),
+                    d["DelayPeak_pair_mean"].to_numpy(dtype=float),
                 )
-                ax.set_xlim(lo - pad, hi + pad)
-                ax.set_ylim(lo - pad, hi + pad)
         else:
             ax.set_visible(False)
         ax.set_title(r"Pair mean (both sides)", fontsize=10, color="0.25")
@@ -6189,7 +6277,7 @@ def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Onset delay vs peak delay"
             "\n"
-            r"dashed: identity; "
+            r"light lines: projections onto axes (spread); "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
