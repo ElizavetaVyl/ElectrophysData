@@ -402,6 +402,27 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
         df["has_cca_any"] = False
         df["has_cca_both"] = False
         df["cca_modality"] = "none"
+
+    # Membrane time constant approximation: τ ≈ Rin × Cm
+    # Units in this Excel: Rin [MΩ], Cm [pF] → τ [ms] = Rin × Cm / 1000
+    # (1 MΩ·pF = 10^6 Ω × 10^-12 F = 10^-6 s = 0.001 ms)
+    if "Rin_1" in df.columns and "Cm_1" in df.columns:
+        df["Tau_1"] = np.where(
+            df["Rin_1"].notna() & df["Cm_1"].notna(),
+            df["Rin_1"] * df["Cm_1"] / 1000.0,
+            np.nan,
+        )
+    if "Rin_2" in df.columns and "Cm_2" in df.columns:
+        df["Tau_2"] = np.where(
+            df["Rin_2"].notna() & df["Cm_2"].notna(),
+            df["Rin_2"] * df["Cm_2"] / 1000.0,
+            np.nan,
+        )
+    if "Tau_1" in df.columns and "Tau_2" in df.columns:
+        both_tau = df["Tau_1"].notna() & df["Tau_2"].notna()
+        df["Tau_pair_mean"] = np.where(
+            both_tau, (df["Tau_1"] + df["Tau_2"]) / 2.0, np.nan
+        )
     return df.reset_index(drop=True)
 
 
@@ -5763,12 +5784,15 @@ def plot_cca_extended_figures(df: pd.DataFrame, out_dir: Path):
     plot_ai_cca(df, out_dir)
 
 
-def directed_delay_vs_rin_recv(
-    df: pd.DataFrame, y12: str, y21: str
+def directed_delay_vs_recv_param(
+    df: pd.DataFrame, y12: str, y21: str, x1: str, x2: str
 ) -> pd.DataFrame:
-    """Directed delay vs receiver Rin (1→2: Rin_2; 2→1: Rin_1)."""
+    """
+    Directed delay vs a receiver-side cell parameter.
+    1→2 uses x2; 2→1 uses x1 (receiver of that direction).
+    """
     rows = []
-    for yc, xc, side in ((y12, "Rin_2", "12"), (y21, "Rin_1", "21")):
+    for yc, xc, side in ((y12, x2, "12"), (y21, x1, "21")):
         if yc not in df.columns or xc not in df.columns:
             continue
         for _, r in df.iterrows():
@@ -5783,6 +5807,13 @@ def directed_delay_vs_rin_recv(
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def directed_delay_vs_rin_recv(
+    df: pd.DataFrame, y12: str, y21: str
+) -> pd.DataFrame:
+    """Directed delay vs receiver Rin (1→2: Rin_2; 2→1: Rin_1)."""
+    return directed_delay_vs_recv_param(df, y12, y21, "Rin_1", "Rin_2")
 
 
 def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
@@ -5849,6 +5880,86 @@ def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
             color="0.15",
         )
         savefig(fig, out_dir, "28_delays_vs_Rin_receiver.png")
+
+
+def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
+    """
+    Onset / peak delay vs receiver Cm and vs receiver τ.
+    τ_cell ≈ Rin × Cm; with Rin [MΩ], Cm [pF]: τ [ms] = Rin·Cm/1000.
+    """
+    need = [
+        *PARAM_DIRS["DelayOnset"],
+        *PARAM_DIRS["DelayPeak"],
+        "Cm_1",
+        "Cm_2",
+        "Tau_1",
+        "Tau_2",
+    ]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays vs Cm/τ: need delay, Cm, and Tau columns.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    # rows = delay type; cols = Cm_recv, Tau_recv
+    row_specs = [
+        (on12, on21, PARAM_YLABELS["DelayOnset"]),
+        (pk12, pk21, PARAM_YLABELS["DelayPeak"]),
+    ]
+    col_specs = [
+        ("Cm_1", "Cm_2", r"$C_{m,\mathrm{recv}}$ [pF]"),
+        ("Tau_1", "Tau_2", r"$\tau_{\mathrm{recv}}\approx R_{in}C_m$ [ms]"),
+    ]
+    print("\nDelays vs Cm_recv / τ_recv:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.2), constrained_layout=True)
+        for r, (y12, y21, ylab) in enumerate(row_specs):
+            for c, (x1, x2, xlab) in enumerate(col_specs):
+                ax = axes[r, c]
+                both = directed_delay_vs_recv_param(sub, y12, y21, x1, x2)
+                print(f"  {ylab} vs {xlab}: n={len(both)}")
+                _scatter_directed_with_missing_rug(
+                    ax, both, pd.DataFrame(),
+                    vmin=vmin, max_age=max_age, mt_val=mt_val,
+                    mark_missing=False, y_label=ylab, x_label=xlab,
+                )
+                if len(both) >= 5:
+                    xs, ys = lowess_smooth(
+                        both["x"].to_numpy(dtype=float),
+                        both["y"].to_numpy(dtype=float),
+                        frac=0.5,
+                    )
+                    ax.plot(xs, ys, color="0.72", lw=2.0, zorder=2)
+        handles = [
+            Line2D([0], [0], color="0.72", lw=2.0, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Onset / peak delay vs receiver $C_m$ and $\tau$"
+            "\n"
+            r"$1\!\to\!2$: cell 2; $2\!\to\!1$: cell 1; "
+            r"$\tau$ [ms] $=R_{in}$ [M$\Omega$]$\cdot C_m$ [pF]$/1000$; "
+            r"light gray: LOWESS; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "35_delays_vs_Cm_Tau_receiver.png")
 
 
 def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
@@ -6790,6 +6901,12 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "label": "34  Δ peak/onset delay vs ΔRin",
             "outputs": ["34_dPeak_dOnset_vs_dRin.png"],
             "run": lambda: plot_delay_delta_vs_drin(df, out_dir),
+        },
+        {
+            "id": "35",
+            "label": "35  Delays vs Cm_recv and τ_recv",
+            "outputs": ["35_delays_vs_Cm_Tau_receiver.png"],
+            "run": lambda: plot_delays_vs_cm_tau_receiver(df, out_dir),
         },
     ]
 
