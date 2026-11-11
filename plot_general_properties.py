@@ -6172,7 +6172,7 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
                     ylabel=ylab,
                     edge_kind=edge_kind,
                     seed_key=f"36|{ylab}|{xlab}",
-                    connect_means=True,
+                    connect_means=False,
                     dunn_brackets=True,
                 )
                 ax.set_xlabel(rf"{xlab} bin [{unit}] (width={width:g})")
