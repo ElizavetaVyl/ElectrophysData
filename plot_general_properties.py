@@ -4148,6 +4148,429 @@ def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
     plot_delay_spread(df, out_dir)
 
 
+def _cca_columns_present(df: pd.DataFrame) -> bool:
+    c1, c2 = PARAM_DIRS["CCa"]
+    return c1 in df.columns and c2 in df.columns
+
+
+def directed_cca_vs_rin_recv(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    CCa vs receiver Rin:
+      1→2: CCa_12 vs Rin_2
+      2→1: CCa_21 vs Rin_1
+    Returns (both, missing_cca) with x=Rin_recv, y=CCa.
+    """
+    cca12, cca21 = PARAM_DIRS["CCa"]
+    rows_both, rows_miss = [], []
+    specs = (
+        (cca12, "Rin_2", "12"),
+        (cca21, "Rin_1", "21"),
+    )
+    for yc, xc, side in specs:
+        if yc not in df.columns or xc not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            xv, yv = r[xc], r[yc]
+            base = {
+                "x": xv,
+                "y": yv,
+                "age_num": r.get("age_num", np.nan),
+                "is_mt": bool(r.get("is_mt", False)),
+                "side": side,
+            }
+            if pd.notna(xv) and pd.notna(yv):
+                rows_both.append(base)
+            elif pd.notna(xv) and pd.isna(yv):
+                rows_miss.append(base)
+    return pd.DataFrame(rows_both), pd.DataFrame(rows_miss)
+
+
+def _coverage_grouped_bars(
+    ax,
+    *,
+    labels: list[str],
+    n_pairs: list[int],
+    n_pairs_cca: list[int],
+    n_dir: list[int] | None = None,
+    n_dir_cca: list[int] | None = None,
+    xlabel: str,
+):
+    """Grouped bars: pairs vs pairs with CCa; optional directed counts as text."""
+    x = np.arange(len(labels), dtype=float)
+    w = 0.36
+    ax.bar(
+        x - w / 2,
+        n_pairs,
+        w,
+        color="0.72",
+        edgecolor="white",
+        label="pairs in bin",
+        zorder=2,
+    )
+    ax.bar(
+        x + w / 2,
+        n_pairs_cca,
+        w,
+        color="0.28",
+        edgecolor="white",
+        label=r"pairs with $CC_a$",
+        zorder=2,
+    )
+    y_top = max(n_pairs + n_pairs_cca + [1])
+    for i, (a, b) in enumerate(zip(n_pairs, n_pairs_cca)):
+        pct = (100.0 * b / a) if a else 0.0
+        ax.text(
+            i,
+            max(a, b) + 0.04 * y_top,
+            f"{pct:.0f}%",
+            ha="center",
+            va="bottom",
+            fontsize=7.5,
+            color="0.25",
+        )
+        if n_dir is not None and n_dir_cca is not None:
+            ax.annotate(
+                f"dir {n_dir_cca[i]}/{n_dir[i]}",
+                xy=(i, 0),
+                xytext=(0, -28),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=6.5,
+                color="0.4",
+            )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=7 if len(labels) > 6 else 8)
+    if len(labels) > 6:
+        for lab in ax.get_xticklabels():
+            lab.set_rotation(35)
+    ax.set_ylabel("Count")
+    ax.set_xlabel(xlabel)
+    ax.set_ylim(0, y_top * 1.22)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    _style_pub_ax(ax)
+
+
+def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
+    """Directed CCa vs warped age; large points = pair mean when both sides present."""
+    if not _cca_columns_present(df):
+        print("Skipping CCa vs age: amp_ratio columns not found.")
+        return
+    sub = analysis_pool(df)
+    c1, c2 = PARAM_DIRS["CCa"]
+    sub = sub[sub[c1].notna() | sub[c2].notna()].copy()
+    if len(sub) == 0:
+        print("Skipping CCa vs age: no CCa values.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+        colors, _, _ = age_colors(
+            sub["age_num"].to_numpy(), sub["is_mt"].to_numpy(), vmin, max_age, mt_val
+        )
+        xw = sub["x_warp"].to_numpy(dtype=float)
+        y1 = sub[c1].to_numpy(dtype=float)
+        y2 = sub[c2].to_numpy(dtype=float)
+        ym = (
+            sub["CCa_pair_mean"].to_numpy(dtype=float)
+            if "CCa_pair_mean" in sub.columns
+            else np.full(len(sub), np.nan)
+        )
+        for xi, a, b, col in zip(xw, y1, y2, colors):
+            if np.isfinite(a) and np.isfinite(b):
+                ax.plot([xi, xi], [a, b], color=col, lw=0.6, alpha=0.35, zorder=1)
+            for yv in (a, b):
+                if np.isfinite(yv):
+                    ax.scatter(
+                        [xi], [yv], c=[col], s=POINT_SIZE * 0.55, alpha=0.5,
+                        edgecolors="white", linewidths=0.3, zorder=2,
+                    )
+        m_ok = np.isfinite(ym)
+        if m_ok.any():
+            ax.scatter(
+                xw[m_ok], ym[m_ok], c=np.asarray(colors)[m_ok],
+                s=POINT_SIZE * 1.15, alpha=0.9, edgecolors="0.15",
+                linewidths=0.5, zorder=3,
+            )
+        # Spearman on directed values pooled
+        xs, ys, ages = [], [], []
+        for xi, a, b, age, mt in zip(
+            xw, y1, y2, sub["age_num"].to_numpy(), sub["is_mt"].to_numpy()
+        ):
+            ar = mt_val if mt else age
+            for yv in (a, b):
+                if np.isfinite(yv) and np.isfinite(ar):
+                    xs.append(xi)
+                    ys.append(yv)
+                    ages.append(ar)
+        if len(ys) >= 3:
+            rho, p = stats.spearmanr(ages, ys)
+            ax.text(
+                0.04, 0.96,
+                f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(ys)} (dir.)",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            print(f"\nCCa vs age: ρ={rho:.3f}, {format_p(p)}, n_dir={len(ys)}")
+        ax.set_xlabel("Age [postnatal days]")
+        ax.set_ylabel(PARAM_YLABELS["CCa"])
+        _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+        _style_pub_ax(ax)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.55",
+                markeredgecolor="white", markersize=5, label=r"directed $CC_a$",
+            ),
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.35",
+                markeredgecolor="0.15", markersize=7, label=r"pair mean",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig, [ax], vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ vs age"
+            "\n"
+            r"small: directed; large: pair mean (both sides); "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "19_CCa_vs_age.png")
+
+
+def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
+    """
+    Coverage of measurable CCa:
+      - by age group (pairs in bin vs pairs with any CCa)
+      - by Distance bins (20 µm)
+      - by directed-CC / pair-mean-CC bins (width 0.05)
+    Also annotate directed counts (directions with CC vs with CCa).
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa coverage: amp_ratio columns not found.")
+        return
+    sub = analysis_pool(df)
+    cca12, cca21 = PARAM_DIRS["CCa"]
+    print("\nCCa coverage:")
+
+    # --- age groups ---
+    age_labels, age_n, age_n_cca, age_nd, age_nd_cca = [], [], [], [], []
+    for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+        mask = _age_bin_mask(sub, lo, hi, include_mt)
+        g = sub.loc[mask]
+        age_labels.append(label)
+        age_n.append(int(len(g)))
+        age_n_cca.append(int(g["has_cca_any"].sum()) if "has_cca_any" in g.columns else 0)
+        # directed: each side counted if that side's CC exists (always in pool with Gj; use CC)
+        n_dir = int(g["CC_12"].notna().sum() + g["CC_21"].notna().sum()) if "CC_12" in g.columns else 0
+        n_dir_cca = int(g[cca12].notna().sum() + g[cca21].notna().sum())
+        age_nd.append(n_dir)
+        age_nd_cca.append(n_dir_cca)
+        print(
+            f"  age {label}: pairs {age_n[-1]}, with CCa {age_n_cca[-1]}; "
+            f"dir {n_dir_cca}/{n_dir}"
+        )
+
+    # --- distance bins ---
+    dist_labels, dist_n, dist_n_cca, dist_nd, dist_nd_cca = [], [], [], [], []
+    if "Distance_um" in sub.columns and sub["Distance_um"].notna().any():
+        dsub = sub[sub["Distance_um"].notna()].copy()
+        bins, meta = assign_width_bins(dsub["Distance_um"], DISTANCE_BIN_WIDTH)
+        dsub["_bin"] = bins
+        for name, lo, hi, _n in meta:
+            g = dsub.loc[dsub["_bin"] == name]
+            dist_labels.append(f"{lo:.0f}–{hi:.0f}")
+            dist_n.append(int(len(g)))
+            dist_n_cca.append(int(g["has_cca_any"].sum()))
+            n_dir = int(g["CC_12"].notna().sum() + g["CC_21"].notna().sum())
+            n_dir_cca = int(g[cca12].notna().sum() + g[cca21].notna().sum())
+            dist_nd.append(n_dir)
+            dist_nd_cca.append(n_dir_cca)
+            print(
+                f"  dist {name}: pairs {dist_n[-1]}, with CCa {dist_n_cca[-1]}; "
+                f"dir {n_dir_cca}/{n_dir}"
+            )
+
+    # --- CC bins (pair mean) ---
+    cc_labels, cc_n, cc_n_cca, cc_nd, cc_nd_cca = [], [], [], [], []
+    if "CC_pair_mean" in sub.columns and sub["CC_pair_mean"].notna().any():
+        csub = sub[sub["CC_pair_mean"].notna()].copy()
+        bins, meta = assign_width_bins(csub["CC_pair_mean"], CC_BIN_WIDTH)
+        csub["_bin"] = bins
+        for name, lo, hi, _n in meta:
+            g = csub.loc[csub["_bin"] == name]
+            cc_labels.append(f"{lo:g}–{hi:g}")
+            cc_n.append(int(len(g)))
+            cc_n_cca.append(int(g["has_cca_any"].sum()))
+            # directed within these pairs
+            n_dir = int(g["CC_12"].notna().sum() + g["CC_21"].notna().sum())
+            n_dir_cca = int(g[cca12].notna().sum() + g[cca21].notna().sum())
+            cc_nd.append(n_dir)
+            cc_nd_cca.append(n_dir_cca)
+            print(
+                f"  CC {name}: pairs {cc_n[-1]}, with CCa {cc_n_cca[-1]}; "
+                f"dir {n_dir_cca}/{n_dir}"
+            )
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(14.5, 5.2), constrained_layout=True)
+        fig.set_constrained_layout_pads(h_pad=0.08, w_pad=0.04, hspace=0.05, wspace=0.05)
+        _coverage_grouped_bars(
+            axes[0],
+            labels=age_labels,
+            n_pairs=age_n,
+            n_pairs_cca=age_n_cca,
+            n_dir=age_nd,
+            n_dir_cca=age_nd_cca,
+            xlabel="Age group",
+        )
+        axes[0].set_title(r"$CC_a$ coverage by age", fontsize=10, color="0.25")
+
+        if dist_labels:
+            _coverage_grouped_bars(
+                axes[1],
+                labels=dist_labels,
+                n_pairs=dist_n,
+                n_pairs_cca=dist_n_cca,
+                n_dir=dist_nd,
+                n_dir_cca=dist_nd_cca,
+                xlabel=rf"Distance [$\mu$m] (width={DISTANCE_BIN_WIDTH:g})",
+            )
+            axes[1].set_title(r"$CC_a$ coverage by Distance", fontsize=10, color="0.25")
+        else:
+            axes[1].set_visible(False)
+
+        if cc_labels:
+            _coverage_grouped_bars(
+                axes[2],
+                labels=cc_labels,
+                n_pairs=cc_n,
+                n_pairs_cca=cc_n_cca,
+                n_dir=cc_nd,
+                n_dir_cca=cc_nd_cca,
+                xlabel=rf"$CC$ pair-mean bin (width={CC_BIN_WIDTH:g})",
+            )
+            axes[2].set_title(r"$CC_a$ coverage by $CC$", fontsize=10, color="0.25")
+        else:
+            axes[2].set_visible(False)
+
+        handles = [
+            Line2D([0], [0], marker="s", color="0.72", lw=0, markersize=9, label="pairs in bin"),
+            Line2D(
+                [0], [0], marker="s", color="0.28", lw=0, markersize=9,
+                label=r"pairs with any $CC_a$",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ coverage: pairs in bin vs pairs with measurable $CC_a$"
+            "\n"
+            r"% above bars = pair coverage; “dir a/b” = directions with $CC_a$ / with $CC$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "20_CCa_coverage_age_distance_CC.png")
+
+
+def plot_cca_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
+    """
+    CCa vs Rin of the receiver (1→2: Rin_2; 2→1: Rin_1).
+    × marks: receiver Rin for directions without measurable CCa.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa vs Rin_recv: amp_ratio columns not found.")
+        return
+    if "Rin_1" not in df.columns or "Rin_2" not in df.columns:
+        print("Skipping CCa vs Rin_recv: Rin columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    both, missing = directed_cca_vs_rin_recv(sub)
+    print(
+        f"\nCCa vs Rin_recv: with CCa n={len(both)}, "
+        f"Rin without CCa n={len(missing)}"
+    )
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+        _scatter_directed_with_missing_rug(
+            ax,
+            both,
+            missing,
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            mark_missing=True,
+            y_label=PARAM_YLABELS["CCa"],
+            x_label=r"$R_{in,\mathrm{recv}}$ [M$\Omega$]",
+        )
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.45",
+                markeredgecolor="white", markersize=7, label=r"directed with $CC_a$",
+            ),
+            Line2D(
+                [0], [0], marker="x", color="0.45", lw=0, markersize=7,
+                label=r"$R_{in,recv}$ without $CC_a$",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig, [ax], vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ vs receiver $R_{in}$"
+            "\n"
+            r"$1\!\to\!2$: $R_{in,2}$; $2\!\to\!1$: $R_{in,1}$; "
+            r"× = no measurable $CC_a$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "21_CCa_vs_Rin_receiver.png")
+
+
+def plot_cca_coverage_and_rin_figures(df: pd.DataFrame, out_dir: Path):
+    """CCa vs age, coverage summaries, CCa vs Rin_recv (19–21)."""
+    plot_cca_vs_age(df, out_dir)
+    plot_cca_coverage(df, out_dir)
+    plot_cca_vs_rin_receiver(df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -4369,6 +4792,34 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "18_delay_spread.png",
             ],
             "run": lambda: plot_spike_transmission_figures(df, out_dir),
+        },
+        {
+            "id": "19",
+            "label": "19  CCa vs age",
+            "outputs": ["19_CCa_vs_age.png"],
+            "run": lambda: plot_cca_vs_age(df, out_dir),
+        },
+        {
+            "id": "20",
+            "label": "20  CCa coverage (age / Distance / CC)",
+            "outputs": ["20_CCa_coverage_age_distance_CC.png"],
+            "run": lambda: plot_cca_coverage(df, out_dir),
+        },
+        {
+            "id": "21",
+            "label": "21  CCa vs Rin_receiver (× = no CCa)",
+            "outputs": ["21_CCa_vs_Rin_receiver.png"],
+            "run": lambda: plot_cca_vs_rin_receiver(df, out_dir),
+        },
+        {
+            "id": "19-21",
+            "label": "19–21  CCa age, coverage, Rin_recv",
+            "outputs": [
+                "19_CCa_vs_age.png",
+                "20_CCa_coverage_age_distance_CC.png",
+                "21_CCa_vs_Rin_receiver.png",
+            ],
+            "run": lambda: plot_cca_coverage_and_rin_figures(df, out_dir),
         },
     ]
 
