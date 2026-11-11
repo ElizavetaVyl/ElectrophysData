@@ -5655,6 +5655,510 @@ def plot_cca_extended_figures(df: pd.DataFrame, out_dir: Path):
     plot_ai_cca(df, out_dir)
 
 
+def directed_delay_vs_rin_recv(
+    df: pd.DataFrame, y12: str, y21: str
+) -> pd.DataFrame:
+    """Directed delay vs receiver Rin (1→2: Rin_2; 2→1: Rin_1)."""
+    rows = []
+    for yc, xc, side in ((y12, "Rin_2", "12"), (y21, "Rin_1", "21")):
+        if yc not in df.columns or xc not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            if pd.notna(r[xc]) and pd.notna(r[yc]):
+                rows.append(
+                    {
+                        "x": float(r[xc]),
+                        "y": float(r[yc]),
+                        "age_num": r.get("age_num", np.nan),
+                        "is_mt": bool(r.get("is_mt", False)),
+                        "side": side,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
+    """Onset / peak delay vs receiver Rin (directed)."""
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"], "Rin_1", "Rin_2"]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays vs Rin_recv: delay/Rin columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    panels = [
+        (on12, on21, PARAM_YLABELS["DelayOnset"]),
+        (pk12, pk21, PARAM_YLABELS["DelayPeak"]),
+    ]
+    print("\nDelays vs Rin_recv:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        for ax, (y12, y21, ylab) in zip(axes, panels):
+            both = directed_delay_vs_rin_recv(sub, y12, y21)
+            print(f"  {ylab}: n={len(both)}")
+            _scatter_directed_with_missing_rug(
+                ax, both, pd.DataFrame(),
+                vmin=vmin, max_age=max_age, mt_val=mt_val,
+                mark_missing=False, y_label=ylab,
+                x_label=r"$R_{in,\mathrm{recv}}$ [M$\Omega$]",
+            )
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Onset / peak delay vs receiver $R_{in}$"
+            "\n"
+            r"$1\!\to\!2$: $R_{in,2}$; $2\!\to\!1$: $R_{in,1}$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "28_delays_vs_Rin_receiver.png")
+
+
+def plot_delay_onset_vs_peak(df: pd.DataFrame, out_dir: Path):
+    """Onset delay vs peak delay (directed + pair mean)."""
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping onset vs peak: delay columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    both, _ = directed_xy(sub, on12, on21, pk12, pk21)
+    print(f"\nOnset vs peak delay: directed n={len(both)}")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        ax = axes[0]
+        _scatter_directed_with_missing_rug(
+            ax, both, pd.DataFrame(),
+            vmin=vmin, max_age=max_age, mt_val=mt_val,
+            mark_missing=False,
+            y_label=PARAM_YLABELS["DelayPeak"],
+            x_label=PARAM_YLABELS["DelayOnset"],
+        )
+        if len(both):
+            lo = float(np.nanmin([both["x"].min(), both["y"].min()]))
+            hi = float(np.nanmax([both["x"].max(), both["y"].max()]))
+            pad = max((hi - lo) * 0.08, 0.05)
+            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="0.35", ls="--", lw=0.9, zorder=1)
+            ax.set_xlim(lo - pad, hi + pad)
+            ax.set_ylim(lo - pad, hi + pad)
+        ax.set_title(r"Directed $\{12,21\}$", fontsize=10, color="0.25")
+
+        ax = axes[1]
+        if (
+            "DelayOnset_pair_mean" in sub.columns
+            and "DelayPeak_pair_mean" in sub.columns
+        ):
+            d = sub[
+                sub["DelayOnset_pair_mean"].notna() & sub["DelayPeak_pair_mean"].notna()
+            ].copy()
+            print(f"  pair mean n={len(d)}")
+            _scatter_pair_mean_panel(
+                ax, d,
+                x_mean=d["DelayOnset_pair_mean"].to_numpy(dtype=float),
+                y_mean=d["DelayPeak_pair_mean"].to_numpy(dtype=float),
+                vmin=vmin, max_age=max_age, mt_val=mt_val,
+                xlabel=PARAM_YLABELS["DelayOnset"] + r" pair mean",
+                ylabel=PARAM_YLABELS["DelayPeak"] + r" pair mean",
+            )
+            if len(d):
+                lo = float(np.nanmin(
+                    [d["DelayOnset_pair_mean"].min(), d["DelayPeak_pair_mean"].min()]
+                ))
+                hi = float(np.nanmax(
+                    [d["DelayOnset_pair_mean"].max(), d["DelayPeak_pair_mean"].max()]
+                ))
+                pad = max((hi - lo) * 0.08, 0.05)
+                ax.plot(
+                    [lo - pad, hi + pad], [lo - pad, hi + pad],
+                    color="0.35", ls="--", lw=0.9, zorder=1,
+                )
+                ax.set_xlim(lo - pad, hi + pad)
+                ax.set_ylim(lo - pad, hi + pad)
+        else:
+            ax.set_visible(False)
+        ax.set_title(r"Pair mean (both sides)", fontsize=10, color="0.25")
+
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Onset delay vs peak delay"
+            "\n"
+            r"dashed: identity; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "29_delay_onset_vs_peak.png")
+
+
+def plot_ai_delays_vs_ai_coupling(df: pd.DataFrame, out_dir: Path):
+    """AI_DelayOnset / AI_DelayPeak vs AI_CC and AI_Gj (both sides required)."""
+    need = ["AI_DelayOnset", "AI_DelayPeak", "AI_CC", "AI_Gj"]
+    if any(c not in df.columns for c in need):
+        print("Skipping AI delays vs AI coupling: AI columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    rows = [
+        ("AI_DelayOnset", r"AI onset delay"),
+        ("AI_DelayPeak", r"AI peak delay"),
+    ]
+    cols = [
+        ("AI_CC", r"AI $CC$"),
+        ("AI_Gj", r"AI $G_{j}$"),
+    ]
+    print("\nAI delays vs AI coupling:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.2), constrained_layout=True)
+        for r, (ycol, ylab) in enumerate(rows):
+            for c, (xcol, xlab) in enumerate(cols):
+                ax = axes[r, c]
+                d = sub[sub[ycol].notna() & sub[xcol].notna()].copy()
+                colors, _, _ = age_colors(
+                    d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+                )
+                ax.plot([0, 1], [0, 1], color="0.35", ls="--", lw=0.9, zorder=1)
+                if len(d):
+                    ax.scatter(
+                        d[xcol], d[ycol], c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
+                        edgecolors="white", linewidths=0.35, zorder=2,
+                    )
+                if len(d) >= 3:
+                    rho, p = stats.spearmanr(d[xcol], d[ycol])
+                    ax.text(
+                        0.04, 0.96,
+                        f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                        transform=ax.transAxes, va="top", ha="left",
+                        fontsize=8, color="0.25",
+                    )
+                    print(f"  {ycol} vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+                else:
+                    print(f"  {ycol} vs {xcol}: n={len(d)} (too few)")
+                ax.set_xlim(0, 1.05)
+                ax.set_ylim(0, 1.05)
+                ax.set_xlabel(xlab)
+                ax.set_ylabel(ylab)
+                _style_pub_ax(ax)
+        cbar = add_age_colorbar(
+            fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"AI delays vs AI coupling"
+            "\n"
+            + AI_FORMULA
+            + r"; both directions required for each AI; dashed: identity; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "30_AI_delays_vs_AI_CC_Gj.png")
+
+
+def plot_cca_directionality_vs_rin(df: pd.DataFrame, out_dir: Path):
+    """
+    Signed ΔCCa vs ΔRin_recv (same template as fig 09).
+    Missing CCa side → 0 when the other side is present.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa directionality: amp_ratio columns not found.")
+        return
+    if "Rin_1" not in df.columns or "Rin_2" not in df.columns:
+        print("Skipping CCa directionality: Rin columns not found.")
+        return
+    sub = analysis_pool(df)
+    c1, c2 = PARAM_DIRS["CCa"]
+    # zero-fill delta when any CCa present
+    a = sub[c1]
+    b = sub[c2]
+    any_cca = a.notna() | b.notna()
+    dcca = pd.Series(np.nan, index=sub.index, dtype=float)
+    dcca[any_cca] = a.fillna(0.0)[any_cca] - b.fillna(0.0)[any_cca]
+    sub = sub.copy()
+    sub["dCCa_z"] = dcca
+    sub["dRin_recv"] = sub["Rin_2"] - sub["Rin_1"]
+    # also both-only delta
+    both = a.notna() & b.notna()
+    dcca_both = pd.Series(np.nan, index=sub.index, dtype=float)
+    dcca_both[both] = a[both] - b[both]
+    sub["dCCa_both"] = dcca_both
+
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        ("dCCa_z", r"$\Delta CC_a$ (missing→0)"),
+        ("dCCa_both", r"$\Delta CC_a$ (both sides)"),
+    ]
+    print("\nSigned ΔCCa vs ΔRin_recv:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        for ax, (col, ylabel) in zip(axes, panels):
+            d = sub[sub[col].notna() & sub["dRin_recv"].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            x = d["dRin_recv"].to_numpy(dtype=float)
+            y = d[col].to_numpy(dtype=float)
+            xpad = max(float(np.nanmax(np.abs(x))) * 1.15, 1.0) if len(x) else 1.0
+            ypad = max(float(np.nanmax(np.abs(y))) * 1.15, 0.05) if len(y) else 0.05
+            ax.axhspan(0, ypad, xmin=0.5, xmax=1.0, color="0.92", zorder=0)
+            ax.axhspan(-ypad, 0, xmin=0.0, xmax=0.5, color="0.92", zorder=0)
+            ax.axhline(0, color="0.45", lw=0.8, zorder=1)
+            ax.axvline(0, color="0.45", lw=0.8, zorder=1)
+            if len(d):
+                ax.scatter(
+                    x, y, c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
+                    edgecolors="white", linewidths=0.35, zorder=2,
+                )
+            same = (x * y) > 0
+            nonzero = (x != 0) & (y != 0)
+            n_nz = int(nonzero.sum())
+            n_same = int((same & nonzero).sum())
+            frac = n_same / n_nz if n_nz else np.nan
+            binom_p = binom_pvalue(n_same, n_nz, 0.5) if n_nz >= 5 else np.nan
+            rho, sp = stats.spearmanr(x, y) if len(d) >= 3 else (np.nan, np.nan)
+            ax.text(
+                0.04, 0.96,
+                "\n".join(
+                    s for s in [
+                        f"same sign {n_same}/{n_nz}"
+                        + (f" ({100 * frac:.0f}%)" if n_nz else ""),
+                        f"binomial {format_p(binom_p)}",
+                        f"Spearman ρ={rho:.2f}" if np.isfinite(rho) else "Spearman n/a",
+                        format_p(sp) if np.isfinite(sp) else "",
+                    ] if s
+                ),
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            print(
+                f"  {col}: same-sign {n_same}/{n_nz}, "
+                f"binomial {format_p(binom_p)}; ρ={rho:.3f}, {format_p(sp)}"
+            )
+            ax.set_xlim(-xpad, xpad)
+            ax.set_ylim(-ypad, ypad)
+            ax.set_xlabel(r"$\Delta R_{in,recv}=R_{in,2}-R_{in,1}$ [M$\Omega$]")
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Signed $\Delta CC_a$ vs receiver $\Delta R_{in}$"
+            "\n"
+            r"shaded: same sign (larger $CC_a$ toward higher-$R_{in}$ cell); "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "31_CCa_directionality_vs_dRin.png")
+
+
+def _rank_partial_spearman(
+    y: np.ndarray, x: np.ndarray, covars: np.ndarray
+) -> tuple[float, float, int, np.ndarray, np.ndarray]:
+    """
+    Partial Spearman via rank-transform + OLS residualization of y,x on covariates.
+    Returns (rho, p, n, y_resid, x_resid).
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    C = np.asarray(covars, dtype=float)
+    if C.ndim == 1:
+        C = C[:, None]
+    m = np.isfinite(y) & np.isfinite(x) & np.all(np.isfinite(C), axis=1)
+    y, x, C = y[m], x[m], C[m]
+    n = len(y)
+    if n < 5:
+        return np.nan, np.nan, n, np.array([]), np.array([])
+    ry = stats.rankdata(y).astype(float)
+    rx = stats.rankdata(x).astype(float)
+    rc = np.column_stack([stats.rankdata(C[:, j]) for j in range(C.shape[1])])
+    ones = np.ones((n, 1))
+    Z = np.hstack([ones, rc])
+
+    def _resid(v):
+        beta, _, _, _ = np.linalg.lstsq(Z, v, rcond=None)
+        return v - Z @ beta
+
+    yr, xr = _resid(ry), _resid(rx)
+    rho, p = stats.spearmanr(yr, xr)
+    return float(rho), float(p), n, yr, xr
+
+
+def plot_cca_cc_partial_correlation(df: pd.DataFrame, out_dir: Path):
+    """
+    Partial Spearman CCa–CC controlling Distance and age.
+    Panels: raw scatter, residual scatter, summary for both-only and missing→0.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping partial CCa–CC: amp_ratio columns not found.")
+        return
+    if "Distance_um" not in df.columns or "CC_pair_mean" not in df.columns:
+        print("Skipping partial CCa–CC: Distance or CC_pair_mean missing.")
+        return
+    sub = analysis_pool(df)
+    sub = sub[sub["Distance_um"].notna() & sub["age_num"].notna() & ~sub["is_mt"]].copy()
+    if len(sub) == 0:
+        print("Skipping partial CCa–CC: no rows with Distance+age.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+
+    specs = []
+    if "CCa_pair_mean" in sub.columns:
+        specs.append(("CCa_pair_mean", r"$CC_a$ pair mean (both)", "both"))
+    if "CCa_pair_mean_z" in sub.columns:
+        specs.append(("CCa_pair_mean_z", r"$CC_a$ mean (missing→0)", "zero"))
+    if not specs:
+        print("Skipping partial CCa–CC: no CCa mean columns.")
+        return
+
+    print("\nPartial Spearman CCa–CC | Distance, age:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            len(specs), 2, figsize=(10.5, 4.2 * len(specs)), constrained_layout=True
+        )
+        if len(specs) == 1:
+            axes = np.array([axes])
+
+        for r, (ycol, ylab, _tag) in enumerate(specs):
+            d = sub[sub[ycol].notna() & sub["CC_pair_mean"].notna()].copy()
+            x = d["CC_pair_mean"].to_numpy(dtype=float)
+            y = d[ycol].to_numpy(dtype=float)
+            cov = np.column_stack(
+                [d["Distance_um"].to_numpy(dtype=float), d["age_num"].to_numpy(dtype=float)]
+            )
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax = axes[r, 0]
+            ax.scatter(
+                x, y, c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
+                edgecolors="white", linewidths=0.35, zorder=2,
+            )
+            raw_rho, raw_p = (stats.spearmanr(x, y) if len(d) >= 3 else (np.nan, np.nan))
+            ax.text(
+                0.04, 0.96,
+                f"raw Spearman ρ={raw_rho:.2f}\n{format_p(raw_p)}\n$n$={len(d)}",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            ax.set_xlabel(PARAM_YLABELS["CC"] + r" pair mean")
+            ax.set_ylabel(ylab)
+            ax.set_title("Raw", fontsize=10, color="0.25")
+            _style_pub_ax(ax)
+
+            rho, p, n, yr, xr = _rank_partial_spearman(y, x, cov)
+            ax = axes[r, 1]
+            if n >= 5:
+                # residual points inherit age colours of complete rows
+                m = (
+                    np.isfinite(y) & np.isfinite(x)
+                    & np.isfinite(d["Distance_um"].to_numpy(dtype=float))
+                    & np.isfinite(d["age_num"].to_numpy(dtype=float))
+                )
+                ax.scatter(
+                    xr, yr, c=np.asarray(colors)[m], s=POINT_SIZE, alpha=POINT_ALPHA,
+                    edgecolors="white", linewidths=0.35, zorder=2,
+                )
+            ax.axhline(0, color="0.55", lw=0.7, zorder=1)
+            ax.axvline(0, color="0.55", lw=0.7, zorder=1)
+            ax.text(
+                0.04, 0.96,
+                f"partial Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={n}"
+                "\n"
+                r"ctrl: Distance, age",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            ax.set_xlabel(r"residual rank $CC$")
+            ax.set_ylabel(r"residual rank $CC_a$")
+            ax.set_title("Partial (rank residuals)", fontsize=10, color="0.25")
+            _style_pub_ax(ax)
+            print(
+                f"  {ycol}: raw ρ={raw_rho:.3f} {format_p(raw_p)}; "
+                f"partial ρ={rho:.3f} {format_p(p)}, n={n}"
+            )
+
+        cbar = add_age_colorbar(
+            fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Partial Spearman: $CC_a$ vs $CC$ | Distance, age"
+            "\n"
+            r"MT excluded from age covariate; rank-residual method; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "32_CCa_CC_partial_Distance_age.png")
+
+
+def plot_delay_cca_followup_figures(df: pd.DataFrame, out_dir: Path):
+    """Figs 28–32."""
+    plot_delays_vs_rin_receiver(df, out_dir)
+    plot_delay_onset_vs_peak(df, out_dir)
+    plot_ai_delays_vs_ai_coupling(df, out_dir)
+    plot_cca_directionality_vs_rin(df, out_dir)
+    plot_cca_cc_partial_correlation(df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -5995,6 +6499,48 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "27_AI_CCa_vs_AI_CC_Gj.png",
             ],
             "run": lambda: plot_cca_extended_figures(df, out_dir),
+        },
+        {
+            "id": "28",
+            "label": "28  Delays vs Rin_receiver",
+            "outputs": ["28_delays_vs_Rin_receiver.png"],
+            "run": lambda: plot_delays_vs_rin_receiver(df, out_dir),
+        },
+        {
+            "id": "29",
+            "label": "29  Delay onset vs peak",
+            "outputs": ["29_delay_onset_vs_peak.png"],
+            "run": lambda: plot_delay_onset_vs_peak(df, out_dir),
+        },
+        {
+            "id": "30",
+            "label": "30  AI delays vs AI_CC / AI_Gj",
+            "outputs": ["30_AI_delays_vs_AI_CC_Gj.png"],
+            "run": lambda: plot_ai_delays_vs_ai_coupling(df, out_dir),
+        },
+        {
+            "id": "31",
+            "label": "31  CCa directionality vs ΔRin",
+            "outputs": ["31_CCa_directionality_vs_dRin.png"],
+            "run": lambda: plot_cca_directionality_vs_rin(df, out_dir),
+        },
+        {
+            "id": "32",
+            "label": "32  Partial Spearman CCa–CC | Distance, age",
+            "outputs": ["32_CCa_CC_partial_Distance_age.png"],
+            "run": lambda: plot_cca_cc_partial_correlation(df, out_dir),
+        },
+        {
+            "id": "28-32",
+            "label": "28–32  Delays Rin/onset-peak/AI, CCa dir, partial CC",
+            "outputs": [
+                "28_delays_vs_Rin_receiver.png",
+                "29_delay_onset_vs_peak.png",
+                "30_AI_delays_vs_AI_CC_Gj.png",
+                "31_CCa_directionality_vs_dRin.png",
+                "32_CCa_CC_partial_Distance_age.png",
+            ],
+            "run": lambda: plot_delay_cca_followup_figures(df, out_dir),
         },
     ]
 
