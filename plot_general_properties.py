@@ -592,6 +592,8 @@ GJ_BIN_WIDTH = 0.2  # nS (pair-mean Gj)
 CC_BIN_WIDTH = 0.05  # pair-mean CC (AI-vs-strength bins)
 CC_BIN_WIDTH_CCA_COV = 0.025  # directed-CC bins for CCa coverage %
 DISTANCE_BIN_WIDTH = 20.0  # µm
+RIN_BIN_WIDTH = 50.0  # MΩ (receiver Rin for delay bins)
+TAU_BIN_WIDTH = 10.0  # ms (receiver τ for delay bins)
 BIN_POINT_COLOR = "#6E6E6E"
 
 
@@ -640,6 +642,10 @@ def assign_width_bins(
 
 def _fmt_bin_edge(v: float, *, kind: str) -> str:
     if kind == "distance":
+        return f"{v:.0f}"
+    if kind == "rin":
+        return f"{v:.0f}"
+    if kind == "tau":
         return f"{v:.0f}"
     if kind == "gj":
         return f"{v:.2g}"
@@ -5972,8 +5978,9 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
 
 def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
     """
-    Onset / peak delay: mean ± SEM by quartiles of receiver Rin and receiver τ.
-    Directed values; quartile cuts from the pooled directed x (Rin or τ).
+    Onset / peak delay: mean ± SEM by fixed-width bins of receiver Rin / τ.
+    Directed values; bins are equal intervals on the value axis (not equal-n quartiles).
+    Empty bins omitted. Widths: RIN_BIN_WIDTH (MΩ), TAU_BIN_WIDTH (ms).
     """
     need = [
         *PARAM_DIRS["DelayOnset"],
@@ -5984,7 +5991,7 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
         "Tau_2",
     ]
     if any(c not in df.columns for c in need):
-        print("Skipping delay quartiles: need delay, Rin, Tau columns.")
+        print("Skipping delay Rin/τ bins: need delay, Rin, Tau columns.")
         return
     sub = analysis_pool(df)
     on12, on21 = PARAM_DIRS["DelayOnset"]
@@ -5994,41 +6001,28 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
         (pk12, pk21, PARAM_YLABELS["DelayPeak"]),
     ]
     x_specs = [
-        ("Rin_1", "Rin_2", r"$R_{in,\mathrm{recv}}$", "MΩ"),
-        ("Tau_1", "Tau_2", r"$\tau_{\mathrm{recv}}$", "ms"),
+        (
+            "Rin_1",
+            "Rin_2",
+            r"$R_{in,\mathrm{recv}}$",
+            RIN_BIN_WIDTH,
+            "rin",
+            "MΩ",
+        ),
+        (
+            "Tau_1",
+            "Tau_2",
+            r"$\tau_{\mathrm{recv}}$",
+            TAU_BIN_WIDTH,
+            "tau",
+            "ms",
+        ),
     ]
-    q_labels = ["Q1", "Q2", "Q3", "Q4"]
 
-    def _quartile_summary(long: pd.DataFrame) -> tuple[list[str], list[float], list[float], list[int]]:
-        x = long["x"].to_numpy(dtype=float)
-        y = long["y"].to_numpy(dtype=float)
-        # pd.qcut with duplicates='drop' if needed
-        try:
-            cats = pd.qcut(x, 4, labels=False, duplicates="drop")
-        except ValueError:
-            return [], [], [], []
-        means, sems, ns, ticklabs = [], [], [], []
-        n_bins = int(np.nanmax(cats)) + 1 if np.any(np.isfinite(cats)) else 0
-        for qi in range(n_bins):
-            m = cats == qi
-            vals = y[m]
-            vals = vals[np.isfinite(vals)]
-            n = len(vals)
-            ns.append(n)
-            means.append(float(np.mean(vals)) if n else np.nan)
-            sems.append(float(stats.sem(vals)) if n > 1 else 0.0)
-            xbin = x[m]
-            xbin = xbin[np.isfinite(xbin)]
-            if len(xbin):
-                ticklabs.append(
-                    f"{q_labels[qi] if qi < 4 else f'B{qi+1}'}\n"
-                    f"{np.min(xbin):.0f}–{np.max(xbin):.0f}\nn={n}"
-                )
-            else:
-                ticklabs.append(f"Q{qi+1}\nn=0")
-        return ticklabs, means, sems, ns
-
-    print("\nDelay mean±SEM by Rin/τ quartiles:")
+    print(
+        f"\nDelay mean±SEM by fixed Rin/τ bins "
+        f"(Rin width={RIN_BIN_WIDTH:g} MΩ, τ width={TAU_BIN_WIDTH:g} ms):"
+    )
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -6038,86 +6032,73 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
     ):
         fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.6), constrained_layout=True)
         for r, (y12, y21, ylab) in enumerate(delay_specs):
-            for c, (x1, x2, xlab, _unit) in enumerate(x_specs):
+            for c, (x1, x2, xlab, width, edge_kind, unit) in enumerate(x_specs):
                 ax = axes[r, c]
                 long = directed_delay_vs_recv_param(sub, y12, y21, x1, x2)
                 if len(long) < 8:
                     ax.set_visible(False)
                     print(f"  {ylab} vs {xlab}: n={len(long)} (too few)")
                     continue
-                ticks, means, sems, ns = _quartile_summary(long)
-                if not ticks:
+                bins, meta = assign_width_bins(long["x"], width)
+                if not meta:
                     ax.set_visible(False)
-                    print(f"  {ylab} vs {xlab}: quartile cut failed")
+                    print(f"  {ylab} vs {xlab}: could not form bins")
                     continue
-                xs = np.arange(1, len(ticks) + 1, dtype=float)
-                # light jitter of raw points
-                try:
-                    cats = pd.qcut(long["x"], 4, labels=False, duplicates="drop")
-                except ValueError:
-                    cats = None
-                if cats is not None:
-                    rng = np.random.default_rng(abs(hash(ylab + xlab)) % (2**32))
-                    for qi in range(int(np.nanmax(cats)) + 1):
-                        vals = long.loc[cats == qi, "y"].to_numpy(dtype=float)
-                        vals = vals[np.isfinite(vals)]
-                        if len(vals) == 0:
-                            continue
-                        jitter = rng.normal(0, 0.06, len(vals))
-                        ax.scatter(
-                            np.full(len(vals), qi + 1) + jitter, vals,
-                            s=12, alpha=0.28, c="0.55", edgecolors="none", zorder=1,
-                        )
-                ax.errorbar(
-                    xs, means, yerr=sems, fmt="o-", color="crimson",
-                    lw=1.6, markersize=7, capsize=4, zorder=3,
+                long = long.copy()
+                long["_bin"] = bins
+                samples = [
+                    long.loc[long["_bin"] == name, "y"]
+                    .dropna()
+                    .to_numpy(dtype=float)
+                    for name, _lo, _hi, _n in meta
+                ]
+                _draw_width_bin_panel(
+                    ax,
+                    samples=samples,
+                    meta=meta,
+                    ylabel=ylab,
+                    edge_kind=edge_kind,
+                    seed_key=f"36|{ylab}|{xlab}",
                 )
-                meds = []
-                for qi in range(len(ticks)):
-                    if cats is None:
-                        meds.append(np.nan)
-                        continue
-                    vals_q = long.loc[cats == qi, "y"].dropna().to_numpy(dtype=float)
-                    meds.append(float(np.median(vals_q)) if len(vals_q) else np.nan)
-                ax.plot(
-                    xs, meds, linestyle="none", marker="D",
-                    color="royalblue", markersize=5, zorder=4,
-                )
-                ax.set_xticks(xs)
-                ax.set_xticklabels(ticks, fontsize=7.5)
-                ax.set_ylabel(ylab)
-                ax.set_xlabel(xlab + " quartile")
+                ax.set_xlabel(rf"{xlab} bin [{unit}] (width={width:g})")
                 if r == 0:
                     ax.set_title(xlab, fontsize=10, color="0.25")
-                _style_pub_ax(ax)
                 print(
                     f"  {ylab} vs {xlab}: "
-                    + ", ".join(f"Q{i+1} mean={means[i]:.3g} n={ns[i]}" for i in range(len(means)))
-                )
-                # KW across quartile groups with enough points
-                groups = []
-                if cats is not None:
-                    for qi in range(int(np.nanmax(cats)) + 1):
-                        vals = long.loc[cats == qi, "y"].dropna().to_numpy(dtype=float)
-                        if len(vals) >= 3:
-                            groups.append(vals)
-                if len(groups) >= 2:
-                    _h, p_kw = stats.kruskal(*groups)
-                    ax.text(
-                        0.98, 0.96, f"KW {format_p(p_kw)}",
-                        transform=ax.transAxes, ha="right", va="top",
-                        fontsize=8, color="0.35",
+                    + ", ".join(
+                        f"{name} n={n}" for name, _lo, _hi, n in meta
                     )
+                )
 
         handles = [
-            Line2D([0], [0], marker="o", color="crimson", lw=1.2, markersize=6, label="mean ± SEM"),
-            Line2D([0], [0], marker="D", color="royalblue", lw=0, markersize=5, label="median"),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                lw=1.2,
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                lw=0,
+                markersize=5,
+                label="median",
+            ),
         ]
-        fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=9)
+        fig.legend(
+            handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=9
+        )
         fig.suptitle(
-            r"Delay by quartiles of receiver $R_{in}$ / $\tau$"
+            rf"Delay by fixed bins of receiver $R_{{in}}$ / $\tau$"
             "\n"
-            r"directed; Q1=lowest; tick = range of $x$ in bin; "
+            rf"directed; equal intervals on $x$ "
+            rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms; "
+            r"empty bins omitted); "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -7066,7 +7047,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "36",
-            "label": "36  Delay mean±SEM by Rin/τ quartiles",
+            "label": "36  Delay mean±SEM by fixed Rin/τ bins",
             "outputs": ["36_delays_by_Rin_Tau_quartiles.png"],
             "run": lambda: plot_delays_by_rin_tau_quartiles(df, out_dir),
         },
