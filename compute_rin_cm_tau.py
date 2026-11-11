@@ -18,35 +18,35 @@ Output Excel is written next to the folder/file:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-try:
-    import pyabf
-except ImportError as e:
-    raise SystemExit("Need pyabf: pip install pyabf") from e
 
-try:
-    from scipy.signal import find_peaks
-except ImportError as e:
-    raise SystemExit("Need scipy: pip install scipy") from e
+def _import_deps():
+    try:
+        import pyabf
+    except ImportError as e:
+        raise SystemExit("Need pyabf: pip install pyabf") from e
+    try:
+        from scipy.signal import find_peaks
+    except ImportError as e:
+        raise SystemExit("Need scipy: pip install scipy") from e
+    return pyabf, find_peaks
 
 
 # ---------------------------------------------------------------------------
 # Stimulus window helpers
 # ---------------------------------------------------------------------------
-def stim_windows(abf: "pyabf.ABF", voltage_channel: int) -> tuple[int, int, int, int, int]:
+def stim_windows(abf, voltage_channel: int) -> tuple[int, int, int, int, int]:
     """
     Return (stim_start, stim_end, pre_start, post_stop, within_start)
-    using command waveform on the paired current channel.
+    using command waveform (same channel mapping as Cell Properties notebooks).
     """
     sample_rate = int(abf.dataRate)
-    # In these recordings sweepC on voltage_channel+? — notebooks use:
-    #   ch0 voltage → stim from sweepC on channel 0
-    #   ch2 voltage → stim from sweepC on channel 1 (quirk noted in notebooks)
+    # ch0 voltage → sweepC on channel 0
+    # ch2 voltage → sweepC on channel 1 (notebook quirk)
     if voltage_channel == 0:
         abf.setSweep(0, channel=0)
         stim = np.asarray(abf.sweepC)
@@ -54,7 +54,6 @@ def stim_windows(abf: "pyabf.ABF", voltage_channel: int) -> tuple[int, int, int,
         abf.setSweep(0, channel=1)
         stim = np.asarray(abf.sweepC)
     else:
-        # fallback: try voltage channel itself
         abf.setSweep(0, channel=voltage_channel)
         stim = np.asarray(abf.sweepC)
 
@@ -64,9 +63,9 @@ def stim_windows(abf: "pyabf.ABF", voltage_channel: int) -> tuple[int, int, int,
 
     stim_start = int(nz[0])
     stim_end = int(nz[-1])
-    pre_pts = int(0.125 * sample_rate)   # 125 ms baseline
-    in_pts = int(0.25 * sample_rate)     # 250 ms late in pulse
-    after_pts = int(0.5 * sample_rate)   # 500 ms after
+    pre_pts = int(0.125 * sample_rate)  # 125 ms baseline
+    in_pts = int(0.25 * sample_rate)  # 250 ms late in pulse
+    after_pts = int(0.5 * sample_rate)  # 500 ms after
 
     pre_start = max(0, stim_start - pre_pts)
     post_stop = min(len(stim) - 1, stim_end + after_pts)
@@ -75,7 +74,8 @@ def stim_windows(abf: "pyabf.ABF", voltage_channel: int) -> tuple[int, int, int,
 
 
 def last_subthreshold_sweep(
-    abf: "pyabf.ABF",
+    abf,
+    find_peaks,
     voltage_channel: int,
     stim_start: int,
     stim_end: int,
@@ -96,7 +96,8 @@ def last_subthreshold_sweep(
 # Rin
 # ---------------------------------------------------------------------------
 def compute_rin(
-    abf: "pyabf.ABF",
+    abf,
+    find_peaks,
     voltage_channel: int,
     current_channel: int,
     pre_start: int,
@@ -110,7 +111,9 @@ def compute_rin(
     Absolute Rin from linear fit of V_during vs I_during on subthreshold sweeps
     with V in [v_lo, v_hi]. Relative Rin = mean(ΔV/ΔI) in that range.
     """
-    n_sub = last_subthreshold_sweep(abf, voltage_channel, stim_start, stim_end)
+    n_sub = last_subthreshold_sweep(
+        abf, find_peaks, voltage_channel, stim_start, stim_end
+    )
     voltages, currents, dV, dI, in_range = [], [], [], [], []
 
     for sw in range(n_sub + 1):
@@ -130,10 +133,9 @@ def compute_rin(
 
     rin_rel = np.nan
     if in_range:
-        ratios = []
-        for idx in in_range:
-            if abs(dI[idx]) > 0.15:
-                ratios.append(dV[idx] / dI[idx])
+        ratios = [
+            dV[idx] / dI[idx] for idx in in_range if abs(dI[idx]) > 0.15
+        ]
         if ratios:
             rin_rel = float(np.round(np.nanmean(ratios) * 1000.0, 3))  # MΩ
 
@@ -165,7 +167,7 @@ def compute_rin(
 # τ and Cm
 # ---------------------------------------------------------------------------
 def compute_tau_cm(
-    abf: "pyabf.ABF",
+    abf,
     voltage_channel: int,
     pre_start: int,
     post_stop: int,
@@ -206,7 +208,6 @@ def compute_tau_cm(
             "note": "no sweep with ΔV in search_range",
         }
 
-    # time to 63% of the voltage step (toward v_min)
     v63 = v_pre + 0.63 * (v_min - v_pre)
     tau_samples = np.nan
     for i, v in enumerate(trace):
@@ -236,7 +237,7 @@ def compute_tau_cm(
     }
 
 
-def analyze_channel(abf: "pyabf.ABF", voltage_channel: int) -> dict:
+def analyze_channel(abf, find_peaks, voltage_channel: int) -> dict:
     current_channel = voltage_channel + 1
     if current_channel >= int(abf.channelCount):
         return {
@@ -252,6 +253,7 @@ def analyze_channel(abf: "pyabf.ABF", voltage_channel: int) -> dict:
 
     rin = compute_rin(
         abf,
+        find_peaks,
         voltage_channel,
         current_channel,
         pre_start,
@@ -259,21 +261,17 @@ def analyze_channel(abf: "pyabf.ABF", voltage_channel: int) -> dict:
         within_start,
         stim_end,
     )
-    # Prefer absolute Rin for Cm; fall back to relative
     rin_for_cm = rin["Rin_abs_MOhm"]
     if not np.isfinite(rin_for_cm):
         rin_for_cm = rin["Rin_rel_MOhm"]
 
-    tau_cm = compute_tau_cm(
-        abf, voltage_channel, pre_start, post_stop, rin_for_cm
-    )
+    tau_cm = compute_tau_cm(abf, voltage_channel, pre_start, post_stop, rin_for_cm)
 
-    # Consistency check: τ_from_product = Rin × Cm / 1000 (should ≈ measured τ)
     tau_check = np.nan
     if np.isfinite(rin_for_cm) and np.isfinite(tau_cm["Cm_pF"]):
         tau_check = rin_for_cm * tau_cm["Cm_pF"] / 1000.0
 
-    out = {
+    return {
         "voltage_channel": voltage_channel,
         "current_channel": current_channel,
         "sampling_Hz": int(abf.dataRate),
@@ -284,10 +282,9 @@ def analyze_channel(abf: "pyabf.ABF", voltage_channel: int) -> dict:
             float(np.round(tau_check, 3)) if np.isfinite(tau_check) else np.nan
         ),
     }
-    return out
 
 
-def analyze_file(path: Path, channels: list[int]) -> list[dict]:
+def analyze_file(path: Path, channels: list[int], pyabf, find_peaks) -> list[dict]:
     abf = pyabf.ABF(str(path))
     rows = []
     for ch in channels:
@@ -301,7 +298,7 @@ def analyze_file(path: Path, channels: list[int]) -> list[dict]:
                 }
             )
             continue
-        row = analyze_channel(abf, ch)
+        row = analyze_channel(abf, find_peaks, ch)
         row["file"] = path.name
         row["abf_id"] = abf.abfID
         rows.append(row)
@@ -336,6 +333,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    pyabf, find_peaks = _import_deps()
     channels = [int(x.strip()) for x in args.channels.split(",") if x.strip() != ""]
 
     if args.file:
@@ -344,11 +342,9 @@ def main():
     elif args.folder:
         folder = Path(args.folder)
         files = sorted(folder.glob("*.abf")) + sorted(folder.glob("*.ABF"))
-        # unique
         files = sorted({f.resolve(): f for f in files}.values())
         out_dir = folder
     else:
-        # interactive folder pick
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -373,13 +369,12 @@ def main():
     rows: list[dict] = []
     for f in files:
         try:
-            rows.extend(analyze_file(f, channels))
+            rows.extend(analyze_file(f, channels, pyabf, find_peaks))
         except Exception as e:
             print(f"  FAIL {f.name}: {e}")
             rows.append({"file": f.name, "error": str(e)})
 
     df = pd.DataFrame(rows)
-    # Friendly column order
     preferred = [
         "file",
         "abf_id",
@@ -406,8 +401,8 @@ def main():
     df.to_excel(out_path, index=False)
     print(f"\nSaved: {out_path}")
     print(
-        "Columns for Excel fill-in: Rin_abs_MOhm → Rin; Cm_pF → Cm; "
-        "tau_ms → τ (also equals Rin×Cm/1000)."
+        "Fill Excel with: Rin_abs_MOhm → Rin; Cm_pF → Cm; "
+        "tau_ms → τ (= Rin×Cm/1000)."
     )
 
 
