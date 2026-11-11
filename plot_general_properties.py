@@ -370,9 +370,38 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     if cca1 in df.columns and cca2 in df.columns:
         df["has_cca_any"] = df[cca1].notna() | df[cca2].notna()
         df["has_cca_both"] = df[cca1].notna() & df[cca2].notna()
+        # Zero-fill asymmetry / AI: missing side → 0; both missing → NaN
+        a = df[cca1]
+        b = df[cca2]
+        any_cca = a.notna() | b.notna()
+        a0 = a.fillna(0.0)
+        b0 = b.fillna(0.0)
+        mx = pd.Series(np.nan, index=df.index, dtype=float)
+        mn = pd.Series(np.nan, index=df.index, dtype=float)
+        ai = pd.Series(np.nan, index=df.index, dtype=float)
+        pm = pd.Series(np.nan, index=df.index, dtype=float)
+        mx[any_cca] = np.maximum(a0[any_cca], b0[any_cca])
+        mn[any_cca] = np.minimum(a0[any_cca], b0[any_cca])
+        denom = mx + mn
+        ai[any_cca] = np.where(
+            denom[any_cca] != 0,
+            (mx[any_cca] - mn[any_cca]) / denom[any_cca],
+            np.nan,
+        )
+        pm[any_cca] = (a0[any_cca] + b0[any_cca]) / 2.0
+        df["CCa_max_z"] = mx
+        df["CCa_min_z"] = mn
+        df["AI_CCa_z"] = ai
+        df["CCa_pair_mean_z"] = pm
+        df["cca_modality"] = np.select(
+            [df["has_cca_both"], df["has_cca_any"]],
+            ["both", "one"],
+            default="none",
+        )
     else:
         df["has_cca_any"] = False
         df["has_cca_both"] = False
+        df["cca_modality"] = "none"
     return df.reset_index(drop=True)
 
 
@@ -5019,6 +5048,613 @@ def plot_cca_by_day(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "22b_CCa_day1_vs_day2_stats.png")
 
 
+def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
+    """
+    CCa vs CC pair means by age group (P10–32 / P33–50 / P50+), separate Spearman.
+    Top: both CCa required; bottom: missing CCa → 0.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa vs CC by age: amp_ratio columns not found.")
+        return
+    sub = analysis_pool(df)
+    if "CC_pair_mean" not in sub.columns:
+        print("Skipping CCa vs CC by age: CC_pair_mean missing.")
+        return
+    y_both = (
+        sub["CCa_pair_mean"].to_numpy(dtype=float)
+        if "CCa_pair_mean" in sub.columns
+        else np.full(len(sub), np.nan)
+    )
+    y_zero = (
+        sub["CCa_pair_mean_z"].to_numpy(dtype=float)
+        if "CCa_pair_mean_z" in sub.columns
+        else np.array(
+            [_pair_mean_zero_fill(a, b) for a, b in zip(sub[PARAM_DIRS["CCa"][0]], sub[PARAM_DIRS["CCa"][1]])],
+            dtype=float,
+        )
+    )
+    x_mean = sub["CC_pair_mean"].to_numpy(dtype=float)
+    print("\nCCa vs CC by age (Spearman):")
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.6), constrained_layout=True)
+        for row, (y_mean, ylab) in enumerate(
+            (
+                (y_both, r"$CC_a$ pair mean (both sides)"),
+                (y_zero, r"$CC_a$ mean (missing→0)"),
+            )
+        ):
+            for c, (label, lo, hi, include_mt, color) in enumerate(AGE_ASYM_BINS):
+                ax = axes[row, c]
+                mask = _age_bin_mask(sub, lo, hi, include_mt).to_numpy()
+                m = mask & np.isfinite(x_mean) & np.isfinite(y_mean)
+                n = int(m.sum())
+                if n:
+                    ax.scatter(
+                        x_mean[m], y_mean[m], c=color, s=POINT_SIZE,
+                        alpha=POINT_ALPHA, edgecolors="white", linewidths=0.35, zorder=2,
+                    )
+                if n >= 3:
+                    rho, p = stats.spearmanr(x_mean[m], y_mean[m])
+                    ax.text(
+                        0.04, 0.96,
+                        f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={n}",
+                        transform=ax.transAxes, va="top", ha="left",
+                        fontsize=8, color="0.25",
+                    )
+                    print(f"  {label} {ylab}: ρ={rho:.3f}, {format_p(p)}, n={n}")
+                else:
+                    ax.text(
+                        0.04, 0.96, f"$n$={n}",
+                        transform=ax.transAxes, va="top", ha="left",
+                        fontsize=8, color="0.25",
+                    )
+                    print(f"  {label} {ylab}: n={n} (too few)")
+                ax.set_xlabel(PARAM_YLABELS["CC"] + r" pair mean")
+                if c == 0:
+                    ax.set_ylabel(ylab)
+                _style_pub_ax(ax)
+                if row == 0:
+                    ax.set_title(f"{label}\n$n_{{ec}}$={int(mask.sum())}", fontsize=10, color="0.2")
+        fig.suptitle(
+            r"$CC_a$ vs $CC$ by age group"
+            "\n"
+            r"top: both $CC_a$; bottom: missing→0; separate Spearman; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "23_CCa_vs_CC_by_age.png")
+
+
+def _cca_asym_panel(ax, d: pd.DataFrame, *, color=None, colors=None, with_fit: bool = True):
+    """CCa max vs min (zero-fill); mark unilateral (min≈0) with open markers."""
+    if len(d) == 0:
+        return
+    x = d["CCa_min_z"].to_numpy(dtype=float)
+    y = d["CCa_max_z"].to_numpy(dtype=float)
+    uni = d["cca_modality"].to_numpy() == "one" if "cca_modality" in d.columns else (x <= 0)
+    both = ~uni
+    if colors is not None:
+        cols = np.asarray(colors)
+        if both.any():
+            ax.scatter(
+                x[both], y[both], c=cols[both], s=POINT_SIZE, alpha=POINT_ALPHA,
+                edgecolors="white", linewidths=0.35, zorder=2,
+            )
+        if uni.any():
+            ax.scatter(
+                x[uni], y[uni], facecolors="none", edgecolors=cols[uni],
+                s=POINT_SIZE * 1.05, linewidths=1.0, zorder=3,
+            )
+    else:
+        if both.any():
+            ax.scatter(
+                x[both], y[both], c=color, s=POINT_SIZE, alpha=POINT_ALPHA,
+                edgecolors="white", linewidths=0.35, zorder=2,
+            )
+        if uni.any():
+            ax.scatter(
+                x[uni], y[uni], facecolors="none", edgecolors=color,
+                s=POINT_SIZE * 1.05, linewidths=1.0, zorder=3,
+            )
+    lim_min, lim_max = _asym_axis_limits(x, y, name="CCa")
+    ax.plot([lim_min, lim_max], [lim_min, lim_max], color="0.35", ls="--", lw=0.9, zorder=1)
+    if with_fit:
+        k = _fit_slope_through_origin(x, y)
+        if k is not None:
+            ax.plot(
+                [lim_min, lim_max], [k * lim_min, k * lim_max],
+                color="crimson", lw=1.2, zorder=1,
+            )
+            ax.text(
+                0.04, 0.96, f"k = {k:.2f}",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+    ax.set_xlim(lim_min, lim_max)
+    ax.set_ylim(lim_min, lim_max)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(r"$CC_a$ min (missing→0)")
+    ax.set_ylabel(r"$CC_a$ max (missing→0)")
+    _style_pub_ax(ax)
+
+
+def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
+    """
+    CCa max vs min like CC/Gj asymmetry clouds.
+    Missing direction filled as 0 (unilateral → min=0, AI→1).
+    Companion: same by age groups.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa asymmetry: amp_ratio columns not found.")
+        return
+    if "CCa_min_z" not in df.columns:
+        print("Skipping CCa asymmetry: zero-fill columns missing.")
+        return
+    sub = analysis_pool(df)
+    d = sub[sub["CCa_min_z"].notna() & sub["CCa_max_z"].notna()].copy()
+    if len(d) == 0:
+        print("Skipping CCa asymmetry: no CCa values.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(d)
+    age_ticks = unique_ages_for_colorbar(d)
+    print(f"\nCCa asymmetry (missing→0): n={len(d)} "
+          f"(both={int((d['cca_modality']=='both').sum())}, "
+          f"one={int((d['cca_modality']=='one').sum())})")
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(5.6, 5.0), constrained_layout=True)
+        colors, _, _ = age_colors(
+            d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+        )
+        _cca_asym_panel(ax, d, colors=colors, with_fit=True)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.45",
+                markeredgecolor="white", markersize=7, label=r"both $CC_a$",
+            ),
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="none",
+                markeredgecolor="0.35", markersize=7, label=r"one $CC_a$ (min=0)",
+            ),
+            Line2D([0], [0], color="0.35", ls="--", lw=0.9, label="identity"),
+            Line2D([0], [0], color="crimson", lw=1.2, label="fit through 0"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=8)
+        cbar = add_age_colorbar(
+            fig, [ax], vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ asymmetry (max vs min)"
+            "\n"
+            r"missing direction = 0; open = unilateral; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "24_CCa_asymmetry.png")
+
+        fig, axes = plt.subplots(1, 3, figsize=(11.5, 4.2), constrained_layout=True)
+        all_x, all_y = [], []
+        for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            g = sub.loc[mask & sub["CCa_min_z"].notna() & sub["CCa_max_z"].notna()]
+            if len(g):
+                all_x.append(g["CCa_min_z"].to_numpy(dtype=float))
+                all_y.append(g["CCa_max_z"].to_numpy(dtype=float))
+        if all_x:
+            lim_min, lim_max = _asym_axis_limits(
+                np.concatenate(all_x), np.concatenate(all_y), name="CCa"
+            )
+        else:
+            lim_min, lim_max = 0.0, 1.0
+        for ax, (label, lo, hi, include_mt, color) in zip(axes, AGE_ASYM_BINS):
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            g = sub.loc[mask & sub["CCa_min_z"].notna() & sub["CCa_max_z"].notna()].copy()
+            ax.plot(
+                [lim_min, lim_max], [lim_min, lim_max],
+                color="0.35", ls="--", lw=0.9, zorder=1,
+            )
+            if len(g):
+                x = g["CCa_min_z"].to_numpy(dtype=float)
+                y = g["CCa_max_z"].to_numpy(dtype=float)
+                uni = g["cca_modality"].to_numpy() == "one"
+                both = ~uni
+                if both.any():
+                    ax.scatter(
+                        x[both], y[both], c=color, s=POINT_SIZE, alpha=POINT_ALPHA,
+                        edgecolors="white", linewidths=0.35, zorder=2,
+                    )
+                if uni.any():
+                    ax.scatter(
+                        x[uni], y[uni], facecolors="none", edgecolors=color,
+                        s=POINT_SIZE * 1.05, linewidths=1.0, zorder=3,
+                    )
+                k = _fit_slope_through_origin(x, y)
+                if k is not None:
+                    ax.plot(
+                        [lim_min, lim_max], [k * lim_min, k * lim_max],
+                        color="crimson", lw=1.2, zorder=1,
+                    )
+                    ax.text(
+                        0.04, 0.96, f"k = {k:.2f}",
+                        transform=ax.transAxes, va="top", ha="left",
+                        fontsize=8, color="0.25",
+                    )
+            ax.set_xlim(lim_min, lim_max)
+            ax.set_ylim(lim_min, lim_max)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xlabel(r"$CC_a$ min (missing→0)")
+            ax.set_ylabel(r"$CC_a$ max (missing→0)")
+            ax.set_title(
+                f"{label}\n$n$={len(g)} (both={int((g['cca_modality']=='both').sum()) if len(g) else 0})",
+                fontsize=10, color="0.2",
+            )
+            _style_pub_ax(ax)
+        fig.suptitle(
+            r"$CC_a$ asymmetry by age (missing→0)"
+            "\n"
+            r"open markers = unilateral; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "24b_CCa_asymmetry_by_age.png")
+
+
+def _day12_stat_panel(ax, d1: np.ndarray, d2: np.ndarray, *, ylabel: str, title: str):
+    """One Day1 vs Day2 panel: jitter + mean±SEM + median + test annotation."""
+    d1 = np.asarray(d1, dtype=float)
+    d2 = np.asarray(d2, dtype=float)
+    d1 = d1[np.isfinite(d1)]
+    d2 = d2[np.isfinite(d2)]
+    if len(d1) == 0 and len(d2) == 0:
+        ax.set_visible(False)
+        return
+    res = compare_two_groups(d1, d2) if (len(d1) and len(d2)) else {
+        "n1": len(d1), "n2": len(d2),
+        "mean1": float(np.mean(d1)) if len(d1) else np.nan,
+        "mean2": float(np.mean(d2)) if len(d2) else np.nan,
+        "sem1": float(stats.sem(d1)) if len(d1) > 1 else 0.0,
+        "sem2": float(stats.sem(d2)) if len(d2) > 1 else 0.0,
+        "median1": float(np.median(d1)) if len(d1) else np.nan,
+        "median2": float(np.median(d2)) if len(d2) else np.nan,
+        "test": "n/a", "p": np.nan,
+    }
+    rng = np.random.default_rng(0)
+    if len(d1):
+        ax.scatter(
+            np.full(len(d1), 1) + rng.normal(0, 0.03, len(d1)), d1,
+            s=14, alpha=0.35, c="0.55", edgecolors="none", zorder=1,
+        )
+    if len(d2):
+        ax.scatter(
+            np.full(len(d2), 2) + rng.normal(0, 0.03, len(d2)), d2,
+            s=14, alpha=0.35, c="0.55", edgecolors="none", zorder=1,
+        )
+    if len(d1) and len(d2):
+        _plot_group_summary(ax, res)
+    ax.set_title(title, fontsize=10, color="0.25")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks([1, 2])
+    ax.set_xticklabels(["Day 1", "Day 2"])
+    ax.text(
+        0.98, 0.96,
+        f"{res['test']}\n{format_p(res.get('p'))}\nn={res['n1']}/{res['n2']}",
+        transform=ax.transAxes, ha="right", va="top", fontsize=8, color="0.25",
+    )
+    _style_pub_ax(ax)
+    print(f"  {title}: {res['test']} {format_p(res.get('p'))}, n={res['n1']}/{res['n2']}")
+
+
+def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
+    """Delay onset/peak Day1 vs Day2 — same template as 22b (pooled + pair mean)."""
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays Day1 vs Day2: delay columns not found.")
+        return
+    dfp = included_pairs(df)
+    on1, on2 = PARAM_DIRS["DelayOnset"]
+    pk1, pk2 = PARAM_DIRS["DelayPeak"]
+    has_any = dfp[on1].notna() | dfp[on2].notna() | dfp[pk1].notna() | dfp[pk2].notna()
+    dfp = dfp[has_any].copy()
+    if len(dfp) == 0:
+        print("Skipping delays Day1 vs Day2: no delay values.")
+        return
+
+    print("\nDelays Day1 vs Day2:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(8.5, 7.2), constrained_layout=True)
+        # onset pooled / mean
+        _day12_stat_panel(
+            axes[0, 0],
+            pool_both_sides(dfp, 1, on1, on2),
+            pool_both_sides(dfp, 2, on1, on2),
+            ylabel=PARAM_YLABELS["DelayOnset"],
+            title=r"Onset pooled $\{12,21\}$",
+        )
+        d1m = dfp.loc[(dfp["day"] == 1) & dfp["DelayOnset_pair_mean"].notna(), "DelayOnset_pair_mean"].to_numpy(dtype=float) if "DelayOnset_pair_mean" in dfp.columns else np.array([])
+        d2m = dfp.loc[(dfp["day"] == 2) & dfp["DelayOnset_pair_mean"].notna(), "DelayOnset_pair_mean"].to_numpy(dtype=float) if "DelayOnset_pair_mean" in dfp.columns else np.array([])
+        _day12_stat_panel(
+            axes[0, 1], d1m, d2m,
+            ylabel=PARAM_YLABELS["DelayOnset"],
+            title=r"Onset pair mean (both)",
+        )
+        _day12_stat_panel(
+            axes[1, 0],
+            pool_both_sides(dfp, 1, pk1, pk2),
+            pool_both_sides(dfp, 2, pk1, pk2),
+            ylabel=PARAM_YLABELS["DelayPeak"],
+            title=r"Peak pooled $\{12,21\}$",
+        )
+        d1p = dfp.loc[(dfp["day"] == 1) & dfp["DelayPeak_pair_mean"].notna(), "DelayPeak_pair_mean"].to_numpy(dtype=float) if "DelayPeak_pair_mean" in dfp.columns else np.array([])
+        d2p = dfp.loc[(dfp["day"] == 2) & dfp["DelayPeak_pair_mean"].notna(), "DelayPeak_pair_mean"].to_numpy(dtype=float) if "DelayPeak_pair_mean" in dfp.columns else np.array([])
+        _day12_stat_panel(
+            axes[1, 1], d1p, d2p,
+            ylabel=PARAM_YLABELS["DelayPeak"],
+            title=r"Peak pair mean (both)",
+        )
+        handles = [
+            Line2D([0], [0], marker="o", color="crimson", lw=0, markersize=6, label="mean ± SEM"),
+            Line2D([0], [0], marker="D", color="royalblue", lw=0, markersize=5, label="median"),
+        ]
+        fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=9)
+        fig.suptitle(
+            r"Day 1 vs Day 2 — onset / peak delay"
+            "\n"
+            + TEST_RULE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "25_delays_day1_vs_day2.png")
+
+
+def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
+    """
+    None / unilateral / bilateral CCa counts (+ %) by pair-mean CC and Gj bins.
+    Shows how many and which modality at each conductance strength.
+    """
+    if not _cca_columns_present(df):
+        print("Skipping CCa modality by conductance: amp_ratio columns not found.")
+        return
+    sub = analysis_pool(df)
+    panels = []
+    if "CC_pair_mean" in sub.columns:
+        panels.append(("CC_pair_mean", CC_BIN_WIDTH, PARAM_YLABELS["CC"] + r" pair mean", "cc"))
+    if "Gj_pair_mean" in sub.columns:
+        panels.append(("Gj_pair_mean", GJ_BIN_WIDTH, PARAM_YLABELS["Gj"] + r" pair mean", "gj"))
+    if not panels:
+        print("Skipping CCa modality by conductance: no CC/Gj pair means.")
+        return
+
+    modality_order = ["none", "one", "both"]
+    modality_colors = {"none": "0.78", "one": "#F4A261", "both": "#2A9D8F"}
+    modality_labels = {
+        "none": r"no $CC_a$",
+        "one": r"unilateral $CC_a$",
+        "both": r"bilateral $CC_a$",
+    }
+
+    print("\nCCa modality by conductance:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            2, len(panels), figsize=(5.2 * len(panels) + 1.5, 7.4), constrained_layout=True
+        )
+        if len(panels) == 1:
+            axes = np.array([[axes[0]], [axes[1]]])
+
+        for c, (xcol, width, xlabel, _tag) in enumerate(panels):
+            d = sub[sub[xcol].notna()].copy()
+            bins, meta = assign_width_bins(d[xcol], width)
+            d["_bin"] = bins
+            labels = [m[0] for m in meta]
+            counts = {m: [] for m in modality_order}
+            for name, _lo, _hi, _n in meta:
+                g = d.loc[d["_bin"] == name]
+                for mod in modality_order:
+                    counts[mod].append(int((g["cca_modality"] == mod).sum()))
+                tot = int(len(g))
+                print(
+                    f"  {xcol} {name}: n={tot} "
+                    f"none={counts['none'][-1]} one={counts['one'][-1]} both={counts['both'][-1]}"
+                )
+
+            x = np.arange(len(labels), dtype=float)
+            # counts stacked
+            ax = axes[0, c]
+            bottom = np.zeros(len(labels), dtype=float)
+            for mod in modality_order:
+                vals = np.asarray(counts[mod], dtype=float)
+                ax.bar(
+                    x, vals, bottom=bottom, width=0.85,
+                    color=modality_colors[mod], edgecolor="white", linewidth=0.4, zorder=2,
+                    label=modality_labels[mod],
+                )
+                bottom += vals
+            tick_labs = [f"{lo:g}–{hi:g}" for _name, lo, hi, _n in meta]
+            ax.set_xticks(x)
+            ax.set_xticklabels(tick_labs, fontsize=7 if len(labels) > 6 else 8)
+            if len(labels) > 6:
+                for lab in ax.get_xticklabels():
+                    lab.set_rotation(35)
+            ax.set_ylabel("pairs")
+            ax.set_xlabel(xlabel + rf" (width={width:g})")
+            ax.set_title("Counts", fontsize=10, color="0.25")
+            _style_pub_ax(ax)
+
+            # percent stacked
+            ax = axes[1, c]
+            bottom = np.zeros(len(labels), dtype=float)
+            totals = sum(np.asarray(counts[m], dtype=float) for m in modality_order)
+            for mod in modality_order:
+                vals = np.asarray(counts[mod], dtype=float)
+                pct = np.where(totals > 0, 100.0 * vals / totals, 0.0)
+                ax.bar(
+                    x, pct, bottom=bottom, width=0.85,
+                    color=modality_colors[mod], edgecolor="white", linewidth=0.4, zorder=2,
+                )
+                bottom += pct
+            ax.set_xticks(x)
+            ax.set_xticklabels(tick_labs, fontsize=7 if len(labels) > 6 else 8)
+            if len(labels) > 6:
+                for lab in ax.get_xticklabels():
+                    lab.set_rotation(35)
+            ax.set_ylim(0, 100)
+            ax.set_ylabel("% of pairs in bin")
+            ax.set_xlabel(xlabel + rf" (width={width:g})")
+            ax.set_title("Percent", fontsize=10, color="0.25")
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], marker="s", color=modality_colors[m], lw=0, markersize=9, label=modality_labels[m])
+            for m in modality_order
+        ]
+        fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ modality vs coupling strength"
+            "\n"
+            r"none / unilateral / bilateral by pair-mean $CC$ and $G_j$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "26_CCa_modality_by_conductance.png")
+
+
+def plot_ai_cca(df: pd.DataFrame, out_dir: Path):
+    """
+    AI for CCa (missing side → 0) vs AI_CC / AI_Gj, and vs CCa mean (zero-fill).
+    """
+    if not _cca_columns_present(df) or "AI_CCa_z" not in df.columns:
+        print("Skipping AI_CCa: columns not found.")
+        return
+    sub = analysis_pool(df)
+    need = ["AI_CCa_z", "AI_CC", "AI_Gj", "CCa_pair_mean_z"]
+    if any(c not in sub.columns for c in need):
+        print("Skipping AI_CCa: missing AI / mean columns.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+
+    print("\nAI_CCa (missing→0):")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(13.2, 4.6), constrained_layout=True)
+        panels = [
+            ("AI_CC", r"AI $CC$", r"AI $CC_a$ (missing→0)"),
+            ("AI_Gj", r"AI $G_{j}$", r"AI $CC_a$ (missing→0)"),
+            ("CCa_pair_mean_z", r"$CC_a$ mean (missing→0)", r"AI $CC_a$ (missing→0)"),
+        ]
+        for ax, (xcol, xlab, ylab) in zip(axes, panels):
+            d = sub[sub["AI_CCa_z"].notna() & sub[xcol].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            # distinguish unilateral (AI=1 typically)
+            uni = d["cca_modality"].to_numpy() == "one" if "cca_modality" in d.columns else np.zeros(len(d), dtype=bool)
+            both = ~uni
+            if both.any():
+                ax.scatter(
+                    d.loc[both, xcol], d.loc[both, "AI_CCa_z"],
+                    c=np.asarray(colors)[both], s=POINT_SIZE, alpha=POINT_ALPHA,
+                    edgecolors="white", linewidths=0.35, zorder=2,
+                )
+            if uni.any():
+                ax.scatter(
+                    d.loc[uni, xcol], d.loc[uni, "AI_CCa_z"],
+                    facecolors="none", edgecolors=np.asarray(colors)[uni],
+                    s=POINT_SIZE * 1.05, linewidths=1.0, zorder=3,
+                )
+            if xcol.startswith("AI_"):
+                ax.plot([0, 1], [0, 1], color="0.35", ls="--", lw=0.9, zorder=1)
+                ax.set_xlim(0, 1.05)
+            ax.set_ylim(0, 1.05)
+            if len(d) >= 3:
+                rho, p = stats.spearmanr(d[xcol], d["AI_CCa_z"])
+                ax.text(
+                    0.04, 0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+                )
+                print(f"  AI_CCa_z vs {xcol}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  AI_CCa_z vs {xcol}: n={len(d)} (too few)")
+            ax.set_xlabel(xlab)
+            ax.set_ylabel(ylab)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.45",
+                markeredgecolor="white", markersize=7, label=r"both $CC_a$",
+            ),
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="none",
+                markeredgecolor="0.35", markersize=7, label=r"unilateral (AI→1)",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=8)
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"AI $CC_a$ vs coupling AI / $CC_a$ strength"
+            "\n"
+            + AI_FORMULA
+            + r"; missing $CC_a$ side = 0; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "27_AI_CCa_vs_AI_CC_Gj.png")
+
+
+def plot_cca_extended_figures(df: pd.DataFrame, out_dir: Path):
+    """Figs 23–27: age Spearman, asymmetry, delays day, modality, AI_CCa."""
+    plot_cca_vs_cc_by_age(df, out_dir)
+    plot_cca_asymmetry(df, out_dir)
+    plot_delays_by_day(df, out_dir)
+    plot_cca_modality_by_conductance(df, out_dir)
+    plot_ai_cca(df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -5313,6 +5949,52 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 plot_cca_coverage_and_rin_figures(df, out_dir),
                 plot_cca_by_day(df, out_dir),
             ),
+        },
+        {
+            "id": "23",
+            "label": "23  CCa vs CC by age (Spearman)",
+            "outputs": ["23_CCa_vs_CC_by_age.png"],
+            "run": lambda: plot_cca_vs_cc_by_age(df, out_dir),
+        },
+        {
+            "id": "24",
+            "label": "24  CCa asymmetry max vs min (+ by age)",
+            "outputs": [
+                "24_CCa_asymmetry.png",
+                "24b_CCa_asymmetry_by_age.png",
+            ],
+            "run": lambda: plot_cca_asymmetry(df, out_dir),
+        },
+        {
+            "id": "25",
+            "label": "25  Delay onset/peak Day1 vs Day2",
+            "outputs": ["25_delays_day1_vs_day2.png"],
+            "run": lambda: plot_delays_by_day(df, out_dir),
+        },
+        {
+            "id": "26",
+            "label": "26  CCa modality (none/one/both) by CC/Gj",
+            "outputs": ["26_CCa_modality_by_conductance.png"],
+            "run": lambda: plot_cca_modality_by_conductance(df, out_dir),
+        },
+        {
+            "id": "27",
+            "label": "27  AI_CCa vs AI_CC / AI_Gj",
+            "outputs": ["27_AI_CCa_vs_AI_CC_Gj.png"],
+            "run": lambda: plot_ai_cca(df, out_dir),
+        },
+        {
+            "id": "23-27",
+            "label": "23–27  CCa age Spearman, asym, delays day, modality, AI",
+            "outputs": [
+                "23_CCa_vs_CC_by_age.png",
+                "24_CCa_asymmetry.png",
+                "24b_CCa_asymmetry_by_age.png",
+                "25_delays_day1_vs_day2.png",
+                "26_CCa_modality_by_conductance.png",
+                "27_AI_CCa_vs_AI_CC_Gj.png",
+            ],
+            "run": lambda: plot_cca_extended_figures(df, out_dir),
         },
     ]
 
