@@ -71,6 +71,10 @@ PARAM_DIRS = {
     "Rin": ("Rin_1", "Rin_2"),
     "Cm": ("Cm_1", "Cm_2"),
     "Vm": ("V_rest_mV_1", "V_rest_mV_2"),
+    # Spike → spikelet transmission (optional Excel columns)
+    "CCa": ("amp_ratio_mean_12", "amp_ratio_mean_21"),
+    "DelayOnset": ("delay_onset_ms_mean_12", "delay_onset_ms_mean_21"),
+    "DelayPeak": ("delay_peak_ms_mean_12", "delay_peak_ms_mean_21"),
 }
 
 PARAM_MATH = {
@@ -79,6 +83,9 @@ PARAM_MATH = {
     "Rin": r"$R_{in}$",
     "Cm": r"$C_{m}$",
     "Vm": r"$V_{m}$",
+    "CCa": r"$CC_{a}$",
+    "DelayOnset": r"$t_{onset}$",
+    "DelayPeak": r"$t_{peak}$",
 }
 
 PARAM_YLABELS = {
@@ -87,6 +94,18 @@ PARAM_YLABELS = {
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_{m}$ [pF]",
     "Vm": r"$V_{m}$ [mV]",
+    "CCa": r"$CC_{a}$ (amp. ratio)",
+    "DelayOnset": r"onset delay [ms]",
+    "DelayPeak": r"peak delay [ms]",
+}
+
+# Marks on CC/Gj axis when CCa is missing for that directed value
+MISSING_CCA_MARKER = {
+    "marker": "x",
+    "color": "0.45",
+    "s": 28,
+    "alpha": 0.85,
+    "linewidths": 1.0,
 }
 
 # Day 1–2–3 figure panels (identity left/right, not sorted)
@@ -346,6 +365,14 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     df = df[keep].copy()
 
     df["in_pool"] = df["day"].isin(POOL_DAYS) & ~df["excluded"] & df["has_gj"]
+    # Spike transmission coverage (optional columns)
+    cca1, cca2 = PARAM_DIRS["CCa"]
+    if cca1 in df.columns and cca2 in df.columns:
+        df["has_cca_any"] = df[cca1].notna() | df[cca2].notna()
+        df["has_cca_both"] = df[cca1].notna() & df[cca2].notna()
+    else:
+        df["has_cca_any"] = False
+        df["has_cca_both"] = False
     return df.reset_index(drop=True)
 
 
@@ -707,6 +734,122 @@ def savefig(fig: plt.Figure, out_dir: Path, name: str):
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"{'Overwrote' if existed else 'Saved'}: {path}")
+
+
+def _spike_cols_present(df: pd.DataFrame) -> bool:
+    need = [
+        *PARAM_DIRS["CCa"],
+        *PARAM_DIRS["DelayOnset"],
+        *PARAM_DIRS["DelayPeak"],
+    ]
+    return all(c in df.columns for c in need)
+
+
+def directed_xy(
+    df: pd.DataFrame,
+    x12: str,
+    x21: str,
+    y12: str,
+    y21: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Stack directed 12/21 into long rows.
+    Returns (has_both_xy, has_x_missing_y) with columns x, y, age_num, is_mt, side.
+    """
+    rows_both = []
+    rows_miss = []
+    for side, xc, yc in (("12", x12, y12), ("21", x21, y21)):
+        if xc not in df.columns or yc not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            xv, yv = r[xc], r[yc]
+            base = {
+                "x": xv,
+                "y": yv,
+                "age_num": r.get("age_num", np.nan),
+                "is_mt": bool(r.get("is_mt", False)),
+                "side": side,
+            }
+            if pd.notna(xv) and pd.notna(yv):
+                rows_both.append(base)
+            elif pd.notna(xv) and pd.isna(yv):
+                rows_miss.append(base)
+    return pd.DataFrame(rows_both), pd.DataFrame(rows_miss)
+
+
+def _scatter_directed_with_missing_rug(
+    ax,
+    both: pd.DataFrame,
+    missing: pd.DataFrame,
+    *,
+    vmin: float,
+    max_age: float,
+    mt_val: float,
+    mark_missing: bool,
+    y_label: str,
+    x_label: str,
+):
+    """Age-coloured scatter for (x,y); optional × rug on x for missing y (CCa)."""
+    if len(both):
+        colors, _, _ = age_colors(
+            both["age_num"].to_numpy(),
+            both["is_mt"].to_numpy(),
+            vmin,
+            max_age,
+            mt_val,
+        )
+        ax.scatter(
+            both["x"],
+            both["y"],
+            c=colors,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=3,
+        )
+        if len(both) >= 3:
+            rho, p = stats.spearmanr(both["x"], both["y"])
+            ax.text(
+                0.04,
+                0.96,
+                f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(both)}",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=8,
+                color="0.25",
+            )
+    if mark_missing and len(missing):
+        # Place missing-CCa marks just above the bottom of the axes
+        y0 = both["y"].min() if len(both) else 0.0
+        y1 = both["y"].max() if len(both) else 1.0
+        span = max(y1 - y0, abs(y1) * 0.05, 1e-6)
+        y_rug = y0 - 0.06 * span
+        ax.scatter(
+            missing["x"],
+            np.full(len(missing), y_rug),
+            marker=MISSING_CCA_MARKER["marker"],
+            c=MISSING_CCA_MARKER["color"],
+            s=MISSING_CCA_MARKER["s"],
+            alpha=MISSING_CCA_MARKER["alpha"],
+            linewidths=MISSING_CCA_MARKER["linewidths"],
+            zorder=2,
+            clip_on=False,
+        )
+        ax.text(
+            0.98,
+            0.04,
+            f"× no $CC_a$: n={len(missing)}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=7.5,
+            color="0.4",
+        )
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    _style_pub_ax(ax)
 
 
 def shapiro_ok(values: np.ndarray) -> tuple[bool, float | None]:
@@ -3636,6 +3779,375 @@ def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
     plot_day_by_age_pair_mean(df, out_dir)
     plot_day_by_age_pooled(df, out_dir)
 
+
+# ---------------------------------------------------------------------------
+# Spike transmission: CCa (amp ratio) and delays
+# ---------------------------------------------------------------------------
+def plot_cca_vs_cc_gj(df: pd.DataFrame, out_dir: Path):
+    """
+    Directed CCa vs CC and vs Gj (matched 12/21).
+    × marks on the x-axis: CC/Gj present but CCa missing for that direction.
+    """
+    if not _spike_cols_present(df):
+        print("Skipping CCa vs CC/Gj: spike/spikelet columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    cca12, cca21 = PARAM_DIRS["CCa"]
+    panels = [
+        ("CC_12", "CC_21", cca12, cca21, PARAM_YLABELS["CC"], PARAM_YLABELS["CCa"]),
+        ("Gj_12", "Gj_21", cca12, cca21, PARAM_YLABELS["Gj"], PARAM_YLABELS["CCa"]),
+    ]
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        print("\nCCa vs CC / Gj (directed; × = CC/Gj without CCa):")
+        for ax, (x12, x21, y12, y21, xlab, ylab) in zip(axes, panels):
+            both, missing = directed_xy(sub, x12, x21, y12, y21)
+            print(f"  {xlab}: with CCa n={len(both)}, without CCa n={len(missing)}")
+            _scatter_directed_with_missing_rug(
+                ax,
+                both,
+                missing,
+                vmin=vmin,
+                max_age=max_age,
+                mt_val=mt_val,
+                mark_missing=True,
+                y_label=ylab,
+                x_label=xlab,
+            )
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.45",
+                markeredgecolor="white", markersize=7, label=r"directed with $CC_a$",
+            ),
+            Line2D(
+                [0], [0], marker="x", color="0.45", lw=0, markersize=7,
+                label=r"$CC$/$G_j$ without $CC_a$",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ (spikelet/spike amp. ratio) vs $CC$ and $G_j$"
+            "\n"
+            r"matched directions $12$/$21$; × = coupling without measurable $CC_a$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "15_CCa_vs_CC_Gj.png")
+
+
+def plot_delays_vs_cca_cc_gj(df: pd.DataFrame, out_dir: Path):
+    """
+    Onset/peak delay vs CCa, CC, Gj (directed).
+    On CC/Gj panels: × marks where CCa is missing for that direction.
+    """
+    if not _spike_cols_present(df):
+        print("Skipping delays vs CCa/CC/Gj: spike columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    cca12, cca21 = PARAM_DIRS["CCa"]
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    # rows: onset, peak; cols: vs CCa, vs CC, vs Gj
+    row_specs = [
+        (on12, on21, PARAM_YLABELS["DelayOnset"]),
+        (pk12, pk21, PARAM_YLABELS["DelayPeak"]),
+    ]
+    col_specs = [
+        (cca12, cca21, PARAM_YLABELS["CCa"], False),
+        ("CC_12", "CC_21", PARAM_YLABELS["CC"], True),
+        ("Gj_12", "Gj_21", PARAM_YLABELS["Gj"], True),
+    ]
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(13.5, 8.2), constrained_layout=True)
+        print("\nDelays vs CCa / CC / Gj:")
+        for r, (y12, y21, ylab) in enumerate(row_specs):
+            for c, (x12, x21, xlab, mark_miss) in enumerate(col_specs):
+                ax = axes[r, c]
+                both, _miss_y = directed_xy(sub, x12, x21, y12, y21)
+                # Missing CCa rug on CC/Gj x-axis (independent of whether delay exists)
+                if mark_miss:
+                    _both_cca, missing_cca = directed_xy(sub, x12, x21, cca12, cca21)
+                else:
+                    missing_cca = pd.DataFrame()
+                print(
+                    f"  {ylab} vs {xlab}: n={len(both)}"
+                    + (f", no CCa n={len(missing_cca)}" if mark_miss else "")
+                )
+                _scatter_directed_with_missing_rug(
+                    ax,
+                    both,
+                    missing_cca,
+                    vmin=vmin,
+                    max_age=max_age,
+                    mt_val=mt_val,
+                    mark_missing=mark_miss,
+                    y_label=ylab,
+                    x_label=xlab,
+                )
+        cbar = add_age_colorbar(
+            fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Onset / peak delay vs $CC_a$, $CC$, $G_j$"
+            "\n"
+            r"matched directions; × on $CC$/$G_j$ panels = no measurable $CC_a$; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "16_delays_vs_CCa_CC_Gj.png")
+
+
+def plot_cca_delays_vs_distance(df: pd.DataFrame, out_dir: Path):
+    """Directed CCa and delays vs Distance (both sides + pair mean when both)."""
+    if not _spike_cols_present(df):
+        print("Skipping CCa/delays vs Distance: spike columns not found.")
+        return
+    if "Distance_um" not in df.columns:
+        print("Skipping CCa/delays vs Distance: no Distance column.")
+        return
+    sub = analysis_pool(df)
+    sub = sub[sub["Distance_um"].notna()].copy()
+    if len(sub) == 0:
+        print("Skipping CCa/delays vs Distance: no Distance values.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        (*PARAM_DIRS["CCa"], "CCa_pair_mean", PARAM_YLABELS["CCa"]),
+        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
+        print("\nCCa / delays vs Distance:")
+        for ax, (c1, c2, mean_col, ylabel) in zip(axes, panels):
+            d = sub.copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            x = d["Distance_um"].to_numpy(dtype=float)
+            y1 = d[c1].to_numpy(dtype=float) if c1 in d.columns else np.full(len(d), np.nan)
+            y2 = d[c2].to_numpy(dtype=float) if c2 in d.columns else np.full(len(d), np.nan)
+            ym = (
+                d[mean_col].to_numpy(dtype=float)
+                if mean_col in d.columns
+                else np.full(len(d), np.nan)
+            )
+            for xi, a, b, col in zip(x, y1, y2, colors):
+                if np.isfinite(a) and np.isfinite(b):
+                    ax.plot([xi, xi], [a, b], color=col, lw=0.6, alpha=0.35, zorder=1)
+                for yv in (a, b):
+                    if np.isfinite(yv):
+                        ax.scatter(
+                            [xi], [yv], c=[col], s=POINT_SIZE * 0.55, alpha=0.45,
+                            edgecolors="white", linewidths=0.3, zorder=2,
+                        )
+            m_ok = np.isfinite(ym) & np.isfinite(x)
+            if m_ok.any():
+                ax.scatter(
+                    x[m_ok], ym[m_ok], c=np.asarray(colors)[m_ok],
+                    s=POINT_SIZE * 1.15, alpha=0.9, edgecolors="0.15",
+                    linewidths=0.5, zorder=3,
+                )
+            if int(m_ok.sum()) >= 3:
+                rho, p = stats.spearmanr(x[m_ok], ym[m_ok])
+                ax.text(
+                    0.04, 0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={int(m_ok.sum())}",
+                    transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+                )
+                print(f"  {ylabel}: ρ={rho:.3f}, {format_p(p)}, n_mean={int(m_ok.sum())}")
+            else:
+                print(f"  {ylabel}: n_mean={int(m_ok.sum())} (too few)")
+            ax.set_xlabel(r"Distance [$\mu$m]")
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.55",
+                markeredgecolor="white", markersize=5, alpha=0.7,
+                label=r"directed $x_{12}$, $x_{21}$",
+            ),
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.35",
+                markeredgecolor="0.15", markersize=7,
+                label=r"pair mean (both sides)",
+            ),
+        ]
+        fig.legend(
+            handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.55),
+            frameon=False, fontsize=9,
+        )
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"$CC_a$ and delays vs inter-soma distance"
+            "\n"
+            r"small: directed; large: pair mean when both sides present; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "17_CCa_delays_vs_distance.png")
+
+
+def plot_delay_spread(df: pd.DataFrame, out_dir: Path):
+    """
+    Delay value spread: both directions as small points joined by a line per pair;
+    large point = pair mean when both sides exist. One-sided pairs: single small point.
+    """
+    if not _spike_cols_present(df):
+        print("Skipping delay spread: spike columns not found.")
+        return
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    panels = [
+        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        print("\nDelay spread (directed + mean):")
+        for ax, (c1, c2, mean_col, ylabel) in zip(axes, panels):
+            d = sub[sub[c1].notna() | sub[c2].notna()].copy()
+            if len(d) == 0:
+                ax.set_visible(False)
+                continue
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            # sort by age for a calmer look
+            order = np.argsort(
+                np.where(d["is_mt"].to_numpy(), mt_val, d["age_num"].to_numpy(dtype=float))
+            )
+            d = d.iloc[order].reset_index(drop=True)
+            colors = np.asarray(colors)[order]
+            xs = np.arange(len(d), dtype=float) + 1.0
+            y1 = d[c1].to_numpy(dtype=float)
+            y2 = d[c2].to_numpy(dtype=float)
+            ym = (
+                d[mean_col].to_numpy(dtype=float)
+                if mean_col in d.columns
+                else np.full(len(d), np.nan)
+            )
+            n_pairs = 0
+            for i, (a, b, col) in enumerate(zip(y1, y2, colors)):
+                xi = xs[i]
+                if np.isfinite(a) and np.isfinite(b):
+                    ax.plot([xi, xi], [a, b], color=col, lw=0.7, alpha=0.4, zorder=1)
+                    ax.scatter(
+                        [xi, xi], [a, b], c=[col, col], s=POINT_SIZE * 0.55,
+                        alpha=0.5, edgecolors="white", linewidths=0.3, zorder=2,
+                    )
+                    n_pairs += 1
+                else:
+                    yv = a if np.isfinite(a) else b
+                    ax.scatter(
+                        [xi], [yv], c=[col], s=POINT_SIZE * 0.55, alpha=0.5,
+                        edgecolors="white", linewidths=0.3, zorder=2,
+                    )
+            m_ok = np.isfinite(ym)
+            if m_ok.any():
+                ax.scatter(
+                    xs[m_ok], ym[m_ok], c=colors[m_ok], s=POINT_SIZE * 1.1,
+                    alpha=0.9, edgecolors="0.15", linewidths=0.5, zorder=3,
+                )
+            ax.set_xlabel("Pair (sorted by age)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlim(0, len(d) + 1)
+            n_one = int(((d[c1].notna() ^ d[c2].notna())).sum())
+            ax.text(
+                0.04, 0.96,
+                f"both sides n={n_pairs}\none side n={n_one}",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            print(f"  {ylabel}: both={n_pairs}, one-sided={n_one}")
+            _style_pub_ax(ax)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.55",
+                markeredgecolor="white", markersize=5,
+                label=r"directed $12$, $21$ (+ line)",
+            ),
+            Line2D(
+                [0], [0], marker="o", color="w", markerfacecolor="0.35",
+                markeredgecolor="0.15", markersize=7, label="pair mean",
+            ),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            "Delay values across pairs"
+            "\n"
+            r"small points = directions (line joins a pair); large = mean; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "18_delay_spread.png")
+
+
+def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
+    """Run all spike/spikelet CCa & delay figures (15–18)."""
+    plot_cca_vs_cc_gj(df, out_dir)
+    plot_delays_vs_cca_cc_gj(df, out_dir)
+    plot_cca_delays_vs_distance(df, out_dir)
+    plot_delay_spread(df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -3822,6 +4334,41 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "14b_day_by_age_pooled_stats.png",
             ],
             "run": lambda: plot_day_by_age_pooled(df, out_dir),
+        },
+        {
+            "id": "15",
+            "label": "15  CCa vs CC / Gj (× = no CCa)",
+            "outputs": ["15_CCa_vs_CC_Gj.png"],
+            "run": lambda: plot_cca_vs_cc_gj(df, out_dir),
+        },
+        {
+            "id": "16",
+            "label": "16  Delays vs CCa / CC / Gj",
+            "outputs": ["16_delays_vs_CCa_CC_Gj.png"],
+            "run": lambda: plot_delays_vs_cca_cc_gj(df, out_dir),
+        },
+        {
+            "id": "17",
+            "label": "17  CCa & delays vs Distance",
+            "outputs": ["17_CCa_delays_vs_distance.png"],
+            "run": lambda: plot_cca_delays_vs_distance(df, out_dir),
+        },
+        {
+            "id": "18",
+            "label": "18  Delay spread (directions + mean)",
+            "outputs": ["18_delay_spread.png"],
+            "run": lambda: plot_delay_spread(df, out_dir),
+        },
+        {
+            "id": "15-18",
+            "label": "15–18  All spike transmission (CCa & delays)",
+            "outputs": [
+                "15_CCa_vs_CC_Gj.png",
+                "16_delays_vs_CCa_CC_Gj.png",
+                "17_CCa_delays_vs_distance.png",
+                "18_delay_spread.png",
+            ],
+            "run": lambda: plot_spike_transmission_figures(df, out_dir),
         },
     ]
 
