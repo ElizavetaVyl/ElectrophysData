@@ -594,6 +594,7 @@ CC_BIN_WIDTH_CCA_COV = 0.025  # directed-CC bins for CCa coverage %
 DISTANCE_BIN_WIDTH = 20.0  # µm
 RIN_BIN_WIDTH = 50.0  # MΩ (receiver Rin for delay bins)
 TAU_BIN_WIDTH = 10.0  # ms (receiver τ for delay bins)
+CM_BIN_WIDTH = 20.0  # pF (receiver Cm for delay bins)
 BIN_POINT_COLOR = "#6E6E6E"
 
 
@@ -646,6 +647,8 @@ def _fmt_bin_edge(v: float, *, kind: str) -> str:
     if kind == "rin":
         return f"{v:.0f}"
     if kind == "tau":
+        return f"{v:.0f}"
+    if kind == "cm":
         return f"{v:.0f}"
     if kind == "gj":
         return f"{v:.2g}"
@@ -6002,6 +6005,20 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
                     vmin=vmin, max_age=max_age, mt_val=mt_val,
                     mark_missing=False, y_label=ylab, x_label=xlab,
                 )
+                if len(both) >= 3:
+                    line = _ols_line_xy(
+                        both["x"].to_numpy(dtype=float),
+                        both["y"].to_numpy(dtype=float),
+                    )
+                    if line is not None:
+                        ax.plot(
+                            line[0],
+                            line[1],
+                            color="0.65",
+                            lw=1.2,
+                            zorder=2,
+                            solid_capstyle="round",
+                        )
         cbar = add_age_colorbar(
             fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
@@ -6014,6 +6031,7 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
             "\n"
             r"$1\!\to\!2$: cell 2; $2\!\to\!1$: cell 1; "
             r"$\tau$ [ms] $=R_{in}$ [M$\Omega$]$\cdot C_m$ [pF]$/1000$; "
+            r"gray line: OLS illustration; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -6023,9 +6041,9 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
 
 def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
     """
-    Onset / peak delay: mean ± SEM by fixed-width bins of receiver Rin / τ.
+    Onset / peak delay: mean ± SEM by fixed-width bins of receiver Rin / τ / Cm.
     Directed values; bins are equal intervals on the value axis (not equal-n quartiles).
-    Empty bins omitted. Widths: RIN_BIN_WIDTH (MΩ), TAU_BIN_WIDTH (ms).
+    Empty bins omitted.
     """
     need = [
         *PARAM_DIRS["DelayOnset"],
@@ -6034,9 +6052,11 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
         "Rin_2",
         "Tau_1",
         "Tau_2",
+        "Cm_1",
+        "Cm_2",
     ]
     if any(c not in df.columns for c in need):
-        print("Skipping delay Rin/τ bins: need delay, Rin, Tau columns.")
+        print("Skipping delay Rin/τ/Cm bins: need delay, Rin, Tau, Cm columns.")
         return
     sub = analysis_pool(df)
     on12, on21 = PARAM_DIRS["DelayOnset"]
@@ -6062,11 +6082,20 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             "tau",
             "ms",
         ),
+        (
+            "Cm_1",
+            "Cm_2",
+            r"$C_{m,\mathrm{recv}}$",
+            CM_BIN_WIDTH,
+            "cm",
+            "pF",
+        ),
     ]
 
     print(
-        f"\nDelay mean±SEM by fixed Rin/τ bins "
-        f"(Rin width={RIN_BIN_WIDTH:g} MΩ, τ width={TAU_BIN_WIDTH:g} ms):"
+        f"\nDelay mean±SEM by fixed Rin/τ/Cm bins "
+        f"(Rin {RIN_BIN_WIDTH:g} MΩ, τ {TAU_BIN_WIDTH:g} ms, "
+        f"Cm {CM_BIN_WIDTH:g} pF):"
     )
     with plt.rc_context(
         {
@@ -6075,7 +6104,7 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.6), constrained_layout=True)
         for r, (y12, y21, ylab) in enumerate(delay_specs):
             for c, (x1, x2, xlab, width, edge_kind, unit) in enumerate(x_specs):
                 ax = axes[r, c]
@@ -6113,7 +6142,6 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
                 ax.set_xlabel(rf"{xlab} bin [{unit}] (width={width:g})")
                 if r == 0:
                     ax.set_title(xlab, fontsize=10, color="0.25")
-                # console summary with continuous Spearman
                 x_all = long["x"].to_numpy(dtype=float)
                 y_all = long["y"].to_numpy(dtype=float)
                 m_sp = np.isfinite(x_all) & np.isfinite(y_all)
@@ -6151,11 +6179,11 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=9
         )
         fig.suptitle(
-            rf"Delay by fixed bins of receiver $R_{{in}}$ / $\tau$"
+            rf"Delay by fixed bins of receiver $R_{{in}}$ / $\tau$ / $C_m$"
             "\n"
             rf"directed; equal intervals on $x$ "
-            rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms; "
-            r"empty bins omitted); "
+            rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms, "
+            rf"$C_m$ {CM_BIN_WIDTH:g} pF; empty bins omitted); "
             r"Spearman on continuous $x$; KW across bins; "
             + POOL_NOTE,
             fontsize=11,
@@ -7135,7 +7163,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "36",
-            "label": "36  Delay mean±SEM by fixed Rin/τ bins",
+            "label": "36  Delay mean±SEM by fixed Rin/τ/Cm bins",
             "outputs": ["36_delays_by_Rin_Tau_quartiles.png"],
             "run": lambda: plot_delays_by_rin_tau_quartiles(df, out_dir),
         },
