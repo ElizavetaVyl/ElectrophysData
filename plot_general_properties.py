@@ -6273,6 +6273,115 @@ def plot_cca_cc_partial_correlation(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "32_CCa_CC_partial_Distance_age.png")
 
 
+def plot_delay_delta_vs_drin(df: pd.DataFrame, out_dir: Path):
+    """
+    Signed Δ peak delay (and onset) vs ΔRin_recv — same template as fig 09/31.
+      Δt_peak = t_peak,12 − t_peak,21
+      ΔRin_recv = Rin_2 − Rin_1
+    Both delay directions required (no zero-fill).
+    """
+    need = [*PARAM_DIRS["DelayPeak"], *PARAM_DIRS["DelayOnset"], "Rin_1", "Rin_2"]
+    if any(c not in df.columns for c in need):
+        print("Skipping Δdelay vs ΔRin: delay/Rin columns not found.")
+        return
+    sub = analysis_pool(df).copy()
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    both_pk = sub[pk12].notna() & sub[pk21].notna()
+    both_on = sub[on12].notna() & sub[on21].notna()
+    sub["dPeak"] = np.where(both_pk, sub[pk12] - sub[pk21], np.nan)
+    sub["dOnset"] = np.where(both_on, sub[on12] - sub[on21], np.nan)
+    sub["dRin_recv"] = sub["Rin_2"] - sub["Rin_1"]
+
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    # Peak first (requested); onset companion
+    panels = [
+        ("dPeak", r"$\Delta t_{peak}=t_{peak,12}-t_{peak,21}$ [ms]"),
+        ("dOnset", r"$\Delta t_{onset}=t_{onset,12}-t_{onset,21}$ [ms]"),
+    ]
+    print("\nSigned Δdelay vs ΔRin_recv:")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        for ax, (col, ylabel) in zip(axes, panels):
+            d = sub[sub[col].notna() & sub["dRin_recv"].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            x = d["dRin_recv"].to_numpy(dtype=float)
+            y = d[col].to_numpy(dtype=float)
+            xpad = max(float(np.nanmax(np.abs(x))) * 1.15, 1.0) if len(x) else 1.0
+            ypad = max(float(np.nanmax(np.abs(y))) * 1.15, 0.1) if len(y) else 0.1
+            ax.axhspan(0, ypad, xmin=0.5, xmax=1.0, color="0.92", zorder=0)
+            ax.axhspan(-ypad, 0, xmin=0.0, xmax=0.5, color="0.92", zorder=0)
+            ax.axhline(0, color="0.45", lw=0.8, zorder=1)
+            ax.axvline(0, color="0.45", lw=0.8, zorder=1)
+            if len(d):
+                ax.scatter(
+                    x, y, c=colors, s=POINT_SIZE, alpha=POINT_ALPHA,
+                    edgecolors="white", linewidths=0.35, zorder=2,
+                )
+            if len(d) >= 5:
+                xs, ys = lowess_smooth(x, y, frac=0.5)
+                ax.plot(xs, ys, color="0.72", lw=2.0, zorder=3)
+            same = (x * y) > 0
+            nonzero = (x != 0) & (y != 0)
+            n_nz = int(nonzero.sum())
+            n_same = int((same & nonzero).sum())
+            frac = n_same / n_nz if n_nz else np.nan
+            binom_p = binom_pvalue(n_same, n_nz, 0.5) if n_nz >= 5 else np.nan
+            rho, sp = stats.spearmanr(x, y) if len(d) >= 3 else (np.nan, np.nan)
+            ax.text(
+                0.04, 0.96,
+                "\n".join(
+                    s for s in [
+                        f"same sign {n_same}/{n_nz}"
+                        + (f" ({100 * frac:.0f}%)" if n_nz else ""),
+                        f"binomial {format_p(binom_p)}",
+                        f"Spearman ρ={rho:.2f}" if np.isfinite(rho) else "Spearman n/a",
+                        format_p(sp) if np.isfinite(sp) else "",
+                    ] if s
+                ),
+                transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.25",
+            )
+            print(
+                f"  {col}: same-sign {n_same}/{n_nz}, "
+                f"binomial {format_p(binom_p)}; ρ={rho:.3f}, {format_p(sp)}"
+            )
+            ax.set_xlim(-xpad, xpad)
+            ax.set_ylim(-ypad, ypad)
+            ax.set_xlabel(r"$\Delta R_{in,recv}=R_{in,2}-R_{in,1}$ [M$\Omega$]")
+            ax.set_ylabel(ylabel)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], color="0.72", lw=2.0, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Signed $\Delta$ delay vs receiver $\Delta R_{in}$"
+            "\n"
+            r"shaded: same sign; both delay directions required; light gray: LOWESS; "
+            + POOL_NOTE,
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "34_dPeak_dOnset_vs_dRin.png")
+
+
 def plot_delay_cca_followup_figures(df: pd.DataFrame, out_dir: Path):
     """Figs 28–32."""
     plot_delays_vs_rin_receiver(df, out_dir)
@@ -6675,6 +6784,12 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "32_CCa_CC_partial_Distance_age.png",
             ],
             "run": lambda: plot_delay_cca_followup_figures(df, out_dir),
+        },
+        {
+            "id": "34",
+            "label": "34  Δ peak/onset delay vs ΔRin",
+            "outputs": ["34_dPeak_dOnset_vs_dRin.png"],
+            "run": lambda: plot_delay_delta_vs_drin(df, out_dir),
         },
     ]
 
