@@ -668,11 +668,13 @@ def _draw_width_bin_panel(
     y_lim: tuple[float, float] | None = None,
     connect_means: bool = False,
     spearman_xy: tuple[np.ndarray, np.ndarray] | None = None,
+    dunn_brackets: bool = False,
 ):
-    """Jittered points + mean±SEM + median; light KW on bins with n≥3 only."""
+    """Jittered points + mean±SEM + median; KW; optional Dunn brackets between bins."""
     n_bins = len(meta)
     mean_xs: list[float] = []
     mean_ys: list[float] = []
+    y_hi = -np.inf
     for i, ((name, lo, hi, _n), vals) in enumerate(zip(meta, samples)):
         if len(vals) == 0:
             continue
@@ -691,10 +693,11 @@ def _draw_width_bin_panel(
             zorder=2,
         )
         mu = float(np.mean(vals))
+        sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
         ax.errorbar(
             [xpos],
             [mu],
-            yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
+            yerr=[sem],
             fmt="o",
             color="crimson",
             markersize=6,
@@ -711,6 +714,7 @@ def _draw_width_bin_panel(
         )
         mean_xs.append(float(xpos))
         mean_ys.append(mu)
+        y_hi = max(y_hi, float(np.nanmax(vals)), mu + sem)
 
     if connect_means and len(mean_xs) >= 2:
         ax.plot(
@@ -730,23 +734,38 @@ def _draw_width_bin_panel(
         m = np.isfinite(sx) & np.isfinite(sy)
         if int(m.sum()) >= 3:
             rho, p_sp = stats.spearmanr(sx[m], sy[m])
-            stats_bits.append(f"Spearman ρ={rho:.2f}\n{format_p(p_sp)}\n$n$={int(m.sum())}")
+            stats_bits.append(
+                f"Spearman ρ={rho:.2f}\n{format_p(p_sp)}\n$n$={int(m.sum())}"
+            )
 
-    nonempty = [s for s in samples if len(s) >= 3]
-    if len(nonempty) >= 2:
+    # KW (+ optional Dunn) on bins with n≥3
+    dunn_labels: list[str] = []
+    dunn_samples: list[np.ndarray] = []
+    x_pos: dict[str, float] = {}
+    for i, ((name, _lo, _hi, _n), vals) in enumerate(zip(meta, samples)):
+        if len(vals) >= 3:
+            dunn_labels.append(name)
+            dunn_samples.append(np.asarray(vals, dtype=float))
+            x_pos[name] = float(i + 1)
+
+    p_kw = np.nan
+    dunn_pairs: list[tuple[str, str, float]] = []
+    if len(dunn_samples) >= 2:
         try:
-            _h, p_kw = stats.kruskal(*nonempty)
+            _h, p_kw = stats.kruskal(*dunn_samples)
             stats_bits.append(f"KW {format_p(p_kw)}\n(bins n≥3)")
+            if dunn_brackets:
+                dunn_pairs = _dunn_posthoc(dunn_samples, dunn_labels)
         except ValueError:
             pass
 
     if stats_bits:
         ax.text(
+            0.02,
             0.98,
-            0.96,
             "\n".join(stats_bits),
             transform=ax.transAxes,
-            ha="right",
+            ha="left",
             va="top",
             fontsize=7.5,
             color="0.35",
@@ -764,9 +783,44 @@ def _draw_width_bin_panel(
         ax.tick_params(axis="x", pad=2)
     ax.set_xlim(0.4, n_bins + 0.6)
     ax.set_ylabel(ylabel)
+
     if y_lim is not None:
         ax.set_ylim(*y_lim)
+        y_lo, y_hi_lim = y_lim
+        span = max(y_hi_lim - y_lo, 1e-6)
+    else:
+        if not np.isfinite(y_hi):
+            y_hi = 1.0
+        y_lo = 0.0
+        # leave headroom for Dunn brackets
+        span = max(y_hi - y_lo, 1e-6)
+        ax.set_ylim(y_lo, y_hi + 0.08 * span)
+
+    if dunn_brackets and dunn_pairs:
+        sig_pairs = [
+            (a, b, pv) for a, b, pv in dunn_pairs if p_to_stars(pv) != "ns"
+        ]
+        sig_pairs.sort(key=lambda t: abs(x_pos[t[0]] - x_pos[t[1]]))
+        y0, y1 = ax.get_ylim()
+        span = max(y1 - y0, 1e-6)
+        bracket_y = y_hi + 0.06 * span if np.isfinite(y_hi) else y0 + 0.85 * span
+        step = 0.09 * span
+        for a, b, pv in sig_pairs:
+            _sig_bracket(
+                ax,
+                x_pos[a],
+                x_pos[b],
+                bracket_y,
+                p_to_stars(pv),
+                h=0.03 * span,
+                fs=9,
+            )
+            bracket_y += step
+        if sig_pairs:
+            ax.set_ylim(y0, max(y1, bracket_y + 0.04 * span))
+
     _style_pub_ax(ax)
+    return {"p_kw": p_kw, "dunn": dunn_pairs}
 
 
 def add_age_colorbar(
@@ -5958,35 +6012,27 @@ def plot_delays_vs_rin_receiver(df: pd.DataFrame, out_dir: Path):
 
 def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
     """
-    Onset / peak delay vs receiver Cm and vs receiver τ.
-    τ_cell ≈ Rin × Cm; with Rin [MΩ], Cm [pF]: τ [ms] = Rin·Cm/1000.
+    Onset / peak delay vs receiver Cm (scatter only — no bins).
     """
     need = [
         *PARAM_DIRS["DelayOnset"],
         *PARAM_DIRS["DelayPeak"],
         "Cm_1",
         "Cm_2",
-        "Tau_1",
-        "Tau_2",
     ]
     if any(c not in df.columns for c in need):
-        print("Skipping delays vs Cm/τ: need delay, Cm, and Tau columns.")
+        print("Skipping delays vs Cm: need delay and Cm columns.")
         return
     sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
     on12, on21 = PARAM_DIRS["DelayOnset"]
     pk12, pk21 = PARAM_DIRS["DelayPeak"]
-    # rows = delay type; cols = Cm_recv, Tau_recv
-    row_specs = [
+    panels = [
         (on12, on21, PARAM_YLABELS["DelayOnset"]),
         (pk12, pk21, PARAM_YLABELS["DelayPeak"]),
     ]
-    col_specs = [
-        ("Cm_1", "Cm_2", r"$C_{m,\mathrm{recv}}$ [pF]"),
-        ("Tau_1", "Tau_2", r"$\tau_{\mathrm{recv}}\approx R_{in}C_m$ [ms]"),
-    ]
-    print("\nDelays vs Cm_recv / τ_recv:")
+    print("\nDelays vs Cm_recv:")
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -5994,43 +6040,46 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.2), constrained_layout=True)
-        for r, (y12, y21, ylab) in enumerate(row_specs):
-            for c, (x1, x2, xlab) in enumerate(col_specs):
-                ax = axes[r, c]
-                both = directed_delay_vs_recv_param(sub, y12, y21, x1, x2)
-                print(f"  {ylab} vs {xlab}: n={len(both)}")
-                _scatter_directed_with_missing_rug(
-                    ax, both, pd.DataFrame(),
-                    vmin=vmin, max_age=max_age, mt_val=mt_val,
-                    mark_missing=False, y_label=ylab, x_label=xlab,
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), constrained_layout=True)
+        for ax, (y12, y21, ylab) in zip(axes, panels):
+            both = directed_delay_vs_recv_param(sub, y12, y21, "Cm_1", "Cm_2")
+            print(f"  {ylab} vs Cm_recv: n={len(both)}")
+            _scatter_directed_with_missing_rug(
+                ax,
+                both,
+                pd.DataFrame(),
+                vmin=vmin,
+                max_age=max_age,
+                mt_val=mt_val,
+                mark_missing=False,
+                y_label=ylab,
+                x_label=r"$C_{m,\mathrm{recv}}$ [pF]",
+            )
+            if len(both) >= 3:
+                line = _ols_line_xy(
+                    both["x"].to_numpy(dtype=float),
+                    both["y"].to_numpy(dtype=float),
                 )
-                if len(both) >= 3:
-                    line = _ols_line_xy(
-                        both["x"].to_numpy(dtype=float),
-                        both["y"].to_numpy(dtype=float),
+                if line is not None:
+                    ax.plot(
+                        line[0],
+                        line[1],
+                        color="0.65",
+                        lw=1.2,
+                        zorder=2,
+                        solid_capstyle="round",
                     )
-                    if line is not None:
-                        ax.plot(
-                            line[0],
-                            line[1],
-                            color="0.65",
-                            lw=1.2,
-                            zorder=2,
-                            solid_capstyle="round",
-                        )
         cbar = add_age_colorbar(
-            fig, list(axes.ravel()), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
         )
         cbar.outline.set_linewidth(0.6)
         cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
         cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
-            r"Onset / peak delay vs receiver $C_m$ and $\tau$"
+            r"Onset / peak delay vs receiver $C_m$"
             "\n"
             r"$1\!\to\!2$: cell 2; $2\!\to\!1$: cell 1; "
-            r"$\tau$ [ms] $=R_{in}$ [M$\Omega$]$\cdot C_m$ [pF]$/1000$; "
             r"gray line: OLS illustration; "
             + POOL_NOTE,
             fontsize=11,
@@ -6041,9 +6090,9 @@ def plot_delays_vs_cm_tau_receiver(df: pd.DataFrame, out_dir: Path):
 
 def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
     """
-    Onset / peak delay: mean ± SEM by fixed-width bins of receiver Rin / τ / Cm.
-    Directed values; bins are equal intervals on the value axis (not equal-n quartiles).
-    Empty bins omitted.
+    Onset / peak delay: mean ± SEM by fixed-width bins of receiver Rin / τ.
+    Between-bin statistics: Kruskal–Wallis + Dunn (Bonferroni) brackets.
+    No Spearman. Cm is plotted separately as a continuous scatter (fig 35).
     """
     need = [
         *PARAM_DIRS["DelayOnset"],
@@ -6052,11 +6101,9 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
         "Rin_2",
         "Tau_1",
         "Tau_2",
-        "Cm_1",
-        "Cm_2",
     ]
     if any(c not in df.columns for c in need):
-        print("Skipping delay Rin/τ/Cm bins: need delay, Rin, Tau, Cm columns.")
+        print("Skipping delay Rin/τ bins: need delay, Rin, Tau columns.")
         return
     sub = analysis_pool(df)
     on12, on21 = PARAM_DIRS["DelayOnset"]
@@ -6082,20 +6129,12 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             "tau",
             "ms",
         ),
-        (
-            "Cm_1",
-            "Cm_2",
-            r"$C_{m,\mathrm{recv}}$",
-            CM_BIN_WIDTH,
-            "cm",
-            "pF",
-        ),
     ]
 
     print(
-        f"\nDelay mean±SEM by fixed Rin/τ/Cm bins "
-        f"(Rin {RIN_BIN_WIDTH:g} MΩ, τ {TAU_BIN_WIDTH:g} ms, "
-        f"Cm {CM_BIN_WIDTH:g} pF):"
+        f"\nDelay mean±SEM by fixed Rin/τ bins "
+        f"(Rin {RIN_BIN_WIDTH:g} MΩ, τ {TAU_BIN_WIDTH:g} ms); "
+        f"KW + Dunn between bins:"
     )
     with plt.rc_context(
         {
@@ -6104,7 +6143,7 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.6), constrained_layout=True)
         for r, (y12, y21, ylab) in enumerate(delay_specs):
             for c, (x1, x2, xlab, width, edge_kind, unit) in enumerate(x_specs):
                 ax = axes[r, c]
@@ -6126,7 +6165,7 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
                     .to_numpy(dtype=float)
                     for name, _lo, _hi, _n in meta
                 ]
-                _draw_width_bin_panel(
+                info = _draw_width_bin_panel(
                     ax,
                     samples=samples,
                     meta=meta,
@@ -6134,25 +6173,26 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
                     edge_kind=edge_kind,
                     seed_key=f"36|{ylab}|{xlab}",
                     connect_means=True,
-                    spearman_xy=(
-                        long["x"].to_numpy(dtype=float),
-                        long["y"].to_numpy(dtype=float),
-                    ),
+                    dunn_brackets=True,
                 )
                 ax.set_xlabel(rf"{xlab} bin [{unit}] (width={width:g})")
                 if r == 0:
                     ax.set_title(xlab, fontsize=10, color="0.25")
-                x_all = long["x"].to_numpy(dtype=float)
-                y_all = long["y"].to_numpy(dtype=float)
-                m_sp = np.isfinite(x_all) & np.isfinite(y_all)
-                sp_txt = ""
-                if int(m_sp.sum()) >= 3:
-                    rho, p_sp = stats.spearmanr(x_all[m_sp], y_all[m_sp])
-                    sp_txt = f"; Spearman ρ={rho:.2f} {format_p(p_sp)}"
+                dunn = info.get("dunn") or []
+                sig = [
+                    f"{a} vs {b} {format_p(pv)} {p_to_stars(pv)}"
+                    for a, b, pv in dunn
+                    if p_to_stars(pv) != "ns"
+                ]
                 print(
                     f"  {ylab} vs {xlab}: "
                     + ", ".join(f"{name} n={n}" for name, _lo, _hi, n in meta)
-                    + sp_txt
+                    + f"; KW {format_p(info.get('p_kw'))}"
+                    + (
+                        f"; Dunn sig: {'; '.join(sig)}"
+                        if sig
+                        else "; Dunn: no significant pairs"
+                    )
                 )
 
         handles = [
@@ -6179,12 +6219,12 @@ def plot_delays_by_rin_tau_quartiles(df: pd.DataFrame, out_dir: Path):
             handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=9
         )
         fig.suptitle(
-            rf"Delay by fixed bins of receiver $R_{{in}}$ / $\tau$ / $C_m$"
+            rf"Delay by fixed bins of receiver $R_{{in}}$ / $\tau$"
             "\n"
-            rf"directed; equal intervals on $x$ "
-            rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms, "
-            rf"$C_m$ {CM_BIN_WIDTH:g} pF; empty bins omitted); "
-            r"Spearman on continuous $x$; KW across bins; "
+            rf"directed; equal intervals "
+            rf"($R_{{in}}$ {RIN_BIN_WIDTH:g} MΩ, $\tau$ {TAU_BIN_WIDTH:g} ms; "
+            r"empty bins omitted); "
+            r"KW + Dunn brackets (Bonferroni) between bins; "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
@@ -7259,13 +7299,13 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "35",
-            "label": "35  Delays vs Cm_recv and τ_recv",
+            "label": "35  Delays vs Cm_recv (scatter)",
             "outputs": ["35_delays_vs_Cm_Tau_receiver.png"],
             "run": lambda: plot_delays_vs_cm_tau_receiver(df, out_dir),
         },
         {
             "id": "36",
-            "label": "36  Delay mean±SEM by fixed Rin/τ/Cm bins",
+            "label": "36  Delay by Rin/τ bins (KW+Dunn)",
             "outputs": ["36_delays_by_Rin_Tau_quartiles.png"],
             "run": lambda: plot_delays_by_rin_tau_quartiles(df, out_dir),
         },
