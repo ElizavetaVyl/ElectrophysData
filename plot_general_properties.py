@@ -140,6 +140,15 @@ AGE_ASYM_BINS = [
     ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
 ]
 
+# Finer age bins for delay (onset/peak) by age group — fig 37
+# Same P50+ rule as AGE_ASYM_BINS: age > 50 (+ Dam/MT); age 50 stays in P33–50.
+DELAY_AGE_BINS = [
+    ("P10–21", 10, 21, False, "#FB8C00"),  # orange
+    ("P22–32", 22, 32, False, "#D84315"),  # deep orange
+    ("P33–50", 33, 50, False, "#8E24AA"),  # purple
+    ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
+]
+
 AI_METRICS = [
     ("AI_Gj", r"AI $G_{j}$"),
     ("AI_CC", r"AI $CC$"),
@@ -5660,7 +5669,7 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    Age groups P10–21 / P22–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
     Companion text figure with medians, n, KW and Dunn.
     """
     need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
@@ -5681,8 +5690,10 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         print("Skipping delays by age group: no delay values in analysis pool.")
         return
 
-    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    age_bins = DELAY_AGE_BINS
+    group_labels = [b[0] for b in age_bins]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    bins_note = " / ".join(group_labels)
 
     row_pooled = [
         ("pool", (on12, on21), PARAM_YLABELS["DelayOnset"]),
@@ -5695,7 +5706,7 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
 
     def _samples_for(mode: str, spec) -> list[np.ndarray]:
         samples = []
-        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+        for _label, lo, hi, include_mt, _color in age_bins:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             g = sub.loc[mask]
             if mode == "pair":
@@ -5726,9 +5737,14 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             dunn_bits = [
                 f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
             ]
+            # With 4 bins Dunn is long — KW on-axis, pairs on next lines
             stat_txt = f"KW {format_p(p)}"
             if dunn_bits:
-                stat_txt += "\nDunn: " + "; ".join(dunn_bits)
+                mid = max(1, (len(dunn_bits) + 1) // 2)
+                stat_txt += (
+                    "\nDunn: " + "; ".join(dunn_bits[:mid])
+                    + "\n" + "; ".join(dunn_bits[mid:])
+                )
             n_bits = ", ".join(
                 f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
             )
@@ -5743,7 +5759,7 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
 
     def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
         samples = _samples_for(mode, spec)
-        for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
+        for (label, _lo, _hi, _mt, color), vals in zip(age_bins, samples):
             if len(vals) == 0:
                 continue
             jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
@@ -5780,7 +5796,7 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
 
         stat_txt = _kw_dunn_text(samples, seed_key)
         ax.set_xticks([x_pos[l] for l in group_labels])
-        ax.set_xticklabels(group_labels)
+        ax.set_xticklabels(group_labels, fontsize=8)
         ax.set_ylabel(ylabel)
         ax.set_xlabel("")
         ax.text(
@@ -5790,7 +5806,7 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             transform=ax.transAxes,
             ha="center",
             va="bottom",
-            fontsize=7,
+            fontsize=6.5,
             color="0.25",
         )
         _style_pub_ax(ax)
@@ -5805,10 +5821,10 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.0, 8.2), constrained_layout=True)
+        fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.4), constrained_layout=True)
         print(
             "\nDelays by age group — pooled sides & pair mean — "
-            "Kruskal–Wallis + Dunn (Bonferroni):"
+            f"{bins_note} — Kruskal–Wallis + Dunn (Bonferroni):"
         )
         titles_keys = [
             ("Onset pooled", "pooled_onset", row_pooled[0]),
@@ -5822,10 +5838,10 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             samples, stat_txt = _panel(ax, mode, spec, ylabel, key)
             panel_stats.append((title, samples, stat_txt))
 
-        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=18)
-        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=18)
-        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
-        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=22)
+        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=22)
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=22)
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=22)
 
         legend_handles = [
             Line2D(
@@ -5857,7 +5873,8 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Onset / peak delay by age group"
             "\n"
-            rf"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
+            rf"{bins_note}; top: pooled sides; bottom: pair mean; "
+            rf"Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -5871,12 +5888,12 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig_s, ax_s = plt.subplots(figsize=(9.5, 6.5), constrained_layout=True)
+        fig_s, ax_s = plt.subplots(figsize=(10.0, 7.2), constrained_layout=True)
         ax_s.axis("off")
         lines = [
             "Delays by age group — statistics",
             f"{POOL_NOTE}",
-            "Kruskal–Wallis across P10–32 / P33–50 / P50+; Dunn post-hoc (Bonferroni).",
+            f"Kruskal–Wallis across {bins_note}; Dunn post-hoc (Bonferroni).",
             "",
         ]
         for title, samples, stat_txt in panel_stats:
@@ -7571,7 +7588,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "37",
-            "label": "37  Delays by age group (pooled + pair mean + stats)",
+            "label": "37  Delays by age (P10–21 / P22–32 / P33–50 / P50+)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
