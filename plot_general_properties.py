@@ -5924,6 +5924,123 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         savefig(fig_s, out_dir, "37b_delays_by_age_group_stats.png")
 
 
+# ---------------------------------------------------------------------------
+# Pair-mean onset / peak delay vs continuous (warped) age — Spearman + LOWESS
+# ---------------------------------------------------------------------------
+def plot_delays_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
+    """
+    Continuous alternative to age-group KW: pair-mean onset and peak delay vs age.
+    Annotate Spearman ρ; overlay LOWESS (same template as Gj/CC fig 10).
+    """
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays vs age continuous: delay columns not found.")
+        return
+    sub = analysis_pool(df)
+    if "DelayOnset_pair_mean" not in sub.columns and "DelayPeak_pair_mean" not in sub.columns:
+        print("Skipping delays vs age continuous: pair-mean columns missing.")
+        return
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    sub = sub.copy()
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
+    panels = [
+        ("DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"] + r" pair mean"),
+        ("DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"] + r" pair mean"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), constrained_layout=True)
+        print("\nPair-mean onset / peak delay vs warped age (Spearman + LOWESS):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna()].copy()
+            if len(d) == 0:
+                ax.set_visible(False)
+                print(f"  {col}: n=0")
+                continue
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d["x_warp"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 5:
+                xs, ys = lowess_smooth(
+                    d["x_warp"].to_numpy(dtype=float),
+                    d[col].to_numpy(dtype=float),
+                    frac=0.45,
+                )
+                ax.plot(xs, ys, color="crimson", lw=1.6, zorder=3, label="LOWESS")
+            if len(d) >= 3:
+                age_for_rank = np.where(
+                    d["is_mt"].to_numpy(),
+                    mt_val,
+                    d["age_num"].to_numpy(dtype=float),
+                )
+                rho, p = stats.spearmanr(age_for_rank, d[col].to_numpy(dtype=float))
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col}: n={len(d)} (too few)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("Age [postnatal days]")
+            _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], color="crimson", lw=1.6, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Pair-mean onset / peak delay vs age (continuous)"
+            "\n"
+            rf"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "38_delays_vs_age_continuous.png")
+
+
 def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
     """
     None / unilateral / bilateral CCa counts (+ %) by pair-mean CC and Gj bins.
@@ -7594,6 +7711,12 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "37b_delays_by_age_group_stats.png",
             ],
             "run": lambda: plot_delays_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "38",
+            "label": "38  Pair-mean delays vs age (Spearman + LOWESS)",
+            "outputs": ["38_delays_vs_age_continuous.png"],
+            "run": lambda: plot_delays_vs_age_continuous(df, out_dir),
         },
     ]
 
