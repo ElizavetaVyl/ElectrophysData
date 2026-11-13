@@ -4405,8 +4405,8 @@ def plot_cca_delays_vs_distance(df: pd.DataFrame, out_dir: Path):
 
 
 def plot_delay_spread(df: pd.DataFrame, out_dir: Path):
-    """Alias: CCa + delays vs age (gray points) — fig 18/19."""
-    plot_cca_delays_vs_age(df, out_dir)
+    """Alias: delays vs age (gray points) — fig 18."""
+    plot_delays_vs_age_gray(df, out_dir)
 
 
 def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
@@ -4414,7 +4414,8 @@ def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
     plot_cca_vs_cc_gj(df, out_dir)
     plot_delays_vs_cca_cc_gj(df, out_dir)
     plot_cca_delays_vs_distance(df, out_dir)
-    plot_cca_delays_vs_age(df, out_dir)
+    plot_delays_vs_age_gray(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
 
 
 def _cca_columns_present(df: pd.DataFrame) -> bool:
@@ -4604,23 +4605,24 @@ def _scatter_gray_vs_warped_age(
     _style_pub_ax(ax)
 
 
-def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
+def _plot_panels_vs_age_gray(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    panels: list[tuple[str, str, str, str]],
+    outfile: str,
+    title_main: str,
+    log_label: str,
+):
     """
-    CCa + onset/peak delay vs warped age on one figure (3 panels).
-    Points gray; age encoded only by x-axis (+ shared age colourbar).
+    Shared gray-vs-age figure builder.
+    panels: (c1, c2, mean_col, ylabel)
     """
-    if not _spike_cols_present(df):
-        print("Skipping CCa/delays vs age: spike columns not found.")
-        return
     sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
-    panels = [
-        (*PARAM_DIRS["CCa"], "CCa_pair_mean", PARAM_YLABELS["CCa"]),
-        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
-        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
-    ]
-    print("\nCCa / delays vs age (gray points; age on x):")
+    n = len(panels)
+    print(f"\n{log_label} (gray points; age on x):")
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -4628,8 +4630,16 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
-        for ax, (c1, c2, mean_col, ylab) in zip(axes, panels):
+        fig_w = 5.0 + 4.2 * max(n - 1, 0) if n > 1 else 6.2
+        fig, axes = plt.subplots(
+            1, n, figsize=(fig_w, 4.6), constrained_layout=True, squeeze=False
+        )
+        axes_flat = list(axes.ravel())
+        for ax, (c1, c2, mean_col, ylab) in zip(axes_flat, panels):
+            if c1 not in sub.columns or c2 not in sub.columns:
+                ax.set_visible(False)
+                print(f"  {ylab}: columns missing")
+                continue
             d = sub[sub[c1].notna() | sub[c2].notna()].copy()
             print(f"  {ylab}: n_pairs={len(d)}")
             if len(d) == 0:
@@ -4652,31 +4662,69 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         _age_axis_colorbar(
-            fig, axes, vmin=vmin, max_age=max_age, mt_val=mt_val,
+            fig, axes_flat, vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
         )
         fig.suptitle(
-            r"$CC_a$ and delays vs age"
-            "\n"
-            r"gray points (age = x-axis / colourbar only; no point colour); "
+            title_main
+            + "\n"
+            + r"gray points (age = x-axis / colourbar only; no point colour); "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
-        savefig(fig, out_dir, "18_CCa_delays_vs_age.png")
-        # Alias for catalog / prior 19 naming (savefig closes the figure)
-        alias = out_dir / "19_CCa_vs_age.png"
-        src = out_dir / "18_CCa_delays_vs_age.png"
-        if src.is_file():
-            alias.write_bytes(src.read_bytes())
-            print(f"{'Overwrote' if alias.is_file() else 'Saved'}: {alias}")
+        savefig(fig, out_dir, outfile)
+
+
+def plot_delays_vs_age_gray(df: pd.DataFrame, out_dir: Path):
+    """Onset / peak delay vs warped age; gray points (fig 18)."""
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays vs age (gray): delay columns not found.")
+        return
+    panels = [
+        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+    _plot_panels_vs_age_gray(
+        df,
+        out_dir,
+        panels=panels,
+        outfile="18_delays_vs_age.png",
+        title_main=r"Onset / peak delay vs age",
+        log_label="Delays vs age",
+    )
+
+
+def plot_cca_vs_age_gray(df: pd.DataFrame, out_dir: Path):
+    """CCa vs warped age; gray points (fig 19) — companion to age-group KW."""
+    if not _cca_columns_present(df):
+        print("Skipping CCa vs age (gray): amp_ratio columns not found.")
+        return
+    panels = [
+        (*PARAM_DIRS["CCa"], "CCa_pair_mean", PARAM_YLABELS["CCa"]),
+    ]
+    _plot_panels_vs_age_gray(
+        df,
+        out_dir,
+        panels=panels,
+        outfile="19_CCa_vs_age.png",
+        title_main=r"$CC_a$ vs age",
+        log_label="CCa vs age",
+    )
+
+
+def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
+    """Backward-compatible wrapper: separate gray delay + CCa age figures."""
+    plot_delays_vs_age_gray(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
 
 
 def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
     """
-    Combined CCa+delays vs age (gray points), plus CCa by age-group KW companion.
+    CCa vs age (gray points) plus CCa by age-group KW companion (19 + 19b).
     """
-    plot_cca_delays_vs_age(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
     if not _cca_columns_present(df):
         return
     sub = analysis_pool(df)
@@ -5922,164 +5970,6 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             color="0.15",
         )
         savefig(fig_s, out_dir, "37b_delays_by_age_group_stats.png")
-
-
-# ---------------------------------------------------------------------------
-# Pair-mean onset / peak delay by age group (KW + Dunn)
-# ---------------------------------------------------------------------------
-def plot_delays_pair_mean_by_age_groups(df: pd.DataFrame, out_dir: Path):
-    """
-    1×2: pair-mean onset and peak delay by DELAY_AGE_BINS
-    (P10–21 / P22–32 / P33–50 / P50+); Kruskal–Wallis + Dunn (Bonferroni).
-    """
-    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
-    if any(c not in df.columns for c in need):
-        print("Skipping pair-mean delays by age group: delay columns not found.")
-        return
-    sub = analysis_pool(df)
-    panels = [
-        ("DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"] + r" pair mean"),
-        ("DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"] + r" pair mean"),
-    ]
-    if all(col not in sub.columns for col, _ in panels):
-        print("Skipping pair-mean delays by age group: pair-mean columns missing.")
-        return
-
-    age_bins = DELAY_AGE_BINS
-    group_labels = [b[0] for b in age_bins]
-    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
-    bins_note = " / ".join(group_labels)
-
-    def _samples(col: str) -> list[np.ndarray]:
-        samples = []
-        for _label, lo, hi, include_mt, _color in age_bins:
-            g = sub.loc[_age_bin_mask(sub, lo, hi, include_mt)]
-            vals = (
-                g[col].dropna().to_numpy(dtype=float)
-                if col in g.columns
-                else np.array([])
-            )
-            samples.append(vals)
-        return samples
-
-    def _kw_dunn_text(samples: list[np.ndarray], seed_key: str) -> str:
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) < 2:
-            print(f"  {seed_key}: KW n/a")
-            return "KW n/a"
-        try:
-            H, p = stats.kruskal(*nonempty)
-            dunn = _dunn_posthoc(samples, group_labels)
-            dunn_bits = [
-                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-            ]
-            stat_txt = f"KW {format_p(p)}"
-            if dunn_bits:
-                mid = max(1, (len(dunn_bits) + 1) // 2)
-                stat_txt += (
-                    "\nDunn: " + "; ".join(dunn_bits[:mid])
-                    + "\n" + "; ".join(dunn_bits[mid:])
-                )
-            n_bits = ", ".join(
-                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
-            )
-            print(
-                f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
-                f"Dunn: {dunn_bits}; {n_bits}"
-            )
-            return stat_txt
-        except Exception as exc:
-            print(f"  {seed_key}: KW n/a ({exc})")
-            return "KW n/a"
-
-    with plt.rc_context(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-            "axes.unicode_minus": False,
-        }
-    ):
-        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), constrained_layout=True)
-        print(
-            "\nPair-mean delays by age group — "
-            f"{bins_note} — Kruskal–Wallis + Dunn (Bonferroni):"
-        )
-        for ax, (col, ylabel) in zip(axes, panels):
-            if col not in sub.columns:
-                ax.set_visible(False)
-                continue
-            samples = _samples(col)
-            for (label, _lo, _hi, _mt, color), vals in zip(age_bins, samples):
-                if len(vals) == 0:
-                    continue
-                jitter = np.random.default_rng(
-                    abs(hash("pm-delay-age" + col + label)) % (2**32)
-                ).normal(0, 0.06, len(vals))
-                ax.scatter(
-                    np.full(len(vals), x_pos[label]) + jitter,
-                    vals,
-                    c=color,
-                    s=POINT_SIZE,
-                    alpha=POINT_ALPHA,
-                    edgecolors="white",
-                    linewidths=0.35,
-                    zorder=2,
-                )
-                ax.errorbar(
-                    [x_pos[label]],
-                    [float(np.mean(vals))],
-                    yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
-                    fmt="o",
-                    color="crimson",
-                    markersize=6,
-                    capsize=3,
-                    zorder=3,
-                )
-                ax.plot(
-                    [x_pos[label]],
-                    [float(np.median(vals))],
-                    marker="D",
-                    color="royalblue",
-                    markersize=5,
-                    zorder=4,
-                )
-            stat_txt = _kw_dunn_text(samples, col)
-            ax.set_xticks([x_pos[l] for l in group_labels])
-            ax.set_xticklabels(group_labels, fontsize=8)
-            ax.set_ylabel(ylabel)
-            ax.set_xlabel("Age group")
-            ax.text(
-                0.5,
-                1.02,
-                stat_txt,
-                transform=ax.transAxes,
-                ha="center",
-                va="bottom",
-                fontsize=6.5,
-                color="0.25",
-            )
-            _style_pub_ax(ax)
-
-        handles = [
-            Line2D(
-                [0], [0], marker="o", color="crimson", linestyle="None",
-                markersize=6, label="mean ± SEM",
-            ),
-            Line2D(
-                [0], [0], marker="D", color="royalblue", linestyle="None",
-                markersize=5, label="median",
-            ),
-        ]
-        fig.legend(handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.5),
-                   frameon=False, fontsize=9)
-        fig.suptitle(
-            r"Pair-mean onset / peak delay by age group"
-            "\n"
-            rf"{bins_note}; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
-            fontsize=11,
-            color="0.15",
-        )
-        savefig(fig, out_dir, "38_delays_pair_mean_by_age_group.png")
 
 
 def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
@@ -7545,12 +7435,9 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "18",
-            "label": "18  CCa + delays vs age (gray points)",
-            "outputs": [
-                "18_CCa_delays_vs_age.png",
-                "19_CCa_vs_age.png",
-            ],
-            "run": lambda: plot_cca_delays_vs_age(df, out_dir),
+            "label": "18  Delays vs age (gray points)",
+            "outputs": ["18_delays_vs_age.png"],
+            "run": lambda: plot_delays_vs_age_gray(df, out_dir),
         },
         {
             "id": "15-18",
@@ -7561,16 +7448,15 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "16_delays_vs_CCa_CC_Gj.png",
                 "16b_delays_vs_CCa_CC_Gj_pair_mean.png",
                 "17_CCa_delays_vs_distance.png",
-                "18_CCa_delays_vs_age.png",
+                "18_delays_vs_age.png",
                 "19_CCa_vs_age.png",
             ],
             "run": lambda: plot_spike_transmission_figures(df, out_dir),
         },
         {
             "id": "19",
-            "label": "19  CCa+delays vs age + age-group KW",
+            "label": "19  CCa vs age (gray) + age-group KW",
             "outputs": [
-                "18_CCa_delays_vs_age.png",
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
             ],
@@ -7752,12 +7638,6 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "37b_delays_by_age_group_stats.png",
             ],
             "run": lambda: plot_delays_by_age_groups(df, out_dir),
-        },
-        {
-            "id": "38",
-            "label": "38  Pair-mean delays by age group (KW+Dunn)",
-            "outputs": ["38_delays_pair_mean_by_age_group.png"],
-            "run": lambda: plot_delays_pair_mean_by_age_groups(df, out_dir),
         },
     ]
 
