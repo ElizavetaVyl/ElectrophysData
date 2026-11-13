@@ -5654,6 +5654,259 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "25_delays_day1_vs_day2.png")
 
 
+# ---------------------------------------------------------------------------
+# Delay onset / peak by age group: pooled sides + pair mean (KW + Dunn)
+# ---------------------------------------------------------------------------
+def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
+    """
+    2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
+    Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    Companion text figure with medians, n, KW and Dunn.
+    """
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays by age group: delay columns not found.")
+        return
+    sub = analysis_pool(df)
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    has_any = (
+        sub[on12].notna()
+        | sub[on21].notna()
+        | sub[pk12].notna()
+        | sub[pk21].notna()
+    )
+    sub = sub.loc[has_any].copy()
+    if len(sub) == 0:
+        print("Skipping delays by age group: no delay values in analysis pool.")
+        return
+
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+
+    row_pooled = [
+        ("pool", (on12, on21), PARAM_YLABELS["DelayOnset"]),
+        ("pool", (pk12, pk21), PARAM_YLABELS["DelayPeak"]),
+    ]
+    row_mean = [
+        ("pair", "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        ("pair", "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+
+    def _samples_for(mode: str, spec) -> list[np.ndarray]:
+        samples = []
+        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+            mask = _age_bin_mask(sub, lo, hi, include_mt)
+            g = sub.loc[mask]
+            if mode == "pair":
+                vals = (
+                    g[spec].dropna().to_numpy(dtype=float)
+                    if spec in g.columns
+                    else np.array([])
+                )
+            else:
+                c1, c2 = spec
+                if c1 not in g.columns or c2 not in g.columns:
+                    vals = np.array([])
+                else:
+                    vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
+                        dtype=float
+                    )
+            samples.append(vals)
+        return samples
+
+    def _kw_dunn_text(samples: list[np.ndarray], seed_key: str) -> str:
+        nonempty = [s for s in samples if len(s) > 0]
+        if len(nonempty) < 2:
+            print(f"  {seed_key}: KW n/a")
+            return "KW n/a"
+        try:
+            H, p = stats.kruskal(*nonempty)
+            dunn = _dunn_posthoc(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            stat_txt = f"KW {format_p(p)}"
+            if dunn_bits:
+                stat_txt += "\nDunn: " + "; ".join(dunn_bits)
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            print(
+                f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
+                f"Dunn: {dunn_bits}; {n_bits}"
+            )
+            return stat_txt
+        except Exception as exc:
+            print(f"  {seed_key}: KW n/a ({exc})")
+            return "KW n/a"
+
+    def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
+        samples = _samples_for(mode, spec)
+        for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
+            if len(vals) == 0:
+                continue
+            jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
+                0, 0.06, len(vals)
+            )
+            ax.scatter(
+                np.full(len(vals), x_pos[label]) + jitter,
+                vals,
+                c=color,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            ax.errorbar(
+                [x_pos[label]],
+                [np.mean(vals)],
+                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+                fmt="o",
+                color="crimson",
+                markersize=6,
+                capsize=3,
+                zorder=3,
+            )
+            ax.plot(
+                [x_pos[label]],
+                [np.median(vals)],
+                marker="D",
+                color="royalblue",
+                markersize=5,
+                zorder=4,
+            )
+
+        stat_txt = _kw_dunn_text(samples, seed_key)
+        ax.set_xticks([x_pos[l] for l in group_labels])
+        ax.set_xticklabels(group_labels)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("")
+        ax.text(
+            0.5,
+            1.02,
+            stat_txt,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color="0.25",
+        )
+        _style_pub_ax(ax)
+        return samples, stat_txt
+
+    panel_stats: list[tuple[str, list[np.ndarray], str]] = []
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(10.0, 8.2), constrained_layout=True)
+        print(
+            "\nDelays by age group — pooled sides & pair mean — "
+            "Kruskal–Wallis + Dunn (Bonferroni):"
+        )
+        titles_keys = [
+            ("Onset pooled", "pooled_onset", row_pooled[0]),
+            ("Peak pooled", "pooled_peak", row_pooled[1]),
+            ("Onset pair mean", "DelayOnset_pair_mean", row_mean[0]),
+            ("Peak pair mean", "DelayPeak_pair_mean", row_mean[1]),
+        ]
+        for ax, (title, key, (mode, spec, ylabel)) in zip(
+            [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]], titles_keys
+        ):
+            samples, stat_txt = _panel(ax, mode, spec, ylabel, key)
+            panel_stats.append((title, samples, stat_txt))
+
+        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=18)
+        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=18)
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="crimson",
+                linestyle="None",
+                markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="royalblue",
+                linestyle="None",
+                markersize=5,
+                label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"Onset / peak delay by age group"
+            "\n"
+            rf"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "37_delays_by_age_group.png")
+
+    # Text companion with medians / n / KW+Dunn (same idea as 02b stats)
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig_s, ax_s = plt.subplots(figsize=(9.5, 6.5), constrained_layout=True)
+        ax_s.axis("off")
+        lines = [
+            "Delays by age group — statistics",
+            f"{POOL_NOTE}",
+            "Kruskal–Wallis across P10–32 / P33–50 / P50+; Dunn post-hoc (Bonferroni).",
+            "",
+        ]
+        for title, samples, stat_txt in panel_stats:
+            lines.append(title)
+            for lab, vals in zip(group_labels, samples):
+                if len(vals) == 0:
+                    lines.append(f"  {lab}: n=0")
+                else:
+                    lines.append(
+                        f"  {lab}: n={len(vals)}, "
+                        f"median={float(np.median(vals)):.3g} ms, "
+                        f"mean±SEM={float(np.mean(vals)):.3g}"
+                        f"±{float(stats.sem(vals)) if len(vals) > 1 else 0.0:.3g}"
+                    )
+            lines.append(f"  {stat_txt.replace(chr(10), ' | ')}")
+            lines.append("")
+        ax_s.text(
+            0.02,
+            0.98,
+            "\n".join(lines),
+            transform=ax_s.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            color="0.15",
+        )
+        savefig(fig_s, out_dir, "37b_delays_by_age_group_stats.png")
+
+
 def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
     """
     None / unilateral / bilateral CCa counts (+ %) by pair-mean CC and Gj bins.
@@ -7315,6 +7568,15 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "label": "36  Delay by Rin/τ bins (KW+Dunn)",
             "outputs": ["36_delays_by_Rin_Tau_quartiles.png"],
             "run": lambda: plot_delays_by_rin_tau_quartiles(df, out_dir),
+        },
+        {
+            "id": "37",
+            "label": "37  Delays by age group (pooled + pair mean + stats)",
+            "outputs": [
+                "37_delays_by_age_group.png",
+                "37b_delays_by_age_group_stats.png",
+            ],
+            "run": lambda: plot_delays_by_age_groups(df, out_dir),
         },
     ]
 
