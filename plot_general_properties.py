@@ -7,6 +7,10 @@ to choose which figures to (re)generate. Existing files are overwritten.
 Expected Excel name (in that folder):
   General_Properties_FOR_PLOTTING_ONLY.xlsx
 
+Sheets:
+  Properties     — pair-level data for all existing figures
+  Animal Count   — columns age, animal number (sample-size figures)
+
 Figures are saved to:
   <chosen_folder>/general properties figures/
 
@@ -39,6 +43,9 @@ EXCEL_NAME_ALIASES = (
     "General Properties FOR PLOTTING ONLY.xlsx",
     "Generaral Properties FOR PLOTTING ONLY.xlsx",
 )
+# Preferred Excel sheet names (case-insensitive match)
+SHEET_PROPERTIES = ("Properties",)
+SHEET_ANIMAL_COUNT = ("Animal Count", "Animal_Count", "Animals")
 FIGURES_DIR_NAME = "general properties figures"
 # Asymmetry / AI / coupling / coverage: Days 1–2 only. Day 3 stays on the
 # Day 1–2–3 comparison figure (01) and is not mixed into the analysis pool.
@@ -282,8 +289,53 @@ def _find_exclude_column(columns: list[str]) -> str | None:
     return None
 
 
+def _excel_sheet_names(excel_path: Path) -> list[str]:
+    with pd.ExcelFile(excel_path) as xl:
+        return list(xl.sheet_names)
+
+
+def resolve_sheet_name(excel_path: Path, preferred: tuple[str, ...] | list[str]) -> str | None:
+    """Case-insensitive exact match, then 'contains' fallback."""
+    names = _excel_sheet_names(excel_path)
+    lower_map = {str(n).strip().lower(): n for n in names}
+    for pref in preferred:
+        key = str(pref).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    for pref in preferred:
+        key = str(pref).strip().lower().replace("_", " ")
+        for low, orig in lower_map.items():
+            if key in low.replace("_", " "):
+                return orig
+    return None
+
+
+def _find_column(columns: list[str], aliases: tuple[str, ...]) -> str | None:
+    lower = {str(c).strip().lower(): c for c in columns}
+    for alias in aliases:
+        key = alias.strip().lower()
+        if key in lower:
+            return lower[key]
+    # loose: ignore spaces/underscores
+    compact = {re.sub(r"[\s_]+", "", k): v for k, v in lower.items()}
+    for alias in aliases:
+        key = re.sub(r"[\s_]+", "", alias.strip().lower())
+        if key in compact:
+            return compact[key]
+    return None
+
+
 def load_and_prepare(excel_path: Path) -> pd.DataFrame:
-    df = pd.read_excel(excel_path, sheet_name=0)
+    sheet = resolve_sheet_name(excel_path, SHEET_PROPERTIES)
+    if sheet is None:
+        print(
+            "Warning: sheet 'Properties' not found "
+            f"(available: {_excel_sheet_names(excel_path)}); using first sheet."
+        )
+        df = pd.read_excel(excel_path, sheet_name=0)
+    else:
+        print(f"Properties sheet: {sheet!r}")
+        df = pd.read_excel(excel_path, sheet_name=sheet)
     df.columns = [str(c).strip() for c in df.columns]
 
     required = ["pair_id", "age", "day", "Gj_12", "Gj_21"]
@@ -433,6 +485,107 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
             both_tau, (df["Tau_1"] + df["Tau_2"]) / 2.0, np.nan
         )
     return df.reset_index(drop=True)
+
+
+def load_animal_counts(excel_path: Path) -> pd.DataFrame | None:
+    """
+    Sheet 'Animal Count': age + animal number → age_num, is_mt, n_animals.
+    Returns None if the sheet is missing.
+    """
+    sheet = resolve_sheet_name(excel_path, SHEET_ANIMAL_COUNT)
+    if sheet is None:
+        print(
+            "Animal Count sheet not found "
+            f"(available: {_excel_sheet_names(excel_path)}); "
+            "skipping animal-count figures."
+        )
+        return None
+    print(f"Animal Count sheet: {sheet!r}")
+    raw = pd.read_excel(excel_path, sheet_name=sheet)
+    raw.columns = [str(c).strip() for c in raw.columns]
+    age_col = _find_column(list(raw.columns), ("age", "Age", "P age", "postnatal age"))
+    n_col = _find_column(
+        list(raw.columns),
+        (
+            "animal number",
+            "animal_number",
+            "animals",
+            "n_animals",
+            "n animals",
+            "Animal number",
+            "N animals",
+        ),
+    )
+    if age_col is None or n_col is None:
+        raise ValueError(
+            "Animal Count sheet needs columns 'age' and 'animal number'. "
+            f"Found: {list(raw.columns)}"
+        )
+    df = pd.DataFrame(
+        {
+            "age": raw[age_col],
+            "n_animals": _to_float(raw[n_col]),
+        }
+    )
+    ages = df["age"].map(parse_age)
+    df["age_num"] = [a for a, _ in ages]
+    df["is_mt"] = [m for _, m in ages]
+    df = df[df["n_animals"].notna() & (df["is_mt"] | df["age_num"].notna())].copy()
+    # If the same age appears more than once, sum animals
+    df = (
+        df.groupby(["age_num", "is_mt"], dropna=False, as_index=False)["n_animals"]
+        .sum()
+        .sort_values(["is_mt", "age_num"], na_position="last")
+        .reset_index(drop=True)
+    )
+    print(f"Animal Count rows (ages): {len(df)}; total animals={int(df['n_animals'].sum())}")
+    return df
+
+
+def pair_counts_by_age(df: pd.DataFrame, *, include_excluded: bool = False) -> pd.DataFrame:
+    """
+    Count electrical pairs per age from Properties.
+    Default: skip Exclude?=yes rows (same pool as most sample accounting).
+    """
+    sub = df.copy()
+    if (not include_excluded) and "excluded" in sub.columns:
+        sub = sub.loc[~sub["excluded"]].copy()
+    sub = sub.loc[sub["is_mt"] | sub["age_num"].notna()].copy()
+    if len(sub) == 0:
+        return pd.DataFrame(columns=["age_num", "is_mt", "n_pairs"])
+    out = (
+        sub.groupby(["age_num", "is_mt"], dropna=False, as_index=False)
+        .size()
+        .rename(columns={"size": "n_pairs"})
+        .sort_values(["is_mt", "age_num"], na_position="last")
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def merge_animals_and_pairs(
+    animals: pd.DataFrame, pairs: pd.DataFrame
+) -> pd.DataFrame:
+    """Outer-join animal counts and pair counts on age_num / is_mt."""
+    a = animals.copy()
+    p = pairs.copy()
+    # float NaN age_num for MT rows — merge keys must match
+    for d in (a, p):
+        d["age_key"] = d["age_num"].where(~d["is_mt"], other=-999.0)
+    merged = pd.merge(
+        a,
+        p,
+        on=["age_key", "is_mt"],
+        how="outer",
+        suffixes=("", "_p"),
+    )
+    if "age_num_p" in merged.columns:
+        merged["age_num"] = merged["age_num"].combine_first(merged["age_num_p"])
+        merged = merged.drop(columns=["age_num_p"])
+    merged["n_animals"] = merged["n_animals"].fillna(0.0)
+    merged["n_pairs"] = merged.get("n_pairs", pd.Series(0.0, index=merged.index)).fillna(0.0)
+    merged = merged.drop(columns=["age_key"], errors="ignore")
+    return merged.sort_values(["is_mt", "age_num"], na_position="last").reset_index(drop=True)
 
 
 def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
@@ -7222,6 +7375,229 @@ def plot_delay_cca_followup_figures(df: pd.DataFrame, out_dir: Path):
     plot_cca_cc_partial_correlation(df, out_dir)
 
 
+# ---------------------------------------------------------------------------
+# Sample size: animals / pairs vs age (Animal Count + Properties)
+# ---------------------------------------------------------------------------
+def _age_scale_from_frames(*frames: pd.DataFrame) -> tuple[float, float, float, bool, list[float]]:
+    """Union age limits / tick ages across Property pairs and Animal Count."""
+    parts = []
+    for fr in frames:
+        if fr is None or len(fr) == 0:
+            continue
+        need = {"age_num", "is_mt"}
+        if not need.issubset(fr.columns):
+            continue
+        parts.append(fr.loc[:, ["age_num", "is_mt"]].copy())
+    if not parts:
+        return 10.0, float(STRETCH_AGE_HI), float(STRETCH_AGE_HI) + MT_AGE_OFFSET, False, []
+    cat = pd.concat(parts, ignore_index=True)
+    vmin, max_age, mt_val, has_mt = age_limits(cat)
+    ticks = unique_ages_for_colorbar(cat)
+    return vmin, max_age, mt_val, has_mt, ticks
+
+
+def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.DataFrame | None = None):
+    """
+    Animals vs age: X = warped age (same colour scale as other figures),
+    Y = animal number from sheet Animal Count.
+    """
+    if animals is None or len(animals) == 0:
+        print("Skipping animal count vs age: no Animal Count data.")
+        return
+    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(animals, pairs_df)
+    d = animals.copy()
+    d["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(d["age_num"], d["is_mt"])
+    ]
+    colors, _, _ = age_colors(
+        d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+    )
+    print(f"\nAnimal count vs age: n_ages={len(d)}, total animals={int(d['n_animals'].sum())}")
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.2, 4.6), constrained_layout=True)
+        ax.scatter(
+            d["x_warp"],
+            d["n_animals"],
+            c=colors,
+            s=POINT_SIZE * 1.6,
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.45,
+            zorder=3,
+        )
+        ax.set_ylabel("Animals [n]")
+        ax.set_xlabel("Age [postnatal days]")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        y_max = float(np.nanmax(d["n_animals"])) if len(d) else 1.0
+        ax.set_ylim(0, max(y_max * 1.15, 1.0))
+        _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+        _style_pub_ax(ax)
+        cbar = add_age_colorbar(
+            fig, [ax], vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            "Animals used per age"
+            "\n"
+            r"sheet Animal Count; point colour = age (same scale as other figures)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "39_animal_count_vs_age.png")
+
+
+def plot_animals_pairs_vs_age(
+    animals: pd.DataFrame,
+    pairs_df: pd.DataFrame,
+    out_dir: Path,
+):
+    """
+    Three variables on one figure:
+      left  — animals vs age (age colour)
+      right — bubble: Y = animals, size ∝ pairs, colour = age
+    Pair counts come from Properties (Exclude?=yes omitted).
+    """
+    if animals is None or len(animals) == 0:
+        print("Skipping animals+pairs vs age: no Animal Count data.")
+        return
+    pairs = pair_counts_by_age(pairs_df, include_excluded=False)
+    merged = merge_animals_and_pairs(animals, pairs)
+    if len(merged) == 0:
+        print("Skipping animals+pairs vs age: empty merge.")
+        return
+    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(merged, pairs_df)
+    d = merged.copy()
+    d["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(d["age_num"], d["is_mt"])
+    ]
+    colors, _, _ = age_colors(
+        d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+    )
+    n_pairs = d["n_pairs"].to_numpy(dtype=float)
+    n_anim = d["n_animals"].to_numpy(dtype=float)
+    # bubble area ~ pairs (keep readable range)
+    pmax = float(np.nanmax(n_pairs)) if np.isfinite(n_pairs).any() else 1.0
+    pmax = max(pmax, 1.0)
+    sizes = 40.0 + 220.0 * (n_pairs / pmax)
+
+    print(
+        "\nAnimals + pairs vs age: "
+        f"n_ages={len(d)}, animals={int(np.nansum(n_anim))}, pairs={int(np.nansum(n_pairs))}"
+    )
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), constrained_layout=True)
+
+        # Left: animals only (fixed marker size)
+        ax0 = axes[0]
+        m_anim = n_anim > 0
+        ax0.scatter(
+            d.loc[m_anim, "x_warp"],
+            n_anim[m_anim],
+            c=np.asarray(colors, dtype=object)[m_anim],
+            s=POINT_SIZE * 1.6,
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.45,
+            zorder=3,
+        )
+        ax0.set_ylabel("Animals [n]")
+        ax0.set_xlabel("Age [postnatal days]")
+        ax0.set_title("Animals", fontsize=10, color="0.25", pad=8)
+        ax0.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax0.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.15 if m_anim.any() else 1.0, 1.0))
+        _set_warped_age_ticks(ax0, vmin, max_age, mt_val, age_ticks, has_mt)
+        _style_pub_ax(ax0)
+
+        # Right: bubble — animals (Y) × pairs (size) × age (colour / X)
+        ax1 = axes[1]
+        ax1.scatter(
+            d["x_warp"],
+            n_anim,
+            c=colors,
+            s=sizes,
+            alpha=0.75,
+            edgecolors="0.2",
+            linewidths=0.5,
+            zorder=3,
+        )
+        ax1.set_ylabel("Animals [n]")
+        ax1.set_xlabel("Age [postnatal days]")
+        ax1.set_title(r"Animals × pairs (bubble size)", fontsize=10, color="0.25", pad=8)
+        ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax1.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.2 if len(n_anim) else 1.0, 1.0))
+        _set_warped_age_ticks(ax1, vmin, max_age, mt_val, age_ticks, has_mt)
+        _style_pub_ax(ax1)
+
+        # Size legend (example pair counts)
+        legend_ns = sorted({1, max(1, int(round(pmax / 2))), int(round(pmax))})
+        legend_ns = [n for n in legend_ns if n > 0]
+        size_handles = [
+            Line2D(
+                [0], [0],
+                marker="o",
+                color="w",
+                markerfacecolor="0.45",
+                markeredgecolor="0.2",
+                markersize=np.sqrt(40.0 + 220.0 * (n / pmax)) * 0.55,
+                label=f"{n} pair{'s' if n != 1 else ''}",
+            )
+            for n in legend_ns
+        ]
+        ax1.legend(
+            handles=size_handles,
+            title="Bubble size",
+            loc="upper left",
+            frameon=False,
+            fontsize=8,
+            title_fontsize=8,
+        )
+
+        cbar = add_age_colorbar(
+            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=age_ticks, has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Sample size vs age — animals and electrical pairs"
+            "\n"
+            r"left: Animal Count; right: Y = animals, bubble area $\propto$ pairs "
+            r"(Properties, Exclude?=yes out); colour = age",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "40_animals_pairs_vs_age.png")
+
+
+def plot_sample_size_figures(
+    animals: pd.DataFrame | None,
+    pairs_df: pd.DataFrame,
+    out_dir: Path,
+):
+    """Figs 39–40."""
+    plot_animal_count_vs_age(animals, out_dir, pairs_df=pairs_df)
+    if animals is not None:
+        plot_animals_pairs_vs_age(animals, pairs_df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -7243,7 +7619,11 @@ def parse_args():
     return p.parse_args()
 
 
-def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
+def build_figure_catalog(
+    df: pd.DataFrame,
+    out_dir: Path,
+    animals: pd.DataFrame | None = None,
+) -> list[dict]:
     """
     Registry of selectable figure jobs.
     Each item: id, label, outputs (file names), run (callable).
@@ -7639,6 +8019,29 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             ],
             "run": lambda: plot_delays_by_age_groups(df, out_dir),
         },
+        {
+            "id": "39",
+            "label": "39  Animals vs age (Animal Count, age colour)",
+            "outputs": ["39_animal_count_vs_age.png"],
+            "run": lambda: plot_animal_count_vs_age(animals, out_dir, pairs_df=df),
+        },
+        {
+            "id": "40",
+            "label": "40  Animals × pairs vs age (bubble size = pairs)",
+            "outputs": ["40_animals_pairs_vs_age.png"],
+            "run": lambda: plot_animals_pairs_vs_age(animals, df, out_dir)
+            if animals is not None
+            else print("Skipping 40: no Animal Count sheet."),
+        },
+        {
+            "id": "39-40",
+            "label": "39–40  Sample size (animals + pairs vs age)",
+            "outputs": [
+                "39_animal_count_vs_age.png",
+                "40_animals_pairs_vs_age.png",
+            ],
+            "run": lambda: plot_sample_size_figures(animals, df, out_dir),
+        },
     ]
 
 
@@ -7782,6 +8185,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Reading: {excel_path}")
     df = load_and_prepare(excel_path)
+    animals = load_animal_counts(excel_path)
     print(f"Rows kept (Gj and/or Distance and/or age): {len(df)}")
     print(f"  with Gj both sides: {int(df['has_gj'].sum())}")
     print(f"Days present: {sorted(df['day'].dropna().unique().tolist())}")
@@ -7808,7 +8212,7 @@ def main():
         f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
     )
 
-    catalog = build_figure_catalog(df, out_dir)
+    catalog = build_figure_catalog(df, out_dir, animals=animals)
 
     if args.all_figures or (args.figures and args.figures.strip().lower() == "all"):
         selected = [j["id"] for j in catalog]
