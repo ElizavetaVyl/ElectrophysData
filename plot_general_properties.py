@@ -141,22 +141,23 @@ POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
 # Age bins for group analyses (4 colours).
-# juvenile P10–32; late adolescent P33–50 (age 50 stays here);
+# Juvenile / adolescent P10–32; late adolescent P33–50 (age 50 stays here);
 # young adults P51–200 (labeled P50–200 band, ages >50 up to 200);
 # Dam = MT / aged breeder dams only (no postnatal age).
 AGE_ASYM_BINS = [
-    ("juvenile", 10, 32, False, "#FB8C00"),         # orange
-    ("late adolescent", 33, 50, False, "#D84315"),  # deep orange-red (distinct from juvenile)
-    ("young adults", 51, 200, False, "#8E24AA"),    # purple
-    ("Dam", None, None, True, "#2E0854"),           # dark violet; aged breeder dams (MT)
+    ("Juvenile / adolescent", 10, 32, False, "#FB8C00"),  # orange
+    ("late adolescent", 33, 50, False, "#D84315"),       # deep orange-red
+    ("young adults", 51, 200, False, "#8E24AA"),         # purple
+    ("Dam", None, None, True, "#2E0854"),                # dark violet; MT
 ]
 # Delay-by-age figures use the same 4 developmental groups
 DELAY_AGE_BINS = list(AGE_ASYM_BINS)
 AGE_GROUP_NOTE = (
-    "juvenile P10–32 / late adolescent P33–50 / young adults P50–200 / Dam"
+    "Juvenile / adolescent P10–32 / late adolescent P33–50 / "
+    "young adults P50–200 / Dam"
 )
 AGE_GROUP_ABBREV = {
-    "juvenile": "juv",
+    "Juvenile / adolescent": "J/adol",
     "late adolescent": "late-adol",
     "young adults": "YA",
     "Dam": "Dam",
@@ -1751,11 +1752,118 @@ def _set_age_group_xticks(ax, group_labels, *, x_pos=None, fontsize: float = 7.5
         ax.set_xlim(xs[0] - 0.55, xs[-1] + 0.55)
 
 
+def _mean_ci95(vals: np.ndarray) -> tuple[float, float, float]:
+    """Return (mean, lo, hi) for a Student 95% CI of the mean."""
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    n = len(vals)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan")
+    m = float(np.mean(vals))
+    if n < 2:
+        return m, m, m
+    se = float(stats.sem(vals))
+    tcrit = float(stats.t.ppf(0.975, n - 1))
+    return m, m - tcrit * se, m + tcrit * se
+
+
+def _kw_dunn_for_samples(
+    samples: list[np.ndarray], group_labels: list[str]
+) -> tuple[float, float, list[tuple[str, str, float]]]:
+    """Kruskal–Wallis + Dunn (Bonferroni). Empty groups skipped in KW."""
+    nonempty = [s for s in samples if len(s) > 0]
+    if len(nonempty) < 2:
+        return float("nan"), float("nan"), []
+    try:
+        H, p = stats.kruskal(*nonempty)
+        dunn = _dunn_posthoc(samples, group_labels)
+        return float(H), float(p), dunn
+    except Exception:
+        return float("nan"), float("nan"), []
+
+
+def _add_dunn_brackets(
+    ax,
+    dunn: list[tuple[str, str, float]] | None,
+    x_pos: dict[str, float],
+    y_hi: float,
+    *,
+    y_pad_frac: float = 0.06,
+    step_frac: float = 0.10,
+    h_frac: float = 0.035,
+    fs: float = 10,
+) -> float:
+    """
+    Draw significance brackets for Dunn pairs with stars.
+    Returns the top y used (for ylim).
+    """
+    sig = [
+        (a, b, pv)
+        for a, b, pv in (dunn or [])
+        if a in x_pos and b in x_pos and p_to_stars(pv) != "ns"
+    ]
+    sig.sort(key=lambda t: abs(x_pos[t[0]] - x_pos[t[1]]))
+    ymin, ymax = ax.get_ylim()
+    span = max(float(ymax - ymin), abs(float(y_hi)) * 0.2, 1e-6)
+    y_lo_data = float(y_hi) if np.isfinite(y_hi) else float(ymax)
+    bracket_y = y_lo_data + y_pad_frac * span
+    step = step_frac * span
+    h = h_frac * span
+    for a, b, pv in sig:
+        _sig_bracket(
+            ax,
+            x_pos[a],
+            x_pos[b],
+            bracket_y,
+            p_to_stars(pv),
+            h=h,
+            fs=fs,
+        )
+        bracket_y += step
+    top = bracket_y + (0.04 * span if sig else 0.0)
+    return max(float(ymax), top)
+
+
+def _group_summary_lines(
+    samples: list[np.ndarray], group_labels: list[str], *, unit: str = ""
+) -> list[str]:
+    """Per-group n / median / mean±SEM / 95% CI lines for stats figures."""
+    unit_s = f" {unit}" if unit else ""
+    lines = []
+    for lab, vals in zip(group_labels, samples):
+        if len(vals) == 0:
+            lines.append(f"  {lab}: n=0")
+            continue
+        m, lo, hi = _mean_ci95(vals)
+        med = float(np.median(vals))
+        sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
+        lines.append(
+            f"  {lab}: n={len(vals)}, median={med:.4g}{unit_s}"
+        )
+        lines.append(
+            f"    mean±SEM={m:.4g}±{sem:.4g}{unit_s}; "
+            f"95% CI [{lo:.4g}, {hi:.4g}]{unit_s}"
+        )
+    return lines
+
+
+def _dunn_stats_lines(dunn: list[tuple[str, str, float]] | None) -> list[str]:
+    lines = ["Dunn post-hoc (Bonferroni-adjusted p)"]
+    if not dunn:
+        lines.append("  —")
+        return lines
+    for a, b, pv in dunn:
+        lines.append(
+            f"  {_short_age_pair(a, b)}: {format_p(pv)} {p_to_stars(pv)}"
+        )
+    return lines
+
+
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (juvenile / late adolescent / young adults / Dam).
+    AI by age group (Juvenile / adolescent / late adolescent / young adults / Dam).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
-    Separate stats figure: Kruskal–Wallis + Dunn (Bonferroni) details.
+    Separate stats figure: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
     sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
@@ -1768,44 +1876,30 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         ("AI_Vm", r"AI $|V_{m}|$"),
     ]
 
-    # Collect samples + stats once for overview and stats figure
     panel_stats: dict[str, dict] = {}
     print("\nAI by age group — Kruskal–Wallis + Dunn (Bonferroni):")
     for col, _ylabel in panels:
         if col not in sub.columns:
             continue
         samples = []
-        ns = []
         for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
             samples.append(vals)
-            ns.append(int(len(vals)))
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) >= 2:
-            try:
-                H, p = stats.kruskal(*nonempty)
-                dunn = _dunn_posthoc(samples, group_labels)
-            except Exception as exc:
-                H, p, dunn = float("nan"), float("nan"), []
-                print(f"  {col}: KW n/a ({exc})")
-            else:
-                dunn_bits = [
-                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-                ]
-                print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+        H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+        dunn_bits = [f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn]
+        if np.isfinite(H):
+            print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
         else:
-            H, p, dunn = float("nan"), float("nan"), []
             print(f"  {col}: KW n/a")
         panel_stats[col] = {
             "samples": samples,
-            "ns": ns,
+            "ns": [int(len(s)) for s in samples],
             "H": H,
             "p": p,
             "dunn": dunn,
         }
 
-    # ----- Clean overview (article figure) -----
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -1813,7 +1907,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(12.5, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=(13.0, 7.8), constrained_layout=True)
         ax_list = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
         axes[0, 2].set_visible(False)
 
@@ -1864,61 +1958,24 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
             ax.set_ylabel(ylabel)
             ax.set_xlabel("")
-
-            # Significant Dunn pairs only: brackets + stars (no p-text)
-            sig_pairs = [
-                (a, b, pv)
-                for a, b, pv in (info["dunn"] or [])
-                if p_to_stars(pv) != "ns"
-            ]
-            # Order short spans first so stacked brackets stay readable
-            sig_pairs.sort(
-                key=lambda t: abs(x_pos[t[0]] - x_pos[t[1]])
+            ax.set_ylim(0, max(1.05, y_hi * 1.05, 1 / 3 + 0.05))
+            y_top = _add_dunn_brackets(
+                ax, info["dunn"], x_pos, max(y_hi, 1 / 3)
             )
-            y_base = max(y_hi, 1 / 3) + 0.04
-            bracket_y = y_base
-            step = 0.08
-            for a, b, pv in sig_pairs:
-                _sig_bracket(
-                    ax,
-                    x_pos[a],
-                    x_pos[b],
-                    bracket_y,
-                    p_to_stars(pv),
-                    h=0.03,
-                    fs=10,
-                )
-                bracket_y += step
-            y_top = max(1.05, bracket_y + 0.02) if sig_pairs else 1.05
-            ax.set_ylim(0, y_top)
+            ax.set_ylim(0, max(1.05, y_top))
             _style_pub_ax(ax)
 
         legend_handles = [
             Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="crimson",
-                linestyle="None",
-                markersize=6,
-                label="mean ± SEM",
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
             ),
             Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="royalblue",
-                linestyle="None",
-                markersize=5,
-                label="median",
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
             ),
             Line2D(
-                [0],
-                [0],
-                color="0.6",
-                ls=":",
-                lw=0.9,
-                label=r"AI $=1/3$ (~2×)",
+                [0], [0], color="0.6", ls=":", lw=0.9, label=r"AI $=1/3$ (~2×)",
             ),
         ]
         fig.legend(
@@ -1937,7 +1994,6 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         )
         savefig(fig, out_dir, "02b_AI_by_age_group.png")
 
-    # ----- Stats detail figure -----
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -1945,29 +2001,20 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 5, figsize=(16.5, 4.8), constrained_layout=True)
+        fig, axes = plt.subplots(1, 5, figsize=(17.5, 5.4), constrained_layout=True)
         for ax, (col, ylabel) in zip(axes, panels):
             ax.set_axis_off()
             if col not in panel_stats:
                 continue
             info = panel_stats[col]
             lines = [ylabel.replace("$", ""), ""]
-            lines.append(f"n = {' / '.join(str(n) for n in info['ns'])}")
-            lines.append(f"  ({' / '.join(group_labels)})")
+            lines.extend(_group_summary_lines(info["samples"], group_labels))
             lines.append("")
             lines.append(f"Kruskal–Wallis: {format_p(info['p'])}")
             if np.isfinite(info["H"]):
                 lines.append(f"  H = {info['H']:.3f}")
             lines.append("")
-            lines.append("Dunn (Bonferroni)")
-            dunn = info["dunn"] or []
-            if not dunn:
-                lines.append("  —")
-            for a, b, pv in dunn:
-                lines.append(
-                    f"  {_short_age_pair(a, b)}: "
-                    f"{format_p(pv)} {p_to_stars(pv)}"
-                )
+            lines.extend(_dunn_stats_lines(info["dunn"]))
             ax.text(
                 0.02,
                 0.98,
@@ -1975,15 +2022,15 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=8,
+                fontsize=7.5,
                 family="monospace",
                 color="0.15",
-                linespacing=1.3,
+                linespacing=1.25,
             )
         fig.suptitle(
             "AI by age group — statistics\n"
             f"Kruskal–Wallis across {AGE_GROUP_NOTE}; "
-            f"Dunn post-hoc with Bonferroni; {POOL_NOTE}",
+            f"Dunn Bonferroni-adjusted p; per-group 95% CI of the mean; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -2605,120 +2652,173 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 # Gj / CC by age group: pooled sides + pair mean (KW + Dunn)
 # ---------------------------------------------------------------------------
+def _age_group_samples(
+    sub: pd.DataFrame, mode: str, spec
+) -> list[np.ndarray]:
+    """Collect per-age-bin samples; mode 'pair' (one col) or 'pool' ((c1,c2))."""
+    samples = []
+    for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+        mask = _age_bin_mask(sub, lo, hi, include_mt)
+        g = sub.loc[mask]
+        if mode == "pair":
+            vals = (
+                g[spec].dropna().to_numpy(dtype=float)
+                if spec in g.columns
+                else np.array([])
+            )
+        else:
+            c1, c2 = spec
+            if c1 not in g.columns or c2 not in g.columns:
+                vals = np.array([])
+            else:
+                vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
+                    dtype=float
+                )
+        samples.append(vals)
+    return samples
+
+
+def _scatter_age_group_panel(
+    ax,
+    samples: list[np.ndarray],
+    *,
+    group_labels: list[str],
+    x_pos: dict[str, float],
+    ylabel: str,
+    seed_key: str,
+    dunn: list[tuple[str, str, float]] | None,
+):
+    """Points + mean±SEM + median + Dunn brackets (no p-text on axis)."""
+    y_hi = 0.0
+    y_lo = 0.0
+    for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
+        if len(vals) == 0:
+            continue
+        y_hi = max(y_hi, float(np.max(vals)))
+        y_lo = min(y_lo, float(np.min(vals)))
+        jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
+            0, 0.06, len(vals)
+        )
+        ax.scatter(
+            np.full(len(vals), x_pos[label]) + jitter,
+            vals,
+            c=color,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=2,
+        )
+        ax.errorbar(
+            [x_pos[label]],
+            [np.mean(vals)],
+            yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+            fmt="o",
+            color="crimson",
+            markersize=6,
+            capsize=3,
+            zorder=3,
+        )
+        ax.plot(
+            [x_pos[label]],
+            [np.median(vals)],
+            marker="D",
+            color="royalblue",
+            markersize=5,
+            zorder=4,
+        )
+    _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("")
+    if y_hi > y_lo:
+        pad = 0.08 * (y_hi - y_lo)
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+    y_top = _add_dunn_brackets(ax, dunn, x_pos, y_hi)
+    cur_lo, _ = ax.get_ylim()
+    ax.set_ylim(cur_lo, max(ax.get_ylim()[1], y_top))
+    _style_pub_ax(ax)
+
+
+def _save_age_group_stats_figure(
+    out_dir: Path,
+    outfile: str,
+    title: str,
+    panels: list[tuple[str, list[np.ndarray], float, float, list]],
+    group_labels: list[str],
+    *,
+    unit: str = "",
+):
+    """Text companion: per-group CI + KW + Dunn Bonferroni p."""
+    n = max(len(panels), 1)
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1, n, figsize=(max(4.2 * n, 8.0), 5.6), constrained_layout=True
+        )
+        axes_list = list(np.atleast_1d(axes).ravel())
+        for ax, (lab, samples, H, p, dunn) in zip(axes_list, panels):
+            ax.set_axis_off()
+            lines = [lab, ""]
+            lines.extend(_group_summary_lines(samples, group_labels, unit=unit))
+            lines.append("")
+            lines.append(f"Kruskal–Wallis: {format_p(p)}")
+            if np.isfinite(H):
+                lines.append(f"  H = {H:.3f}")
+            lines.append("")
+            lines.extend(_dunn_stats_lines(dunn))
+            ax.text(
+                0.02,
+                0.98,
+                "\n".join(lines),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7.5,
+                family="monospace",
+                color="0.15",
+                linespacing=1.25,
+            )
+        for ax in axes_list[len(panels) :]:
+            ax.set_visible(False)
+        fig.suptitle(
+            f"{title}\n"
+            f"Kruskal–Wallis across {AGE_GROUP_NOTE}; "
+            f"Dunn Bonferroni-adjusted p; per-group 95% CI of the mean; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, outfile)
+
+
 def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {x1, x2} for Gj and CC; bottom = pair means.
-    Age groups juvenile / late adolescent / young adults / Dam;
-    Kruskal–Wallis + Dunn (Bonferroni).
+    Overview: points + mean±SEM + median + Dunn brackets/stars only.
+    Companion 07b: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
     sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
 
-    # (mode, col_or_pair, ylabel) — mode "pair" uses one column; "pool" uses (c1, c2)
     row_pooled = [
-        ("pool", ("Gj_12", "Gj_21"), rf"{PARAM_MATH['Gj']} pooled [nS]"),
-        ("pool", ("CC_12", "CC_21"), rf"{PARAM_MATH['CC']} pooled"),
+        ("pool", ("Gj_12", "Gj_21"), rf"{PARAM_MATH['Gj']} pooled [nS]", "Gj pool"),
+        ("pool", ("CC_12", "CC_21"), rf"{PARAM_MATH['CC']} pooled", "CC pool"),
     ]
     row_mean = [
-        ("pair", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
-        ("pair", "CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+        ("pair", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]", "Gj pair mean"),
+        ("pair", "CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean", "CC pair mean"),
     ]
 
-    def _samples_for(mode: str, spec) -> list[np.ndarray]:
-        samples = []
-        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
-            mask = _age_bin_mask(sub, lo, hi, include_mt)
-            g = sub.loc[mask]
-            if mode == "pair":
-                vals = g[spec].dropna().to_numpy(dtype=float) if spec in g.columns else np.array([])
-            else:
-                c1, c2 = spec
-                if c1 not in g.columns or c2 not in g.columns:
-                    vals = np.array([])
-                else:
-                    vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
-                        dtype=float
-                    )
-            samples.append(vals)
-        return samples
-
-    def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
-        samples = _samples_for(mode, spec)
-        for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
-            if len(vals) == 0:
-                continue
-            jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
-                0, 0.06, len(vals)
-            )
-            ax.scatter(
-                np.full(len(vals), x_pos[label]) + jitter,
-                vals,
-                c=color,
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
-                edgecolors="white",
-                linewidths=0.35,
-                zorder=2,
-            )
-            ax.errorbar(
-                [x_pos[label]],
-                [np.mean(vals)],
-                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
-                fmt="o",
-                color="crimson",
-                markersize=6,
-                capsize=3,
-                zorder=3,
-            )
-            ax.plot(
-                [x_pos[label]],
-                [np.median(vals)],
-                marker="D",
-                color="royalblue",
-                markersize=5,
-                zorder=4,
-            )
-
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) >= 2:
-            try:
-                H, p = stats.kruskal(*nonempty)
-                dunn = _dunn_posthoc(samples, group_labels)
-                dunn_bits = [
-                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-                ]
-                stat_txt = f"KW {format_p(p)}"
-                if dunn_bits:
-                    stat_txt += "\nDunn: " + "; ".join(dunn_bits)
-                n_bits = ", ".join(
-                    f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
-                )
-                print(
-                    f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
-                    f"Dunn: {dunn_bits}; {n_bits}"
-                )
-            except Exception as exc:
-                stat_txt = "KW n/a"
-                print(f"  {seed_key}: KW n/a ({exc})")
-        else:
-            stat_txt = "KW n/a"
-            print(f"  {seed_key}: KW n/a")
-
-        _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel("")
-        ax.text(
-            0.5,
-            1.02,
-            stat_txt,
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=7,
-            color="0.25",
-        )
-        _style_pub_ax(ax)
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+    print(
+        "\nGj / CC by age group — pooled sides & pair mean — "
+        "Kruskal–Wallis + Dunn (Bonferroni):"
+    )
 
     with plt.rc_context(
         {
@@ -2727,40 +2827,53 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.0, 8.2), constrained_layout=True)
-        print(
-            "\nGj / CC by age group — pooled sides & pair mean — "
-            "Kruskal–Wallis + Dunn (Bonferroni):"
-        )
-        for ax, (mode, spec, ylabel) in zip(axes[0], row_pooled):
-            key = f"pooled_{spec[0]}"
-            _panel(ax, mode, spec, ylabel, key)
-        for ax, (mode, spec, ylabel) in zip(axes[1], row_mean):
-            _panel(ax, mode, spec, ylabel, spec)
+        fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.4), constrained_layout=True)
+        panel_defs = [
+            (axes[0, 0], *row_pooled[0], "pooled_Gj"),
+            (axes[0, 1], *row_pooled[1], "pooled_CC"),
+            (axes[1, 0], *row_mean[0], "Gj_pair_mean"),
+            (axes[1, 1], *row_mean[1], "CC_pair_mean"),
+        ]
+        for ax, mode, spec, ylabel, title, seed_key in panel_defs:
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {seed_key}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=seed_key,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
 
-        axes[0, 0].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
-        axes[0, 1].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
-        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
-        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+        axes[0, 0].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25")
+        axes[0, 1].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25")
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
 
         legend_handles = [
             Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="crimson",
-                linestyle="None",
-                markersize=6,
-                label="mean ± SEM",
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
             ),
             Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="royalblue",
-                linestyle="None",
-                markersize=5,
-                label="median",
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
             ),
         ]
         fig.legend(
@@ -2773,11 +2886,114 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"$G_{j}$ and $CC$ by age group"
             "\n"
-            rf"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
+            rf"top: pooled sides; bottom: pair mean; brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "07_Gj_CC_by_age_group.png")
+
+    _save_age_group_stats_figure(
+        out_dir,
+        "07b_Gj_CC_by_age_group_stats.png",
+        r"$G_j$ / $CC$ by age group — statistics",
+        panel_stats,
+        group_labels,
+    )
+
+
+def plot_params_by_age_groups_pooled(df: pd.DataFrame, out_dir: Path):
+    """
+    Gj / CC / Rin / Cm / Vm by age group using all directed values
+    (pooled sides, not pair-averaged). Dunn brackets/stars on overview;
+    companion stats with 95% CI + Bonferroni-adjusted p.
+    """
+    sub = analysis_pool(df)
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    panels_all = [
+        ("pool", PARAM_DIRS["Gj"], PARAM_YLABELS["Gj"], "Gj pool"),
+        ("pool", PARAM_DIRS["CC"], PARAM_YLABELS["CC"], "CC pool"),
+        ("pool", PARAM_DIRS["Rin"], PARAM_YLABELS["Rin"], "Rin pool"),
+        ("pool", PARAM_DIRS["Cm"], PARAM_YLABELS["Cm"], "Cm pool"),
+        ("pool", PARAM_DIRS["Vm"], PARAM_YLABELS["Vm"], "Vm pool"),
+    ]
+
+    print(
+        "\nParameters by age group (pooled sides) — "
+        "Kruskal–Wallis + Dunn (Bonferroni):"
+    )
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(14.0, 8.2), constrained_layout=True)
+        ax_list = [axes[0, 0], axes[0, 1], axes[0, 2], axes[1, 0], axes[1, 1]]
+        axes[1, 2].set_visible(False)
+        for ax, (mode, spec, ylabel, title) in zip(ax_list, panels_all):
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {title}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {title}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=title,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
+
+        legend_handles = [
+            Line2D(
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
+            ),
+            Line2D(
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.55),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"$G_j$, $CC$, $R_{in}$, $C_m$, $V_m$ by age group (pooled sides)"
+            "\n"
+            rf"all directed values (not pair-averaged); brackets: significant Dunn; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "07c_params_by_age_group_pooled.png")
+
+    _save_age_group_stats_figure(
+        out_dir,
+        "07d_params_by_age_group_pooled_stats.png",
+        r"Pooled $G_j$/$CC$/$R_{in}$/$C_m$/$V_m$ by age — statistics",
+        panel_stats,
+        group_labels,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3810,7 +4026,7 @@ def _run_day_by_age_mode(
 ):
     """
     mode: 'pair' | 'pool'
-    Day within age: MW/Welch + Bonferroni×3 ages.
+    Day within age: MW/Welch + Bonferroni across age groups.
     Age within day: KW + Dunn; significant brackets on overview.
     """
     group_labels = [b[0] for b in AGE_ASYM_BINS]
@@ -4087,9 +4303,26 @@ def _run_day_by_age_mode(
             if name not in day_vs:
                 continue
             lines = [rf"{PARAM_MATH[name]} {mode_tag}", ""]
-            lines.append("Day1 vs Day2 (Bonferroni×3)")
+            lines.append(f"Day1 vs Day2 (Bonferroni×{n_age})")
             for res in day_vs[name]:
                 lines.append(f"  {res['age']}: n={res['n1']}/{res['n2']}")
+                # 95% CI of the mean for each day
+                for tag, mean_k, sem_k, n_k in (
+                    ("D1", "mean1", "sem1", "n1"),
+                    ("D2", "mean2", "sem2", "n2"),
+                ):
+                    m = res.get(mean_k, np.nan)
+                    sem = res.get(sem_k, np.nan)
+                    n = int(res.get(n_k, 0) or 0)
+                    if n >= 2 and np.isfinite(m) and np.isfinite(sem):
+                        tcrit = float(stats.t.ppf(0.975, n - 1))
+                        lo, hi = m - tcrit * sem, m + tcrit * sem
+                        lines.append(
+                            f"    {tag}: mean±SEM={m:.4g}±{sem:.4g}; "
+                            f"95% CI [{lo:.4g}, {hi:.4g}]"
+                        )
+                    elif n > 0 and np.isfinite(m):
+                        lines.append(f"    {tag}: mean={m:.4g} (n={n})")
                 lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
                 lines.append(
                     f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
@@ -4099,13 +4332,7 @@ def _run_day_by_age_mode(
                 info = age_kw[name][day]
                 lines.append(f"Age KW Day{day}: {format_p(info['p'])}")
                 dunn = info.get("dunn") or []
-                if not dunn:
-                    lines.append("  Dunn: —")
-                for a, b, pv in dunn:
-                    lines.append(
-                        f"  {_short_age_pair(a, b)}: "
-                        f"{format_p(pv)} {p_to_stars(pv)}"
-                    )
+                lines.extend(_dunn_stats_lines(dunn))
                 lines.append("")
             ax.text(
                 0.02,
@@ -4114,15 +4341,16 @@ def _run_day_by_age_mode(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=7.5,
+                fontsize=7.0,
                 family="monospace",
                 color="0.15",
-                linespacing=1.25,
+                linespacing=1.2,
             )
         fig.suptitle(
             f"Day × age statistics ({title_mode}; Days 1–2 only)\n"
-            "Day within age: Shapiro→Welch or Mann–Whitney, Bonferroni across 3 ages; "
-            "Age within day: Kruskal–Wallis + Dunn (Bonferroni)",
+            f"Day within age: Shapiro→Welch or Mann–Whitney, "
+            f"Bonferroni across {n_age} ages; "
+            "Age within day: Kruskal–Wallis + Dunn (Bonferroni); 95% CI of the mean",
             fontsize=11,
             color="0.15",
         )
@@ -4953,22 +5181,33 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
     """
-    CCa vs age (gray points) plus CCa by age-group KW companion (19 + 19b).
+    CCa vs age (gray points) plus CCa by 4 age groups with Dunn brackets (19 + 19b)
+    and a stats companion with 95% CI + Bonferroni-adjusted p (19c).
     """
     plot_cca_vs_age_gray(df, out_dir)
     if not _cca_columns_present(df):
         return
     sub = analysis_pool(df)
     c1, c2 = PARAM_DIRS["CCa"]
-    # Age-group summary with KW (directed CCa pooled within group)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
     samples = []
-    print("\nCCa by age group (directed pool):")
-    for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+    print("\nCCa by age group (directed pool) — KW + Dunn (Bonferroni):")
+    for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
         g = sub.loc[_age_bin_mask(sub, lo, hi, include_mt)]
         vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(dtype=float)
         samples.append(vals)
-        print(f"  {label}: n_dir={len(vals)}, median={np.median(vals) if len(vals) else float('nan'):.3g}")
+        print(
+            f"  {label}: n_dir={len(vals)}, "
+            f"median={np.median(vals) if len(vals) else float('nan'):.3g}"
+        )
+    H, p_kw, dunn = _kw_dunn_for_samples(samples, group_labels)
+    dunn_bits = [f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn]
+    if np.isfinite(H):
+        print(f"  KW H={H:.3f}, {format_p(p_kw)}; Dunn: {dunn_bits}")
+    else:
+        print("  KW n/a")
+
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -4976,62 +5215,49 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, ax = plt.subplots(figsize=(6.5, 4.8), constrained_layout=True)
-        for i, ((label, _lo, _hi, _mt, color), vals) in enumerate(zip(AGE_ASYM_BINS, samples)):
-            if len(vals) == 0:
-                continue
-            xpos = i + 1
-            jitter = np.random.default_rng(abs(hash("cca-age" + label)) % (2**32)).normal(
-                0, 0.06, len(vals)
-            )
-            ax.scatter(
-                np.full(len(vals), xpos) + jitter, vals, c=color,
-                s=POINT_SIZE, alpha=POINT_ALPHA, edgecolors="white", linewidths=0.35, zorder=2,
-            )
-            ax.errorbar(
-                [xpos], [float(np.mean(vals))],
-                yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
-                fmt="o", color="crimson", markersize=6, capsize=3, zorder=3,
-            )
-            ax.plot([xpos], [float(np.median(vals))], marker="D", color="royalblue", markersize=5, zorder=4)
-        nonempty = [s for s in samples if len(s) >= 3]
-        if len(nonempty) >= 2:
-            _h, p_kw = stats.kruskal(*nonempty)
-            ax.text(
-                0.98, 0.96, f"KW {format_p(p_kw)}\n(bins n≥3)",
-                transform=ax.transAxes, ha="right", va="top", fontsize=8, color="0.35",
-            )
-            print(f"  KW {format_p(p_kw)}")
-        ax.set_xticks(range(1, len(group_labels) + 1))
-        ax.set_xticklabels(
-            [f"{lab}\nn={len(s)}" for lab, s in zip(group_labels, samples)],
-            fontsize=7,
-            rotation=18,
-            ha="right",
+        fig, ax = plt.subplots(figsize=(7.2, 5.0), constrained_layout=True)
+        _scatter_age_group_panel(
+            ax,
+            samples,
+            group_labels=group_labels,
+            x_pos=x_pos,
+            ylabel=PARAM_YLABELS["CCa"],
+            seed_key="cca-age",
+            dunn=dunn,
         )
-        ax.set_xlim(0.45, len(group_labels) + 0.55)
-        ax.set_ylabel(PARAM_YLABELS["CCa"])
         ax.set_xlabel("Age group")
-        _style_pub_ax(ax)
         handles = [
-            Line2D([0], [0], marker="o", color="crimson", lw=0, markersize=6, label="mean ± SEM"),
-            Line2D([0], [0], marker="D", color="royalblue", lw=0, markersize=5, label="median"),
+            Line2D(
+                [0], [0], marker="o", color="crimson", lw=0, markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0], [0], marker="D", color="royalblue", lw=0, markersize=5,
+                label="median",
+            ),
         ]
         fig.legend(handles=handles, loc="upper left", frameon=False, fontsize=9)
         fig.suptitle(
-            r"$CC_a$ by age group (directed values)"
+            r"$CC_a$ by age group (directed / pooled sides)"
             "\n"
-            + POOL_NOTE,
+            rf"brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "19b_CCa_by_age_group.png")
 
+    _save_age_group_stats_figure(
+        out_dir,
+        "19c_CCa_by_age_group_stats.png",
+        r"$CC_a$ by age group — statistics",
+        [("CCa pool (directed)", samples, H, p_kw, dunn)],
+        group_labels,
+    )
 
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age juvenile / late adolescent / young adults / Dam: pairs with any CCa
+      - age Juvenile / adolescent / late adolescent / young adults / Dam: pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -5449,7 +5675,7 @@ def plot_cca_by_day(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
     """
-    Day 1–2–3 CCa for juvenile (P10–32) only: overview + Day1 vs Day2 stats
+    Day 1–2–3 CCa for Juvenile / adolescent (P10–32) only: overview + Day1 vs Day2 stats
     + Kruskal–Wallis across days (pooled directions).
     """
     if not _cca_columns_present(df):
@@ -5457,7 +5683,7 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
         return
     c1, c2 = PARAM_DIRS["CCa"]
     dfp = included_pairs(df)
-    # first AGE_ASYM_BINS entry is juvenile (P10–32)
+    # first AGE_ASYM_BINS entry is Juvenile / adolescent (P10–32)
     lab0, lo0, hi0, mt0, _col0 = AGE_ASYM_BINS[0]
     dfp = dfp.loc[_age_bin_mask(dfp, lo0, hi0, mt0)].copy()
     dfp = dfp[dfp[c1].notna() | dfp[c2].notna()].copy()
@@ -5966,9 +6192,9 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups juvenile / late adolescent / young adults / Dam;
+    Age groups Juvenile / adolescent / late adolescent / young adults / Dam;
     Kruskal–Wallis + Dunn (Bonferroni).
-    Companion text figure with medians, n, KW and Dunn.
+    Companion text figure with medians, n, KW, Dunn and 95% CI.
     """
     need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
     if any(c not in df.columns for c in need):
@@ -6002,114 +6228,11 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         ("pair", "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
     ]
 
-    def _samples_for(mode: str, spec) -> list[np.ndarray]:
-        samples = []
-        for _label, lo, hi, include_mt, _color in age_bins:
-            mask = _age_bin_mask(sub, lo, hi, include_mt)
-            g = sub.loc[mask]
-            if mode == "pair":
-                vals = (
-                    g[spec].dropna().to_numpy(dtype=float)
-                    if spec in g.columns
-                    else np.array([])
-                )
-            else:
-                c1, c2 = spec
-                if c1 not in g.columns or c2 not in g.columns:
-                    vals = np.array([])
-                else:
-                    vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
-                        dtype=float
-                    )
-            samples.append(vals)
-        return samples
-
-    def _kw_dunn_text(samples: list[np.ndarray], seed_key: str) -> str:
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) < 2:
-            print(f"  {seed_key}: KW n/a")
-            return "KW n/a"
-        try:
-            H, p = stats.kruskal(*nonempty)
-            dunn = _dunn_posthoc(samples, group_labels)
-            dunn_bits = [
-                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-            ]
-            # With 4 bins Dunn is long — KW on-axis, pairs on next lines
-            stat_txt = f"KW {format_p(p)}"
-            if dunn_bits:
-                mid = max(1, (len(dunn_bits) + 1) // 2)
-                stat_txt += (
-                    "\nDunn: " + "; ".join(dunn_bits[:mid])
-                    + "\n" + "; ".join(dunn_bits[mid:])
-                )
-            n_bits = ", ".join(
-                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
-            )
-            print(
-                f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
-                f"Dunn: {dunn_bits}; {n_bits}"
-            )
-            return stat_txt
-        except Exception as exc:
-            print(f"  {seed_key}: KW n/a ({exc})")
-            return "KW n/a"
-
-    def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
-        samples = _samples_for(mode, spec)
-        for (label, _lo, _hi, _mt, color), vals in zip(age_bins, samples):
-            if len(vals) == 0:
-                continue
-            jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
-                0, 0.06, len(vals)
-            )
-            ax.scatter(
-                np.full(len(vals), x_pos[label]) + jitter,
-                vals,
-                c=color,
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
-                edgecolors="white",
-                linewidths=0.35,
-                zorder=2,
-            )
-            ax.errorbar(
-                [x_pos[label]],
-                [np.mean(vals)],
-                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
-                fmt="o",
-                color="crimson",
-                markersize=6,
-                capsize=3,
-                zorder=3,
-            )
-            ax.plot(
-                [x_pos[label]],
-                [np.median(vals)],
-                marker="D",
-                color="royalblue",
-                markersize=5,
-                zorder=4,
-            )
-
-        stat_txt = _kw_dunn_text(samples, seed_key)
-        _set_age_group_xticks(ax, group_labels, x_pos=x_pos, fontsize=7)
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel("")
-        ax.text(
-            0.5,
-            1.02,
-            stat_txt,
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=6.5,
-            color="0.25",
-        )
-        _style_pub_ax(ax)
-        return samples, stat_txt
-
-    panel_stats: list[tuple[str, list[np.ndarray], str]] = []
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+    print(
+        "\nDelays by age group — pooled sides & pair mean — "
+        f"{bins_note} — Kruskal–Wallis + Dunn (Bonferroni):"
+    )
 
     with plt.rc_context(
         {
@@ -6119,10 +6242,6 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         }
     ):
         fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.4), constrained_layout=True)
-        print(
-            "\nDelays by age group — pooled sides & pair mean — "
-            f"{bins_note} — Kruskal–Wallis + Dunn (Bonferroni):"
-        )
         titles_keys = [
             ("Onset pooled", "pooled_onset", row_pooled[0]),
             ("Peak pooled", "pooled_peak", row_pooled[1]),
@@ -6132,32 +6251,45 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         for ax, (title, key, (mode, spec, ylabel)) in zip(
             [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]], titles_keys
         ):
-            samples, stat_txt = _panel(ax, mode, spec, ylabel, key)
-            panel_stats.append((title, samples, stat_txt))
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {key}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {key}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=key,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
 
-        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=22)
-        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25", pad=22)
-        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=22)
-        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=22)
+        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25")
+        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25")
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
 
         legend_handles = [
             Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="crimson",
-                linestyle="None",
-                markersize=6,
-                label="mean ± SEM",
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
             ),
             Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="royalblue",
-                linestyle="None",
-                markersize=5,
-                label="median",
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
             ),
         ]
         fig.legend(
@@ -6170,55 +6302,20 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"Onset / peak delay by age group"
             "\n"
-            rf"{bins_note}; top: pooled sides; bottom: pair mean; "
-            rf"Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
+            rf"top: pooled sides; bottom: pair mean; brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "37_delays_by_age_group.png")
 
-    # Text companion with medians / n / KW+Dunn (same idea as 02b stats)
-    with plt.rc_context(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-            "axes.unicode_minus": False,
-        }
-    ):
-        fig_s, ax_s = plt.subplots(figsize=(10.0, 7.2), constrained_layout=True)
-        ax_s.axis("off")
-        lines = [
-            "Delays by age group — statistics",
-            f"{POOL_NOTE}",
-            f"Kruskal–Wallis across {bins_note}; Dunn post-hoc (Bonferroni).",
-            "",
-        ]
-        for title, samples, stat_txt in panel_stats:
-            lines.append(title)
-            for lab, vals in zip(group_labels, samples):
-                if len(vals) == 0:
-                    lines.append(f"  {lab}: n=0")
-                else:
-                    lines.append(
-                        f"  {lab}: n={len(vals)}, "
-                        f"median={float(np.median(vals)):.3g} ms, "
-                        f"mean±SEM={float(np.mean(vals)):.3g}"
-                        f"±{float(stats.sem(vals)) if len(vals) > 1 else 0.0:.3g}"
-                    )
-            lines.append(f"  {stat_txt.replace(chr(10), ' | ')}")
-            lines.append("")
-        ax_s.text(
-            0.02,
-            0.98,
-            "\n".join(lines),
-            transform=ax_s.transAxes,
-            ha="left",
-            va="top",
-            fontsize=9,
-            family="monospace",
-            color="0.15",
-        )
-        savefig(fig_s, out_dir, "37b_delays_by_age_group_stats.png")
+    _save_age_group_stats_figure(
+        out_dir,
+        "37b_delays_by_age_group_stats.png",
+        "Delays by age group — statistics",
+        panel_stats,
+        group_labels,
+        unit="ms",
+    )
 
 
 def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
@@ -7889,9 +7986,21 @@ def build_figure_catalog(
         },
         {
             "id": "07",
-            "label": "07  Gj/CC by age group (pooled + pair mean)",
-            "outputs": ["07_Gj_CC_by_age_group.png"],
+            "label": "07  Gj/CC by age (stars; stats → 07b)",
+            "outputs": [
+                "07_Gj_CC_by_age_group.png",
+                "07b_Gj_CC_by_age_group_stats.png",
+            ],
             "run": lambda: plot_coupling_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "07c",
+            "label": "07c Pooled Gj/CC/Rin/Cm/Vm by age (stars; stats → 07d)",
+            "outputs": [
+                "07c_params_by_age_group_pooled.png",
+                "07d_params_by_age_group_pooled_stats.png",
+            ],
+            "run": lambda: plot_params_by_age_groups_pooled(df, out_dir),
         },
         {
             "id": "08",
@@ -7990,10 +8099,11 @@ def build_figure_catalog(
         },
         {
             "id": "19",
-            "label": "19  CCa vs age (gray) + age-group KW",
+            "label": "19  CCa vs age + age-group (stars; stats → 19c)",
             "outputs": [
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
             ],
             "run": lambda: plot_cca_vs_age(df, out_dir),
         },
@@ -8024,7 +8134,7 @@ def build_figure_catalog(
         },
         {
             "id": "33",
-            "label": "33  CCa by day for age P10–32 (+ stats)",
+            "label": "33  CCa by day for Juvenile / adolescent (+ stats)",
             "outputs": ["33_CCa_by_day_P10_32.png"],
             "run": lambda: plot_cca_by_day_p10_32(df, out_dir),
         },
@@ -8034,6 +8144,7 @@ def build_figure_catalog(
             "outputs": [
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
                 "20_CCa_coverage_counts.png",
                 "20b_CCa_coverage_percent_age_distance.png",
                 "20c_CCa_coverage_percent_by_CC_directed.png",
@@ -8047,6 +8158,7 @@ def build_figure_catalog(
             "outputs": [
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
                 "20_CCa_coverage_counts.png",
                 "20b_CCa_coverage_percent_age_distance.png",
                 "20c_CCa_coverage_percent_by_CC_directed.png",
@@ -8167,7 +8279,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (juvenile / late adol. / YA / Dam)",
+            "label": "37  Delays by age (J/adol / late adol. / YA / Dam)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
