@@ -7396,16 +7396,95 @@ def _age_scale_from_frames(*frames: pd.DataFrame) -> tuple[float, float, float, 
     return vmin, max_age, mt_val, has_mt, ticks
 
 
+def _add_horizontal_age_colorbar_axis(
+    fig,
+    ax,
+    *,
+    vmin: float,
+    max_age: float,
+    mt_val: float,
+    age_ticks: list[float],
+    has_mt: bool,
+):
+    """
+    Replace conventional age X tick labels with a horizontal age colourbar
+    (same warped units / major ticks as other figures).
+    """
+    ax.set_xlabel("")
+    ax.set_xticks([])
+    ax.set_xlim(-0.02, 1.02)
+    if max_age > STRETCH_AGE_HI:
+        u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
+        ax.axvline(u50, color="0.8", ls="--", lw=0.7, zorder=0)
+
+    sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm,
+        ax=ax,
+        orientation="horizontal",
+        fraction=0.085,
+        pad=0.10,
+        aspect=42,
+    )
+    ages = list(age_ticks or [])
+    major_ages = major_labeled_ages(ages)
+
+    def _unit(t: float, is_mt: bool = False) -> float:
+        return age_to_unit(t, is_mt, vmin, max_age, mt_val)
+
+    # minor ticks = all observed ages
+    if ages:
+        cbar.ax.set_xticks([_unit(a) for a in ages], minor=True)
+        cbar.ax.tick_params(which="minor", length=3, width=0.6)
+    major_units = [_unit(a) for a in major_ages]
+    major_labels = [_fmt_age_tick(a) for a in major_ages]
+    if has_mt:
+        major_units.append(_unit(mt_val, is_mt=True))
+        major_labels.append(MT_DISPLAY_LABEL)
+    if major_units:
+        cbar.ax.set_xticks(major_units)
+        cbar.ax.set_xticklabels(major_labels)
+        cbar.ax.tick_params(which="major", length=6, width=1.0, labelsize=8)
+    if max_age > STRETCH_AGE_HI:
+        cbar.ax.axvline(_unit(float(STRETCH_AGE_HI)), color="0.75", lw=0.8, ls="--")
+    cbar.outline.set_linewidth(0.6)
+    cbar.set_label("Age [postnatal days]", fontsize=9)
+    return cbar
+
+
+def _annotate_counts(ax, xs, ys, labels, *, dy_frac: float = 0.04):
+    """Integer labels just above each point."""
+    y0, y1 = ax.get_ylim()
+    dy = max((y1 - y0) * dy_frac, 0.15)
+    for x, y, lab in zip(xs, ys, labels):
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        ax.text(
+            float(x),
+            float(y) + dy,
+            str(int(round(float(lab)))),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="0.15",
+            zorder=4,
+        )
+
+
 def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.DataFrame | None = None):
     """
-    Animals vs age: X = warped age (same colour scale as other figures),
-    Y = animal number from sheet Animal Count.
+    Animals vs age: points sit on warped-age X, but age is read from the
+    horizontal colourbar (no numeric age X ticks). Zeros omitted.
     """
     if animals is None or len(animals) == 0:
         print("Skipping animal count vs age: no Animal Count data.")
         return
-    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(animals, pairs_df)
-    d = animals.copy()
+    d = animals.loc[animals["n_animals"].fillna(0) > 0].copy()
+    if len(d) == 0:
+        print("Skipping animal count vs age: all animal counts are zero.")
+        return
+    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(d, pairs_df)
     d["x_warp"] = [
         _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
         for a, mt in zip(d["age_num"], d["is_mt"])
@@ -7421,35 +7500,32 @@ def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.
             "axes.unicode_minus": False,
         }
     ):
-        fig, ax = plt.subplots(figsize=(7.2, 4.6), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(7.4, 5.0), constrained_layout=True)
         ax.scatter(
             d["x_warp"],
             d["n_animals"],
             c=colors,
-            s=POINT_SIZE * 1.6,
+            s=POINT_SIZE * 2.2,
             alpha=0.9,
             edgecolors="white",
             linewidths=0.45,
             zorder=3,
         )
-        ax.set_ylabel("Animals [n]")
-        ax.set_xlabel("Age [postnatal days]")
+        ax.set_ylabel("Animals [N]")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        y_max = float(np.nanmax(d["n_animals"])) if len(d) else 1.0
-        ax.set_ylim(0, max(y_max * 1.15, 1.0))
-        _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+        y_max = float(np.nanmax(d["n_animals"]))
+        ax.set_ylim(0, max(y_max * 1.22, 1.0))
+        _annotate_counts(ax, d["x_warp"], d["n_animals"], d["n_animals"])
         _style_pub_ax(ax)
-        cbar = add_age_colorbar(
-            fig, [ax], vmin=vmin, max_age=max_age, mt_val=mt_val,
+        _add_horizontal_age_colorbar_axis(
+            fig, ax,
+            vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
         )
-        cbar.outline.set_linewidth(0.6)
-        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
-        cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
             "Animals used per age"
             "\n"
-            r"sheet Animal Count; point colour = age (same scale as other figures)",
+            r"sheet Animal Count; age encoded by colour bar (same scale as other figures)",
             fontsize=11,
             color="0.15",
         )
@@ -7462,21 +7538,20 @@ def plot_animals_pairs_vs_age(
     out_dir: Path,
 ):
     """
-    Three variables on one figure:
-      left  — animals vs age (age colour)
-      right — bubble: Y = animals, size ∝ pairs, colour = age
-    Pair counts come from Properties (Exclude?=yes omitted).
+    Bubble plot: Y = animals (>0 only), bubble area ∝ pairs, colour/X = age.
+    Age axis = horizontal colourbar (no numeric X ticks). Numbers on bubbles
+    = animal counts. No bubble-size legend.
     """
     if animals is None or len(animals) == 0:
         print("Skipping animals+pairs vs age: no Animal Count data.")
         return
     pairs = pair_counts_by_age(pairs_df, include_excluded=False)
     merged = merge_animals_and_pairs(animals, pairs)
-    if len(merged) == 0:
-        print("Skipping animals+pairs vs age: empty merge.")
+    d = merged.loc[merged["n_animals"].fillna(0) > 0].copy()
+    if len(d) == 0:
+        print("Skipping animals+pairs vs age: no positive animal counts.")
         return
-    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(merged, pairs_df)
-    d = merged.copy()
+    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(d, pairs_df)
     d["x_warp"] = [
         _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
         for a, mt in zip(d["age_num"], d["is_mt"])
@@ -7486,10 +7561,9 @@ def plot_animals_pairs_vs_age(
     )
     n_pairs = d["n_pairs"].to_numpy(dtype=float)
     n_anim = d["n_animals"].to_numpy(dtype=float)
-    # bubble area ~ pairs (keep readable range)
     pmax = float(np.nanmax(n_pairs)) if np.isfinite(n_pairs).any() else 1.0
     pmax = max(pmax, 1.0)
-    sizes = 40.0 + 220.0 * (n_pairs / pmax)
+    sizes = 55.0 + 260.0 * (n_pairs / pmax)
 
     print(
         "\nAnimals + pairs vs age: "
@@ -7502,85 +7576,32 @@ def plot_animals_pairs_vs_age(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), constrained_layout=True)
-
-        # Left: animals only (fixed marker size)
-        ax0 = axes[0]
-        m_anim = n_anim > 0
-        ax0.scatter(
-            d.loc[m_anim, "x_warp"],
-            n_anim[m_anim],
-            c=np.asarray(colors, dtype=object)[m_anim],
-            s=POINT_SIZE * 1.6,
-            alpha=0.9,
-            edgecolors="white",
-            linewidths=0.45,
-            zorder=3,
-        )
-        ax0.set_ylabel("Animals [n]")
-        ax0.set_xlabel("Age [postnatal days]")
-        ax0.set_title("Animals", fontsize=10, color="0.25", pad=8)
-        ax0.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax0.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.15 if m_anim.any() else 1.0, 1.0))
-        _set_warped_age_ticks(ax0, vmin, max_age, mt_val, age_ticks, has_mt)
-        _style_pub_ax(ax0)
-
-        # Right: bubble — animals (Y) × pairs (size) × age (colour / X)
-        ax1 = axes[1]
-        ax1.scatter(
+        fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+        ax.scatter(
             d["x_warp"],
             n_anim,
             c=colors,
             s=sizes,
-            alpha=0.75,
+            alpha=0.8,
             edgecolors="0.2",
             linewidths=0.5,
             zorder=3,
         )
-        ax1.set_ylabel("Animals [n]")
-        ax1.set_xlabel("Age [postnatal days]")
-        ax1.set_title(r"Animals × pairs (bubble size)", fontsize=10, color="0.25", pad=8)
-        ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax1.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.2 if len(n_anim) else 1.0, 1.0))
-        _set_warped_age_ticks(ax1, vmin, max_age, mt_val, age_ticks, has_mt)
-        _style_pub_ax(ax1)
-
-        # Size legend (example pair counts)
-        legend_ns = sorted({1, max(1, int(round(pmax / 2))), int(round(pmax))})
-        legend_ns = [n for n in legend_ns if n > 0]
-        size_handles = [
-            Line2D(
-                [0], [0],
-                marker="o",
-                color="w",
-                markerfacecolor="0.45",
-                markeredgecolor="0.2",
-                markersize=np.sqrt(40.0 + 220.0 * (n / pmax)) * 0.55,
-                label=f"{n} pair{'s' if n != 1 else ''}",
-            )
-            for n in legend_ns
-        ]
-        ax1.legend(
-            handles=size_handles,
-            title="Bubble size",
-            loc="upper left",
-            frameon=False,
-            fontsize=8,
-            title_fontsize=8,
-        )
-
-        cbar = add_age_colorbar(
-            fig, list(axes), vmin=vmin, max_age=max_age, mt_val=mt_val,
+        ax.set_ylabel("Animals [N]")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.28, 1.0))
+        _annotate_counts(ax, d["x_warp"], n_anim, n_anim)
+        _style_pub_ax(ax)
+        _add_horizontal_age_colorbar_axis(
+            fig, ax,
+            vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
         )
-        cbar.outline.set_linewidth(0.6)
-        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
-        cbar.set_label("Age [postnatal days]", fontsize=9)
         fig.suptitle(
-            r"Sample size vs age — animals and electrical pairs"
+            r"Animals and electrical pairs vs age"
             "\n"
-            r"left: Animal Count; right: Y = animals, bubble area $\propto$ pairs "
-            r"(Properties, Exclude?=yes out); colour = age",
+            r"Y = animals; bubble area $\propto$ pairs (Properties, Exclude?=yes out); "
+            r"age = colour bar; numbers = animal counts",
             fontsize=11,
             color="0.15",
         )
@@ -8027,7 +8048,7 @@ def build_figure_catalog(
         },
         {
             "id": "40",
-            "label": "40  Animals × pairs vs age (bubble size = pairs)",
+            "label": "40  Animals × pairs vs age (bubble; age colourbar)",
             "outputs": ["40_animals_pairs_vs_age.png"],
             "run": lambda: plot_animals_pairs_vs_age(animals, df, out_dir)
             if animals is not None
