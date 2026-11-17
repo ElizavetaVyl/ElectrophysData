@@ -7396,6 +7396,29 @@ def _age_scale_from_frames(*frames: pd.DataFrame) -> tuple[float, float, float, 
     return vmin, max_age, mt_val, has_mt, ticks
 
 
+def _included_pair_age_ticks(
+    pairs_df: pd.DataFrame | None,
+) -> tuple[list[float], bool]:
+    """
+    Colourbar tick ages = postnatal ages with ≥1 pair that is NOT Exclude?=yes.
+    Returns (numeric_age_ticks, has_mt_among_included).
+    """
+    if pairs_df is None or len(pairs_df) == 0:
+        return [], False
+    counts = pair_counts_by_age(pairs_df, include_excluded=False)
+    counts = counts.loc[counts["n_pairs"].fillna(0) > 0]
+    if len(counts) == 0:
+        return [], False
+    has_mt = bool(counts["is_mt"].any())
+    ticks = sorted(
+        {
+            float(a)
+            for a in counts.loc[~counts["is_mt"], "age_num"].dropna().unique()
+        }
+    )
+    return ticks, has_mt
+
+
 def _add_horizontal_age_colorbar_axis(
     fig,
     ax,
@@ -7474,17 +7497,25 @@ def _annotate_counts(ax, xs, ys, labels, *, dy_frac: float = 0.04):
 
 def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.DataFrame | None = None):
     """
-    Animals vs age: points sit on warped-age X, but age is read from the
-    horizontal colourbar (no numeric age X ticks). Zeros omitted.
+    Animals vs age: points sit on warped-age X; age ticks on the colourbar
+    are only ages with non-excluded pairs. Point labels = pair counts.
+    Animal zeros omitted.
     """
     if animals is None or len(animals) == 0:
         print("Skipping animal count vs age: no Animal Count data.")
         return
-    d = animals.loc[animals["n_animals"].fillna(0) > 0].copy()
+    pairs = (
+        pair_counts_by_age(pairs_df, include_excluded=False)
+        if pairs_df is not None
+        else pd.DataFrame(columns=["age_num", "is_mt", "n_pairs"])
+    )
+    merged = merge_animals_and_pairs(animals, pairs)
+    d = merged.loc[merged["n_animals"].fillna(0) > 0].copy()
     if len(d) == 0:
         print("Skipping animal count vs age: all animal counts are zero.")
         return
-    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(d, pairs_df)
+    vmin, max_age, mt_val, _has_mt_scale, _ = _age_scale_from_frames(d, pairs_df)
+    tick_ages, has_mt_tick = _included_pair_age_ticks(pairs_df)
     d["x_warp"] = [
         _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
         for a, mt in zip(d["age_num"], d["is_mt"])
@@ -7492,7 +7523,11 @@ def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.
     colors, _, _ = age_colors(
         d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
     )
-    print(f"\nAnimal count vs age: n_ages={len(d)}, total animals={int(d['n_animals'].sum())}")
+    print(
+        f"\nAnimal count vs age: n_ages={len(d)}, "
+        f"animals={int(d['n_animals'].sum())}, "
+        f"colourbar ticks (Exclude?=no ages)={tick_ages}"
+    )
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -7515,17 +7550,18 @@ def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         y_max = float(np.nanmax(d["n_animals"]))
         ax.set_ylim(0, max(y_max * 1.22, 1.0))
-        _annotate_counts(ax, d["x_warp"], d["n_animals"], d["n_animals"])
+        _annotate_counts(ax, d["x_warp"], d["n_animals"], d["n_pairs"].fillna(0))
         _style_pub_ax(ax)
         _add_horizontal_age_colorbar_axis(
             fig, ax,
             vmin=vmin, max_age=max_age, mt_val=mt_val,
-            age_ticks=age_ticks, has_mt=has_mt,
+            age_ticks=tick_ages, has_mt=has_mt_tick,
         )
         fig.suptitle(
             "Animals used per age"
             "\n"
-            r"sheet Animal Count; age encoded by colour bar (same scale as other figures)",
+            r"numbers = electrical pairs (Exclude?=yes out); "
+            r"colour-bar ticks = ages with included pairs",
             fontsize=11,
             color="0.15",
         )
@@ -7539,8 +7575,8 @@ def plot_animals_pairs_vs_age(
 ):
     """
     Bubble plot: Y = animals (>0 only), bubble area ∝ pairs, colour/X = age.
-    Age axis = horizontal colourbar (no numeric X ticks). Numbers on bubbles
-    = animal counts. No bubble-size legend.
+    Numbers on bubbles = pair counts. Colourbar ticks = ages with pairs that
+    are not Exclude?=yes.
     """
     if animals is None or len(animals) == 0:
         print("Skipping animals+pairs vs age: no Animal Count data.")
@@ -7551,7 +7587,8 @@ def plot_animals_pairs_vs_age(
     if len(d) == 0:
         print("Skipping animals+pairs vs age: no positive animal counts.")
         return
-    vmin, max_age, mt_val, has_mt, age_ticks = _age_scale_from_frames(d, pairs_df)
+    vmin, max_age, mt_val, _has_mt_scale, _ = _age_scale_from_frames(d, pairs_df)
+    tick_ages, has_mt_tick = _included_pair_age_ticks(pairs_df)
     d["x_warp"] = [
         _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
         for a, mt in zip(d["age_num"], d["is_mt"])
@@ -7559,7 +7596,7 @@ def plot_animals_pairs_vs_age(
     colors, _, _ = age_colors(
         d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
     )
-    n_pairs = d["n_pairs"].to_numpy(dtype=float)
+    n_pairs = d["n_pairs"].fillna(0).to_numpy(dtype=float)
     n_anim = d["n_animals"].to_numpy(dtype=float)
     pmax = float(np.nanmax(n_pairs)) if np.isfinite(n_pairs).any() else 1.0
     pmax = max(pmax, 1.0)
@@ -7567,7 +7604,8 @@ def plot_animals_pairs_vs_age(
 
     print(
         "\nAnimals + pairs vs age: "
-        f"n_ages={len(d)}, animals={int(np.nansum(n_anim))}, pairs={int(np.nansum(n_pairs))}"
+        f"n_ages={len(d)}, animals={int(np.nansum(n_anim))}, pairs={int(np.nansum(n_pairs))}; "
+        f"colourbar ticks (Exclude?=no)={tick_ages}"
     )
     with plt.rc_context(
         {
@@ -7590,18 +7628,18 @@ def plot_animals_pairs_vs_age(
         ax.set_ylabel("Animals [N]")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.28, 1.0))
-        _annotate_counts(ax, d["x_warp"], n_anim, n_anim)
+        _annotate_counts(ax, d["x_warp"], n_anim, n_pairs)
         _style_pub_ax(ax)
         _add_horizontal_age_colorbar_axis(
             fig, ax,
             vmin=vmin, max_age=max_age, mt_val=mt_val,
-            age_ticks=age_ticks, has_mt=has_mt,
+            age_ticks=tick_ages, has_mt=has_mt_tick,
         )
         fig.suptitle(
             r"Animals and electrical pairs vs age"
             "\n"
-            r"Y = animals; bubble area $\propto$ pairs (Properties, Exclude?=yes out); "
-            r"age = colour bar; numbers = animal counts",
+            r"Y = animals; bubble area $\propto$ pairs; numbers = pairs "
+            r"(Exclude?=yes out); colour-bar ticks = ages with included pairs",
             fontsize=11,
             color="0.15",
         )
