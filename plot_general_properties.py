@@ -140,21 +140,27 @@ PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
-# Age bins for asymmetry / AI group analyses (MT → P50+)
+# Age bins for group analyses (4 colours).
+# juvenile P10–32; late adolescent P33–50 (age 50 stays here);
+# young adults P51–200 (labeled P50–200 band, ages >50 up to 200);
+# Dam = MT / aged breeder dams only (no postnatal age).
 AGE_ASYM_BINS = [
-    ("P10–32", 10, 32, False, "#FB8C00"),  # orange
-    ("P33–50", 33, 50, False, "#8E24AA"),  # purple
-    ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
+    ("juvenile", 10, 32, False, "#FB8C00"),         # orange
+    ("late adolescent", 33, 50, False, "#D84315"),  # deep orange-red (distinct from juvenile)
+    ("young adults", 51, 200, False, "#8E24AA"),    # purple
+    ("Dam", None, None, True, "#2E0854"),           # dark violet; aged breeder dams (MT)
 ]
-
-# Finer age bins for delay (onset/peak) by age group — fig 37
-# Same P50+ rule as AGE_ASYM_BINS: age > 50 (+ Dam/MT); age 50 stays in P33–50.
-DELAY_AGE_BINS = [
-    ("P10–21", 10, 21, False, "#FB8C00"),  # orange
-    ("P22–32", 22, 32, False, "#D84315"),  # deep orange
-    ("P33–50", 33, 50, False, "#8E24AA"),  # purple
-    ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
-]
+# Delay-by-age figures use the same 4 developmental groups
+DELAY_AGE_BINS = list(AGE_ASYM_BINS)
+AGE_GROUP_NOTE = (
+    "juvenile P10–32 / late adolescent P33–50 / young adults P50–200 / Dam"
+)
+AGE_GROUP_ABBREV = {
+    "juvenile": "juv",
+    "late adolescent": "late-adol",
+    "young adults": "YA",
+    "Dam": "Dam",
+}
 
 AI_METRICS = [
     ("AI_Gj", r"AI $G_{j}$"),
@@ -165,11 +171,23 @@ AI_METRICS = [
 ]
 
 
-def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: bool) -> pd.Series:
-    if hi is None:
-        mask = df["age_num"].notna() & (df["age_num"] > lo)
+def _age_bin_mask(
+    df: pd.DataFrame, lo: float | None, hi: float | None, include_mt: bool
+) -> pd.Series:
+    """
+    Numeric age window [lo, hi] (inclusive), or Dam-only when lo is hi is None.
+    When hi is None and lo is set: age > lo (open upper end).
+    """
+    if lo is None and hi is None:
+        mask = pd.Series(False, index=df.index)
+    elif hi is None:
+        mask = df["age_num"].notna() & (df["age_num"] > float(lo))
     else:
-        mask = df["age_num"].notna() & (df["age_num"] >= lo) & (df["age_num"] <= hi)
+        mask = (
+            df["age_num"].notna()
+            & (df["age_num"] >= float(lo))
+            & (df["age_num"] <= float(hi))
+        )
     if include_mt:
         mask = mask | df["is_mt"]
     else:
@@ -182,6 +200,8 @@ def _age_group_label_color(age_num, is_mt) -> tuple[str | None, str | None]:
         if is_mt:
             if include_mt:
                 return label, color
+            continue
+        if lo is None:
             continue
         if age_num is None or (isinstance(age_num, float) and np.isnan(age_num)):
             return None, None
@@ -1712,14 +1732,28 @@ def _dunn_posthoc(
 
 def _short_age_pair(a: str, b: str) -> str:
     def _short(lab: str) -> str:
-        return lab.replace("P", "").replace("–", "-")
+        return AGE_GROUP_ABBREV.get(lab, lab.replace("P", "").replace("–", "-"))
 
     return f"{_short(a)} vs {_short(b)}"
 
 
+def _set_age_group_xticks(ax, group_labels, *, x_pos=None, fontsize: float = 7.5):
+    """X ticks for age-group categorical panels (rotate long stage names)."""
+    if x_pos is None:
+        xs = list(range(1, len(group_labels) + 1))
+    else:
+        xs = [x_pos[lab] for lab in group_labels]
+    ax.set_xticks(xs)
+    ax.set_xticklabels(
+        group_labels, fontsize=fontsize, rotation=18, ha="right"
+    )
+    if xs:
+        ax.set_xlim(xs[0] - 0.55, xs[-1] + 0.55)
+
+
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (P10–32 / P33–50 / P50+).
+    AI by age group (juvenile / late adolescent / young adults / Dam).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
     Separate stats figure: Kruskal–Wallis + Dunn (Bonferroni) details.
     """
@@ -1827,8 +1861,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 )
 
             ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
-            ax.set_xticks([x_pos[l] for l in group_labels])
-            ax.set_xticklabels(group_labels)
+            _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
             ax.set_ylabel(ylabel)
             ax.set_xlabel("")
 
@@ -1949,7 +1982,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             )
         fig.suptitle(
             "AI by age group — statistics\n"
-            f"Kruskal–Wallis across P10–32 / P33–50 / P50+; "
+            f"Kruskal–Wallis across {AGE_GROUP_NOTE}; "
             f"Dunn post-hoc with Bonferroni; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
@@ -2107,11 +2140,12 @@ def plot_asymmetry_by_age_bins(
     title: str,
 ):
     """
-    rows x 3 age bins. Fixed colors per column, no age colorbar.
+    rows × age bins (4 groups). Fixed colors per column, no age colorbar.
     rows: list of (param_name, unit_note)
     """
     sub = analysis_pool(df)
     n_rows = len(rows)
+    n_age = len(AGE_ASYM_BINS)
 
     with plt.rc_context(
         {
@@ -2121,7 +2155,10 @@ def plot_asymmetry_by_age_bins(
         }
     ):
         fig_h = 3.5 * n_rows + 0.8
-        fig, axes = plt.subplots(n_rows, 3, figsize=(11.5, fig_h), constrained_layout=True)
+        fig_w = max(11.5, 2.9 * n_age + 0.8)
+        fig, axes = plt.subplots(
+            n_rows, n_age, figsize=(fig_w, fig_h), constrained_layout=True
+        )
         if n_rows == 1:
             axes = np.array([axes])
 
@@ -2133,7 +2170,7 @@ def plot_asymmetry_by_age_bins(
         for r, (name, unit_note) in enumerate(rows):
             xmin_c, xmax_c = f"{name}_min", f"{name}_max"
             if xmin_c not in sub.columns:
-                for c in range(3):
+                for c in range(n_age):
                     axes[r, c].set_visible(False)
                 continue
 
@@ -2571,7 +2608,8 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
 def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {x1, x2} for Gj and CC; bottom = pair means.
-    Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    Age groups juvenile / late adolescent / young adults / Dam;
+    Kruskal–Wallis + Dunn (Bonferroni).
     """
     sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
@@ -2667,8 +2705,7 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
             stat_txt = "KW n/a"
             print(f"  {seed_key}: KW n/a")
 
-        ax.set_xticks([x_pos[l] for l in group_labels])
-        ax.set_xticklabels(group_labels)
+        _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
         ax.set_ylabel(ylabel)
         ax.set_xlabel("")
         ax.text(
@@ -2902,7 +2939,7 @@ def _draw_distance_hist(ax, dists: np.ndarray, panel_title: str):
 
 def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
     """
-    Warped age histogram; band labels P10–32 / P33–50 / P50+ with pair counts.
+    Warped age histogram; band labels for the 4 age groups with pair counts.
     """
     numeric = frame.loc[~frame["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
     n_mt = int(frame["is_mt"].sum())
@@ -2965,11 +3002,25 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
     for label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
         band_ns.append(int(_age_bin_mask(frame, lo, hi, include_mt).sum()))
 
-    band_specs = [
-        (10.0, 32.5, "#FB8C00", 0.12, "P10–32", False, band_ns[0]),
-        (32.5, 50.0, "#8E24AA", 0.10, "P33–50", False, band_ns[1]),
-        (50.0, max_age, "#2E0854", 0.08, "P50+", True, band_ns[2]),
-    ]
+    # Numeric age bands (Dam/MT labeled separately near the Dam bar below)
+    band_alphas = (0.12, 0.10, 0.08, 0.08)
+    band_specs = []
+    for i, (lab, lo, hi, include_mt, col) in enumerate(AGE_ASYM_BINS):
+        if lo is None and hi is None:
+            continue  # Dam — MT slot
+        is_old = lo is not None and float(lo) >= float(STRETCH_AGE_HI)
+        lo_b = float(lo) if lo is not None else 10.0
+        if is_old:
+            lo_b, hi_b = float(STRETCH_AGE_HI), float(max_age)
+        elif hi is None:
+            hi_b = float(max_age)
+        else:
+            # half-open visual boundary between adjacent bins
+            hi_b = float(hi) + 0.5
+            lo_b = float(lo) if i == 0 else float(lo) - 0.5
+        band_specs.append(
+            (lo_b, hi_b, col, band_alphas[i % len(band_alphas)], lab, is_old, band_ns[i])
+        )
     for lo_b, hi_b, col_b, alpha_b, lab_b, is_old, n_band in band_specs:
         if is_old:
             if not old_ages and max_age <= float(STRETCH_AGE_HI) and n_mt == 0:
@@ -3050,11 +3101,23 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         dam_x = u_tail1 + 0.015 + slot
         dam_w = old_bar_w
         ax.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
+        dam_color = next(
+            (c for lab, lo, hi, mt, c in AGE_ASYM_BINS if lo is None and hi is None),
+            "#2E0854",
+        )
+        dam_n = next(
+            (
+                n
+                for (lab, lo, hi, _mt, _c), n in zip(AGE_ASYM_BINS, band_ns)
+                if lo is None and hi is None
+            ),
+            n_mt,
+        )
         ax.axvspan(
             dam_x - 0.5 * dam_w,
             dam_x + 0.5 * dam_w,
-            color="#2E0854",
-            alpha=0.06,
+            color=dam_color,
+            alpha=0.08,
             zorder=0,
             lw=0,
         )
@@ -3067,6 +3130,19 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
             alpha=0.9,
             align="center",
             zorder=2,
+        )
+        ax.text(
+            dam_x,
+            1.08,
+            f"Dam\n$n_{{ec}}$={dam_n}",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color=dam_color,
+            alpha=0.9,
+            clip_on=False,
+            linespacing=1.15,
         )
         tick_pos.append(dam_x)
         tick_lab.append(MT_DISPLAY_LABEL)
@@ -3876,7 +3952,7 @@ def _run_day_by_age_mode(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(13.5, 8.5), constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.5), constrained_layout=True)
         axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
         axes[0, 2].set_visible(False)
 
@@ -3974,9 +4050,7 @@ def _run_day_by_age_mode(
                     )
                     bracket_y += step
 
-            ax.set_xticks([1, 2, 3])
-            ax.set_xticklabels(group_labels)
-            ax.set_xlim(0.45, 3.55)
+            _set_age_group_xticks(ax, group_labels)
             ax.set_ylabel(PARAM_YLABELS[name])
             ax.set_xlabel("")
             _style_pub_ax(ax)
@@ -4663,10 +4737,12 @@ def _coverage_grouped_bars(
                 color="0.4",
             )
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=7 if len(labels) > 6 else 8)
-    if len(labels) > 6:
+    long_labs = len(labels) > 6 or any(len(str(lab)) > 10 for lab in labels)
+    ax.set_xticklabels(labels, fontsize=7 if long_labs else 8)
+    if long_labs:
         for lab in ax.get_xticklabels():
-            lab.set_rotation(35)
+            lab.set_rotation(18)
+            lab.set_ha("right")
     ax.set_ylabel("Count")
     ax.set_xlabel(xlabel)
     ax.set_ylim(0, y_top * 1.22)
@@ -4684,10 +4760,12 @@ def _pct_points(ax, *, labels: list[str], pct: list[float], xlabel: str, ylabel:
             ha="center", va="bottom", fontsize=7.5, color="0.25",
         )
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=7 if len(labels) > 6 else 8)
-    if len(labels) > 6:
+    long_labs = len(labels) > 6 or any(len(str(lab)) > 10 for lab in labels)
+    ax.set_xticklabels(labels, fontsize=7 if long_labs else 8)
+    if long_labs:
         for lab in ax.get_xticklabels():
-            lab.set_rotation(35)
+            lab.set_rotation(18)
+            lab.set_ha("right")
     ax.set_ylim(0, 110)
     ax.set_ylabel(ylabel)
     ax.set_xlabel(xlabel)
@@ -4926,8 +5004,12 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
             print(f"  KW {format_p(p_kw)}")
         ax.set_xticks(range(1, len(group_labels) + 1))
         ax.set_xticklabels(
-            [f"{lab}\nn={len(s)}" for lab, s in zip(group_labels, samples)], fontsize=8
+            [f"{lab}\nn={len(s)}" for lab, s in zip(group_labels, samples)],
+            fontsize=7,
+            rotation=18,
+            ha="right",
         )
+        ax.set_xlim(0.45, len(group_labels) + 0.55)
         ax.set_ylabel(PARAM_YLABELS["CCa"])
         ax.set_xlabel("Age group")
         _style_pub_ax(ax)
@@ -4949,7 +5031,7 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age P10–32 / P33–50 / P50+: pairs with any CCa
+      - age juvenile / late adolescent / young adults / Dam: pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -5367,7 +5449,7 @@ def plot_cca_by_day(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
     """
-    Day 1–2–3 CCa for age P10–32 only: overview + Day1 vs Day2 stats
+    Day 1–2–3 CCa for juvenile (P10–32) only: overview + Day1 vs Day2 stats
     + Kruskal–Wallis across days (pooled directions).
     """
     if not _cca_columns_present(df):
@@ -5375,7 +5457,7 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
         return
     c1, c2 = PARAM_DIRS["CCa"]
     dfp = included_pairs(df)
-    # first AGE_ASYM_BINS entry is P10–32
+    # first AGE_ASYM_BINS entry is juvenile (P10–32)
     lab0, lo0, hi0, mt0, _col0 = AGE_ASYM_BINS[0]
     dfp = dfp.loc[_age_bin_mask(dfp, lo0, hi0, mt0)].copy()
     dfp = dfp[dfp[c1].notna() | dfp[c2].notna()].copy()
@@ -5483,7 +5565,7 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
     """
-    CCa vs CC pair means by age group (P10–32 / P33–50 / P50+), separate Spearman.
+    CCa vs CC pair means by age group (4 groups), separate Spearman.
     Top: both CCa required; bottom: missing CCa → 0.
     """
     if not _cca_columns_present(df):
@@ -5508,6 +5590,7 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
     )
     x_mean = sub["CC_pair_mean"].to_numpy(dtype=float)
     print("\nCCa vs CC by age (Spearman):")
+    n_age = len(AGE_ASYM_BINS)
 
     with plt.rc_context(
         {
@@ -5516,7 +5599,9 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(
+            2, n_age, figsize=(max(11.5, 2.9 * n_age + 0.8), 7.6), constrained_layout=True
+        )
         for row, (y_mean, ylab) in enumerate(
             (
                 (y_both, r"$CC_a$ pair mean (both sides)"),
@@ -5683,7 +5768,16 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
         )
         savefig(fig, out_dir, "24_CCa_asymmetry.png")
 
-        fig, axes = plt.subplots(1, 3, figsize=(11.5, 4.2), constrained_layout=True)
+        n_age = len(AGE_ASYM_BINS)
+        n_rows_age = 2 if n_age > 3 else 1
+        n_cols_age = int(np.ceil(n_age / n_rows_age))
+        fig, axes = plt.subplots(
+            n_rows_age,
+            n_cols_age,
+            figsize=(max(10.0, 2.8 * n_cols_age + 0.6), 4.0 * n_rows_age + 0.6),
+            constrained_layout=True,
+        )
+        axes_flat = np.atleast_1d(axes).ravel()
         all_x, all_y = [], []
         for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
@@ -5697,7 +5791,7 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
             )
         else:
             lim_min, lim_max = 0.0, 1.0
-        for ax, (label, lo, hi, include_mt, color) in zip(axes, AGE_ASYM_BINS):
+        for ax, (label, lo, hi, include_mt, color) in zip(axes_flat, AGE_ASYM_BINS):
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             g = sub.loc[mask & sub["CCa_min_z"].notna() & sub["CCa_max_z"].notna()].copy()
             ax.plot(
@@ -5740,6 +5834,8 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
                 fontsize=10, color="0.2",
             )
             _style_pub_ax(ax)
+        for ax in axes_flat[n_age:]:
+            ax.set_visible(False)
         fig.suptitle(
             r"$CC_a$ asymmetry by age (missing→0)"
             "\n"
@@ -5870,7 +5966,8 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups P10–21 / P22–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    Age groups juvenile / late adolescent / young adults / Dam;
+    Kruskal–Wallis + Dunn (Bonferroni).
     Companion text figure with medians, n, KW and Dunn.
     """
     need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
@@ -5996,8 +6093,7 @@ def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
             )
 
         stat_txt = _kw_dunn_text(samples, seed_key)
-        ax.set_xticks([x_pos[l] for l in group_labels])
-        ax.set_xticklabels(group_labels, fontsize=8)
+        _set_age_group_xticks(ax, group_labels, x_pos=x_pos, fontsize=7)
         ax.set_ylabel(ylabel)
         ax.set_xlabel("")
         ax.text(
@@ -8071,7 +8167,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (P10–21 / P22–32 / P33–50 / P50+)",
+            "label": "37  Delays by age (juvenile / late adol. / YA / Dam)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
