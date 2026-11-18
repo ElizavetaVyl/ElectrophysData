@@ -140,30 +140,208 @@ PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
-# Age bins for group analyses (5 colours).
-# juvenile P10–20; adolescent P21–32; late adolescent P33–50 (age 50 stays here);
-# young adults P51–200 (labeled P50–200 band, ages >50 up to 200);
-# breeding = MT / aged breeder dams only (no postnatal age).
-AGE_ASYM_BINS = [
-    ("juvenile", 10, 20, False, "#FB8C00"),          # orange
-    ("adolescent", 21, 32, False, "#EF6C00"),        # deep orange
-    ("late adolescent", 33, 50, False, "#D84315"),   # orange-red
-    ("young adults", 51, 200, False, "#8E24AA"),     # purple
-    ("breeding", None, None, True, "#2E0854"),       # dark violet; MT
-]
-# Delay-by-age figures use the same developmental groups
-DELAY_AGE_BINS = list(AGE_ASYM_BINS)
-AGE_GROUP_NOTE = (
-    "juvenile P10–20 / adolescent P21–32 / late adolescent P33–50 / "
-    "young adults P50–200 / breeding"
-)
-AGE_GROUP_ABBREV = {
-    "juvenile": "juv",
-    "adolescent": "adol",
-    "late adolescent": "late-adol",
-    "young adults": "YA",
-    "breeding": "breed",
+# Age-group schemes selectable at startup (or via --age-groups).
+# Convention: age 50 stays in the 33–50 bin; "P50–200" / young adults = ages >50 ≤200.
+# P50+ (scheme 3) is open-ended age>50 and includes breeding/MT.
+AGE_GROUP_SCHEMES: dict[str, dict] = {
+    "3": {
+        "menu": "10–32, 33–50, 50+",
+        "note": "juvenile P10–32 / late adolescent P33–50 / P50+",
+        "bins": [
+            ("juvenile", 10, 32, False, "#FB8C00"),
+            ("late adolescent", 33, 50, False, "#D84315"),
+            ("P50+", 50, None, True, "#2E0854"),  # age >50 + breeding/MT
+        ],
+        "abbrev": {
+            "juvenile": "juv",
+            "late adolescent": "late-adol",
+            "P50+": "P50+",
+        },
+    },
+    "4": {
+        "menu": "10–32, 33–50, 50–200, breeding",
+        "note": (
+            "juvenile P10–32 / late adolescent P33–50 / "
+            "young adults P50–200 / breeding"
+        ),
+        "bins": [
+            ("juvenile", 10, 32, False, "#FB8C00"),
+            ("late adolescent", 33, 50, False, "#D84315"),
+            ("young adults", 51, 200, False, "#8E24AA"),
+            ("breeding", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "juvenile": "juv",
+            "late adolescent": "late-adol",
+            "young adults": "YA",
+            "breeding": "breed",
+        },
+    },
+    "5": {
+        "menu": "10–20, 21–32, 33–50, 50–200, breeding",
+        "note": (
+            "juvenile P10–20 / adolescent P21–32 / late adolescent P33–50 / "
+            "young adults P50–200 / breeding"
+        ),
+        "bins": [
+            ("juvenile", 10, 20, False, "#FB8C00"),
+            ("adolescent", 21, 32, False, "#EF6C00"),
+            ("late adolescent", 33, 50, False, "#D84315"),
+            ("young adults", 51, 200, False, "#8E24AA"),
+            ("breeding", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "juvenile": "juv",
+            "adolescent": "adol",
+            "late adolescent": "late-adol",
+            "young adults": "YA",
+            "breeding": "breed",
+        },
+    },
 }
+ACTIVE_AGE_SCHEME = "5"
+AGE_ASYM_BINS = list(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["bins"])
+DELAY_AGE_BINS = list(AGE_ASYM_BINS)
+AGE_GROUP_NOTE = str(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["note"])
+AGE_GROUP_ABBREV = dict(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["abbrev"])
+
+
+def apply_age_group_scheme(scheme_key: str) -> str:
+    """Set global AGE_ASYM_BINS / DELAY_AGE_BINS / note / abbrev. Returns scheme id."""
+    global ACTIVE_AGE_SCHEME, AGE_ASYM_BINS, DELAY_AGE_BINS
+    global AGE_GROUP_NOTE, AGE_GROUP_ABBREV
+    key = normalize_age_group_scheme(scheme_key)
+    spec = AGE_GROUP_SCHEMES[key]
+    ACTIVE_AGE_SCHEME = key
+    AGE_ASYM_BINS = list(spec["bins"])
+    DELAY_AGE_BINS = list(AGE_ASYM_BINS)
+    AGE_GROUP_NOTE = str(spec["note"])
+    AGE_GROUP_ABBREV = dict(spec["abbrev"])
+    return key
+
+
+def normalize_age_group_scheme(raw: str) -> str:
+    """Map user/CLI text to scheme id '3'|'4'|'5'."""
+    s = str(raw).strip().lower().replace("–", "-").replace("—", "-")
+    aliases = {
+        "3": "3",
+        "p50+": "3",
+        "50+": "3",
+        "classic": "3",
+        "10-32,33-50,50+": "3",
+        "4": "4",
+        "dams": "4",
+        "breeding": "4",
+        "10-32,33-50,50-200,breeding": "4",
+        "10-32,33-50,50-200,dams": "4",
+        "5": "5",
+        "fine": "5",
+        "split": "5",
+        "10-20,21-32,33-50,50-200,breeding": "5",
+        "10-20,21-32,33-50,50-200,dams": "5",
+    }
+    # compact punctuation
+    compact = (
+        s.replace(" ", "")
+        .replace("дамы", "dams")
+        .replace("бридинг", "breeding")
+    )
+    if compact in aliases:
+        return aliases[compact]
+    if s in aliases:
+        return aliases[s]
+    if "10-20" in compact or "21-32" in compact:
+        return "5"
+    if "50-200" in compact and ("dam" in compact or "breed" in compact):
+        return "4"
+    if "50+" in compact or compact.endswith("50+"):
+        return "3"
+    raise ValueError(
+        f"Unknown age-group scheme {raw!r}. "
+        f"Choose 3 ({AGE_GROUP_SCHEMES['3']['menu']}), "
+        f"4 ({AGE_GROUP_SCHEMES['4']['menu']}), "
+        f"or 5 ({AGE_GROUP_SCHEMES['5']['menu']})."
+    )
+
+
+def ask_age_group_scheme(cli_key: str | None = None) -> str:
+    """Ask which age grouping to use; apply it; return scheme id."""
+    if cli_key:
+        key = apply_age_group_scheme(cli_key)
+        print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
+        return key
+    # Non-interactive shells (CI / piped): default to fine 5-bin scheme
+    if not sys.stdin.isatty():
+        key = apply_age_group_scheme("5")
+        print(
+            f"Age groups [{key}] (default, non-interactive): "
+            f"{AGE_GROUP_SCHEMES[key]['menu']}"
+        )
+        return key
+    try:
+        key = _ask_age_group_scheme_tk()
+    except Exception as exc:
+        print(f"Age-group window unavailable ({exc}); using console prompt.")
+        key = _ask_age_group_scheme_console()
+    if key is None:
+        print("Cancelled — using default scheme 5.")
+        key = "5"
+    key = apply_age_group_scheme(key)
+    print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
+    return key
+
+
+def _ask_age_group_scheme_tk() -> str | None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Age groups")
+    root.resizable(False, False)
+    frm = ttk.Frame(root, padding=12)
+    frm.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(
+        frm,
+        text="Which age grouping should be used for stats and plots?",
+        font=("Segoe UI", 10),
+    ).pack(anchor=tk.W, pady=(0, 8))
+    var = tk.StringVar(value="5")
+    for key in ("3", "4", "5"):
+        ttk.Radiobutton(
+            frm,
+            text=f"{key}:  {AGE_GROUP_SCHEMES[key]['menu']}",
+            variable=var,
+            value=key,
+        ).pack(anchor=tk.W, pady=2)
+    result: dict[str, str | None] = {"key": None}
+
+    def _ok():
+        result["key"] = var.get()
+        root.destroy()
+
+    def _cancel():
+        result["key"] = None
+        root.destroy()
+
+    btns = ttk.Frame(frm)
+    btns.pack(fill=tk.X, pady=(10, 0))
+    ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=4)
+    ttk.Button(btns, text="OK", command=_ok).pack(side=tk.RIGHT, padx=4)
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    root.mainloop()
+    return result["key"]
+
+
+def _ask_age_group_scheme_console() -> str | None:
+    print("\nWhich age grouping should be used?")
+    for key in ("3", "4", "5"):
+        print(f"  {key}  {AGE_GROUP_SCHEMES[key]['menu']}")
+    raw = input("Choose 3 / 4 / 5 [default 5] > ").strip()
+    if not raw:
+        return "5"
+    if raw.lower() in {"q", "cancel", "none"}:
+        return None
+    return raw
 
 AI_METRICS = [
     ("AI_Gj", r"AI $G_{j}$"),
@@ -1583,6 +1761,99 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 def _warped_age_x(age_num, is_mt, vmin, max_age, mt_val) -> float:
     return age_to_unit(age_num, bool(is_mt), vmin, max_age, mt_val)
+
+
+def _age_group_background_spans(
+    vmin: float, max_age: float, mt_val: float
+) -> list[tuple[str, float, float, str]]:
+    """
+    Warped-x spans for the active AGE_ASYM_BINS (for axvspan backgrounds).
+    Returns (label, x0, x1, color).
+    """
+    spans: list[tuple[str, float, float, str]] = []
+    numeric_bins = [
+        (lab, lo, hi, include_mt, color)
+        for lab, lo, hi, include_mt, color in AGE_ASYM_BINS
+        if not (lo is None and hi is None)
+    ]
+    for i, (lab, lo, hi, include_mt, color) in enumerate(numeric_bins):
+        if hi is None:
+            # open upper end: age > lo (P50+)
+            a0 = float(lo)
+            x0 = _warped_age_x(a0, False, vmin, max_age, mt_val)
+            x1 = 1.0 if include_mt else _warped_age_x(max_age, False, vmin, max_age, mt_val)
+        else:
+            a0 = float(lo) if i == 0 else float(lo) - 0.5
+            a1 = float(hi) + 0.5
+            a0 = max(a0, float(vmin))
+            a1 = min(a1, float(max_age)) if max_age >= float(lo) else float(hi)
+            if a1 < a0:
+                continue
+            x0 = _warped_age_x(a0, False, vmin, max_age, mt_val)
+            x1 = _warped_age_x(a1, False, vmin, max_age, mt_val)
+            # young-adult band may sit mostly in compressed tail
+            if float(lo) >= float(STRETCH_AGE_HI):
+                x0 = _warped_age_x(
+                    max(float(lo), float(STRETCH_AGE_HI) + 0.01),
+                    False,
+                    vmin,
+                    max_age,
+                    mt_val,
+                )
+                x1 = _warped_age_x(
+                    min(float(hi), float(max_age)),
+                    False,
+                    vmin,
+                    max_age,
+                    mt_val,
+                )
+        if x1 <= x0:
+            x1 = min(x0 + 0.02, 1.0)
+        spans.append((lab, float(x0), float(x1), color))
+
+    # breeding / MT-only bin
+    for lab, lo, hi, include_mt, color in AGE_ASYM_BINS:
+        if lo is None and hi is None and include_mt:
+            x_mt = _warped_age_x(None, True, vmin, max_age, mt_val)
+            spans.append((lab, max(0.0, x_mt - 0.045), min(1.0, x_mt + 0.01), color))
+    # Remove visual gaps between adjacent numeric bands
+    for i in range(len(spans) - 1):
+        lab0, x0, x1, c0 = spans[i]
+        lab1, y0, y1, c1 = spans[i + 1]
+        if x1 < y0:
+            mid = 0.5 * (x1 + y0)
+            spans[i] = (lab0, x0, mid, c0)
+            spans[i + 1] = (lab1, mid, y1, c1)
+    return spans
+
+
+def _draw_age_group_background(
+    ax,
+    vmin: float,
+    max_age: float,
+    mt_val: float,
+    *,
+    alpha: float = 0.11,
+    label: bool = True,
+):
+    """Paint age-group colour bands behind a warped-age scatter (e.g. fig 40)."""
+    spans = _age_group_background_spans(vmin, max_age, mt_val)
+    for lab, x0, x1, color in spans:
+        ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0, lw=0)
+        if label:
+            ax.text(
+                0.5 * (x0 + x1),
+                0.98,
+                lab,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=7,
+                color=color,
+                alpha=0.95,
+                clip_on=False,
+                rotation=0,
+            )
 
 
 def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has_mt: bool):
@@ -7802,6 +8073,7 @@ def plot_animals_pairs_vs_age(
         f"n_ages={len(d)}, animals={int(np.nansum(n_anim))}, pairs={int(np.nansum(n_pairs))}; "
         f"colourbar ticks (Exclude?=no)={tick_ages}"
     )
+    scheme_menu = AGE_GROUP_SCHEMES.get(ACTIVE_AGE_SCHEME, {}).get("menu", AGE_GROUP_NOTE)
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -7810,12 +8082,13 @@ def plot_animals_pairs_vs_age(
         }
     ):
         fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+        _draw_age_group_background(ax, vmin, max_age, mt_val, alpha=0.12, label=True)
         ax.scatter(
             d["x_warp"],
             n_anim,
             c=colors,
             s=sizes,
-            alpha=0.8,
+            alpha=0.85,
             edgecolors="0.2",
             linewidths=0.5,
             zorder=3,
@@ -7833,8 +8106,8 @@ def plot_animals_pairs_vs_age(
         fig.suptitle(
             r"Animals and electrical pairs vs age"
             "\n"
-            r"Y = animals; bubble area $\propto$ pairs; numbers = pairs "
-            r"(Exclude?=yes out); colour-bar ticks = ages with included pairs",
+            rf"bands = {scheme_menu}; Y = animals; bubble area $\propto$ pairs; "
+            r"numbers = pairs (Exclude?=yes out)",
             fontsize=11,
             color="0.15",
         )
@@ -7869,6 +8142,17 @@ def parse_args():
         "--all-figures",
         action="store_true",
         help="Generate all figures without asking (same as --figures all).",
+    )
+    p.add_argument(
+        "--age-groups",
+        default=None,
+        dest="age_groups",
+        help=(
+            "Age grouping scheme: 3 (10–32 / 33–50 / 50+), "
+            "4 (10–32 / 33–50 / 50–200 / breeding), "
+            "or 5 (10–20 / 21–32 / 33–50 / 50–200 / breeding). "
+            "If omitted, the script asks interactively."
+        ),
     )
     return p.parse_args()
 
@@ -8449,6 +8733,8 @@ def parse_figure_ids(catalog: list[dict], figures_arg: str) -> list[str]:
 def main():
     args = parse_args()
     folder = ask_data_folder(args.folder)
+    # Age grouping must be chosen before any age-group figure runs
+    ask_age_group_scheme(getattr(args, "age_groups", None))
     excel_path = find_excel(folder)
     out_dir = folder / FIGURES_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
