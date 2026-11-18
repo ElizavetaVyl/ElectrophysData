@@ -60,7 +60,7 @@ POINT_ALPHA = 0.55
 MT_AGE_OFFSET = 50  # MT darker than max age by this many "days" on color scale
 # Excel age column uses German Muttertier token; figures show English label
 MT_EXCEL_TOKEN = "MT"
-MT_DISPLAY_LABEL = "Dam"  # breeding female, postnatal age not recorded
+MT_DISPLAY_LABEL = "breeding"  # aged breeder dams (Excel MT); postnatal age not recorded
 STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar (linear ruler)
 STRETCH_FRAC = 0.75  # fraction of colorbar reserved for <= STRETCH_AGE_HI
 MAJOR_AGE_TARGETS = (20, 30, 40, 50)
@@ -143,26 +143,26 @@ TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else M
 # Age bins for group analyses (5 colours).
 # juvenile P10–20; adolescent P21–32; late adolescent P33–50 (age 50 stays here);
 # young adults P51–200 (labeled P50–200 band, ages >50 up to 200);
-# Dam = MT / aged breeder dams only (no postnatal age).
+# breeding = MT / aged breeder dams only (no postnatal age).
 AGE_ASYM_BINS = [
     ("juvenile", 10, 20, False, "#FB8C00"),          # orange
     ("adolescent", 21, 32, False, "#EF6C00"),        # deep orange
     ("late adolescent", 33, 50, False, "#D84315"),   # orange-red
     ("young adults", 51, 200, False, "#8E24AA"),     # purple
-    ("Dam", None, None, True, "#2E0854"),            # dark violet; MT
+    ("breeding", None, None, True, "#2E0854"),       # dark violet; MT
 ]
 # Delay-by-age figures use the same developmental groups
 DELAY_AGE_BINS = list(AGE_ASYM_BINS)
 AGE_GROUP_NOTE = (
     "juvenile P10–20 / adolescent P21–32 / late adolescent P33–50 / "
-    "young adults P50–200 / Dam"
+    "young adults P50–200 / breeding"
 )
 AGE_GROUP_ABBREV = {
     "juvenile": "juv",
     "adolescent": "adol",
     "late adolescent": "late-adol",
     "young adults": "YA",
-    "Dam": "Dam",
+    "breeding": "breed",
 }
 
 AI_METRICS = [
@@ -1863,7 +1863,7 @@ def _dunn_stats_lines(dunn: list[tuple[str, str, float]] | None) -> list[str]:
 
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (juvenile / adolescent / late adolescent / young adults / Dam).
+    AI by age group (juvenile / adolescent / late adolescent / young adults / breeding).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
     Separate stats figure: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
@@ -3352,7 +3352,7 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         ax.text(
             dam_x,
             1.08,
-            f"Dam\n$n_{{ec}}$={dam_n}",
+            f"breeding\n$n_{{ec}}$={dam_n}",
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="bottom",
@@ -5259,7 +5259,7 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age juvenile / adolescent / late adolescent / young adults / Dam: pairs with any CCa
+      - age juvenile / adolescent / late adolescent / young adults / breeding: pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -6194,7 +6194,7 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups juvenile / adolescent / late adolescent / young adults / Dam;
+    Age groups juvenile / adolescent / late adolescent / young adults / breeding;
     Kruskal–Wallis + Dunn (Bonferroni).
     Companion text figure with medians, n, KW, Dunn and 95% CI.
     """
@@ -8281,7 +8281,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (juv / adol / late / YA / Dam)",
+            "label": "37  Delays by age (juv / adol / late / YA / breeding)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
