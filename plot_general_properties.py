@@ -29,11 +29,41 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import cm
-from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from scipy import stats
+
+from plot_style import (
+    DAY_X,
+    MT_AGE_OFFSET,
+    MT_DISPLAY_LABEL,
+    POINT_ALPHA,
+    POINT_SIZE,
+    STRETCH_AGE_HI,
+    STRETCH_FRAC,
+    add_age_colorbar,
+    add_horizontal_age_colorbar_axis,
+    age_colors,
+    age_to_unit,
+    draw_age_group_background,
+    fmt_age_tick,
+    major_labeled_ages,
+    savefig,
+    set_warped_age_ticks,
+    sig_bracket,
+    style_day_ax,
+    style_pub_ax,
+    warped_age_x,
+)
+
+# Local aliases keep existing call sites readable
+_style_pub_ax = style_pub_ax
+_style_day_ax = style_day_ax
+_sig_bracket = sig_bracket
+_warped_age_x = warped_age_x
+_set_warped_age_ticks = set_warped_age_ticks
+_add_horizontal_age_colorbar_axis = add_horizontal_age_colorbar_axis
+_fmt_age_tick = fmt_age_tick
 
 # ---------------------------------------------------------------------------
 # Config
@@ -51,24 +81,11 @@ FIGURES_DIR_NAME = "general properties figures"
 # Day 1–2–3 comparison figure (01) and is not mixed into the analysis pool.
 POOL_DAYS = {1, 2}
 POOL_NOTE = r"pool days 1–2 (Day 3 excluded)"
-MT_AGE_PLACEHOLDER = 400  # x-position for MT/Dam on age plots (days)
+MT_AGE_PLACEHOLDER = 400  # x-position for MT/dams on age plots (days)
 P50_ZOOM_MAX = 50
 DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
-DAY_X = {1: 1.0, 2: 1.55, 3: 2.1}  # days closer together
-POINT_SIZE = 36
-POINT_ALPHA = 0.55
-MT_AGE_OFFSET = 50  # MT darker than max age by this many "days" on color scale
-# Excel age column uses German Muttertier token; figures show English label
+# Excel age column uses German Muttertier token; figures show MT_DISPLAY_LABEL
 MT_EXCEL_TOKEN = "MT"
-MT_DISPLAY_LABEL = "breeding"  # aged breeder dams (Excel MT); postnatal age not recorded
-STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar (linear ruler)
-STRETCH_FRAC = 0.75  # fraction of colorbar reserved for <= STRETCH_AGE_HI
-MAJOR_AGE_TARGETS = (20, 30, 40, 50)
-# saturated orange (young) -> almost-black purple (old / Dam)
-AGE_CMAP = LinearSegmentedColormap.from_list(
-    "age_orange_purple",
-    ["#FB8C00", "#EF6C00", "#D84315", "#8E24AA", "#4A148C", "#12001F"],
-)
 SHAPIRO_ALPHA = 0.05
 DAY_TICK_LABELS = {1: "Day 1", 2: "Day 2", 3: "Day 3"}
 
@@ -141,61 +158,61 @@ POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
 # Age-group schemes selectable at startup (or via --age-groups).
-# Convention: age 50 stays in the 33–50 bin; "P50–200" / young adults = ages >50 ≤200.
-# P50+ (scheme 3) is open-ended age>50 and includes breeding/MT.
+# Convention: age 50 stays in the 33–50 bin; young adult = ages >50 ≤200.
+# Scheme 3 "adult" is open-ended age>50 and includes dams/MT.
 AGE_GROUP_SCHEMES: dict[str, dict] = {
     "3": {
         "menu": "10–32, 33–50, 50+",
-        "note": "juvenile P10–32 / late adolescent P33–50 / P50+",
+        "note": "juvenile P10–32 / adolescent P33–50 / adult P50+",
         "bins": [
             ("juvenile", 10, 32, False, "#FB8C00"),
-            ("late adolescent", 33, 50, False, "#D84315"),
-            ("P50+", 50, None, True, "#2E0854"),  # age >50 + breeding/MT
-        ],
-        "abbrev": {
-            "juvenile": "juv",
-            "late adolescent": "late-adol",
-            "P50+": "P50+",
-        },
-    },
-    "4": {
-        "menu": "10–32, 33–50, 50–200, breeding",
-        "note": (
-            "juvenile P10–32 / late adolescent P33–50 / "
-            "young adults P50–200 / breeding"
-        ),
-        "bins": [
-            ("juvenile", 10, 32, False, "#FB8C00"),
-            ("late adolescent", 33, 50, False, "#D84315"),
-            ("young adults", 51, 200, False, "#8E24AA"),
-            ("breeding", None, None, True, "#2E0854"),
-        ],
-        "abbrev": {
-            "juvenile": "juv",
-            "late adolescent": "late-adol",
-            "young adults": "YA",
-            "breeding": "breed",
-        },
-    },
-    "5": {
-        "menu": "10–20, 21–32, 33–50, 50–200, breeding",
-        "note": (
-            "juvenile P10–20 / adolescent P21–32 / late adolescent P33–50 / "
-            "young adults P50–200 / breeding"
-        ),
-        "bins": [
-            ("juvenile", 10, 20, False, "#FB8C00"),
-            ("adolescent", 21, 32, False, "#EF6C00"),
-            ("late adolescent", 33, 50, False, "#D84315"),
-            ("young adults", 51, 200, False, "#8E24AA"),
-            ("breeding", None, None, True, "#2E0854"),
+            ("adolescent", 33, 50, False, "#D84315"),
+            ("adult", 50, None, True, "#2E0854"),  # age >50 + dams/MT
         ],
         "abbrev": {
             "juvenile": "juv",
             "adolescent": "adol",
-            "late adolescent": "late-adol",
-            "young adults": "YA",
-            "breeding": "breed",
+            "adult": "adult",
+        },
+    },
+    "4": {
+        "menu": "10–32, 33–50, 50–200, dams",
+        "note": (
+            "juvenile P10–32 / adolescent P33–50 / "
+            "young adult P50–200 / dams"
+        ),
+        "bins": [
+            ("juvenile", 10, 32, False, "#FB8C00"),
+            ("adolescent", 33, 50, False, "#D84315"),
+            ("young adult", 51, 200, False, "#8E24AA"),
+            ("dams", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "juvenile": "juv",
+            "adolescent": "adol",
+            "young adult": "YA",
+            "dams": "dams",
+        },
+    },
+    "5": {
+        "menu": "10–20, 21–32, 33–50, 50–200, dams",
+        "note": (
+            "early juvenile P10–20 / late juvenile P21–32 / adolescent P33–50 / "
+            "young adult P50–200 / dams"
+        ),
+        "bins": [
+            ("early juvenile", 10, 20, False, "#FB8C00"),
+            ("late juvenile", 21, 32, False, "#EF6C00"),
+            ("adolescent", 33, 50, False, "#D84315"),
+            ("young adult", 51, 200, False, "#8E24AA"),
+            ("dams", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "early juvenile": "EJ",
+            "late juvenile": "LJ",
+            "adolescent": "adol",
+            "young adult": "YA",
+            "dams": "dams",
         },
     },
 }
@@ -244,7 +261,8 @@ def normalize_age_group_scheme(raw: str) -> str:
     compact = (
         s.replace(" ", "")
         .replace("дамы", "dams")
-        .replace("бридинг", "breeding")
+        .replace("бридинг", "dams")
+        .replace("breeding", "dams")
     )
     if compact in aliases:
         return aliases[compact]
@@ -826,81 +844,9 @@ def age_limits(df: pd.DataFrame) -> tuple[float, float, float, bool]:
     return vmin, max_age, mt_val, has_mt
 
 
-def age_to_unit(
-    age: float | None,
-    is_mt: bool,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-) -> float:
-    """
-    Piecewise map age -> [0, 1] for colormap:
-    - [vmin, STRETCH_AGE_HI] occupies STRETCH_FRAC of the bar (expanded)
-    - (STRETCH_AGE_HI, max_age] is compressed
-    - MT at mt_val = darkest (1.0)
-    """
-    if is_mt or age is None or (isinstance(age, float) and np.isnan(age)):
-        return 1.0
-    a = float(age)
-    stretch_hi = min(float(STRETCH_AGE_HI), max_age)
-    if a <= stretch_hi:
-        if stretch_hi <= vmin:
-            return 0.0
-        return STRETCH_FRAC * (a - vmin) / (stretch_hi - vmin)
-    if a <= max_age:
-        if max_age <= stretch_hi:
-            return STRETCH_FRAC
-        return STRETCH_FRAC + (0.92 - STRETCH_FRAC) * (a - stretch_hi) / (max_age - stretch_hi)
-    # between max_age and MT
-    return 0.92 + 0.08 * (a - max_age) / max(mt_val - max_age, 1e-9)
-
-
-def age_colors(age_num: np.ndarray, is_mt: np.ndarray, vmin: float, max_age: float, mt_val: float):
-    colors = []
-    for a, mt in zip(age_num, is_mt):
-        u = age_to_unit(a, bool(mt), vmin, max_age, mt_val)
-        colors.append(AGE_CMAP(u))
-    # dummy Normalize only for APIs that expect one; colorbar uses custom mapping
-    norm = Normalize(vmin=0.0, vmax=1.0)
-    return colors, norm, AGE_CMAP
-
-
 def unique_ages_for_colorbar(df: pd.DataFrame) -> list[float]:
     ages = sorted({float(a) for a in df.loc[~df["is_mt"], "age_num"].dropna().unique()})
     return ages
-
-
-def _fmt_age_tick(t: float) -> str:
-    return str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
-
-
-def major_labeled_ages(ages: list[float], min_gap: float = 8.0) -> list[float]:
-    """
-    Labels: minimum age, nearest available to 20/30/40/50 (always keep
-    the age nearest to P50, e.g. 49), then sparsely ages >50.
-    Avoid crowding (49+51+53) that makes the ~P50 mark unreadable.
-    Numeric maximum is not labeled (MT is labeled separately on the colorbar).
-    """
-    if not ages:
-        return []
-    ages = sorted(float(a) for a in ages)
-    max_age = ages[-1]
-    out: list[float] = [ages[0]]
-    for target in MAJOR_AGE_TARGETS:
-        nearest = min(ages, key=lambda a: abs(a - target))
-        if nearest not in out:
-            out.append(nearest)
-    # Always keep the observed age closest to the P50 stretch boundary
-    nearest_p50 = min(ages, key=lambda a: abs(a - float(STRETCH_AGE_HI)))
-    if nearest_p50 not in out:
-        out.append(nearest_p50)
-    # Older ages: only if far enough from already chosen majors
-    for a in ages:
-        if a <= float(STRETCH_AGE_HI) or a >= max_age:
-            continue
-        if all(abs(a - o) >= min_gap for o in out):
-            out.append(a)
-    return sorted(out)
 
 
 def binom_pvalue(k: int, n: int, p: float = 0.5) -> float:
@@ -1186,64 +1132,6 @@ def _draw_width_bin_panel(
     return {"p_kw": p_kw, "dunn": dunn_pairs}
 
 
-def add_age_colorbar(
-    fig,
-    axs,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-    age_ticks: list[float] | None = None,
-    has_mt: bool = False,
-):
-    """
-    Colorbar: linear-stretched ruler to P50, compressed older tail.
-    Minor ticks = all ages present; major labels = min, ~20/30/40/50, >50, MT.
-    """
-    sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axs, fraction=0.035, pad=0.02)
-    cbar.set_label("Age [postnatal days]")
-
-    ages = list(age_ticks or [])
-    major_ages = major_labeled_ages(ages)
-
-    def _unit(t: float, is_mt: bool = False) -> float:
-        return age_to_unit(t, is_mt, vmin, max_age, mt_val)
-
-    # minor ticks: every observed age (+ MT mark without label duplication)
-    minor_ages = list(ages)
-    minor_units = [_unit(a) for a in minor_ages]
-    if has_mt:
-        minor_units.append(_unit(mt_val, is_mt=True))
-    if minor_units:
-        cbar.ax.yaxis.set_ticks(sorted(set(minor_units)), minor=True)
-        cbar.ax.tick_params(which="minor", length=3, width=0.8)
-
-    major_units = [_unit(a) for a in major_ages]
-    major_labels = [_fmt_age_tick(a) for a in major_ages]
-    if has_mt:
-        major_units.append(_unit(mt_val, is_mt=True))
-        major_labels.append(MT_DISPLAY_LABEL)
-    if major_units:
-        cbar.set_ticks(major_units)
-        cbar.set_ticklabels(major_labels)
-        cbar.ax.tick_params(which="major", length=6, width=1.0)
-
-    if max_age > STRETCH_AGE_HI:
-        u_div = _unit(float(STRETCH_AGE_HI))
-        cbar.ax.axhline(u_div, color="0.75", lw=0.8, ls="--")
-    return cbar
-
-
-def savefig(fig: plt.Figure, out_dir: Path, name: str):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / name
-    existed = path.is_file()
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"{'Overwrote' if existed else 'Saved'}: {path}")
-
-
 def _spike_cols_present(df: pd.DataFrame) -> bool:
     need = [
         *PARAM_DIRS["CCa"],
@@ -1448,34 +1336,6 @@ def bonferroni_adjust(p: float | None, n_tests: int) -> float | None:
     return float(min(1.0, p * n_tests))
 
 
-def _sig_bracket(
-    ax,
-    x1: float,
-    x2: float,
-    y: float,
-    text: str,
-    *,
-    h: float | None = None,
-    fs: float = 9,
-    color: str = "0.2",
-):
-    """Draw a significance bracket between x1 and x2 at height y."""
-    if h is None:
-        ymin, ymax = ax.get_ylim()
-        h = 0.03 * (ymax - ymin)
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=0.9, c=color, clip_on=False)
-    ax.text(
-        0.5 * (x1 + x2),
-        y + h,
-        text,
-        ha="center",
-        va="bottom",
-        fontsize=fs,
-        color=color,
-        clip_on=False,
-    )
-
-
 def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
     sub = df[df["day"] == day]
     vals = pd.concat([sub[c1], sub[c2]], ignore_index=True)
@@ -1485,27 +1345,6 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Figure 1: day comparison (X=day; pair left/right = channel identity)
 # ---------------------------------------------------------------------------
-def _style_pub_ax(ax):
-    """Publication-like axis: no top/right frame, light spines, no grid."""
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(0.8)
-    ax.spines["bottom"].set_linewidth(0.8)
-    ax.spines["left"].set_color("0.2")
-    ax.spines["bottom"].set_color("0.2")
-    ax.tick_params(axis="both", which="major", length=3.5, width=0.8, colors="0.2", labelsize=9)
-    ax.xaxis.label.set_size(10)
-    ax.yaxis.label.set_size(10)
-    ax.grid(False)
-
-
-def _style_day_ax(ax):
-    """Day-figure axis: publication style + soft vertical day guides."""
-    _style_pub_ax(ax)
-    for x in (DAY_X[1], DAY_X[2], DAY_X[3]):
-        ax.axvline(x, color="0.85", lw=0.7, zorder=0)
-
-
 def plot_day_comparison(
     df: pd.DataFrame,
     out_dir: Path,
@@ -1759,119 +1598,6 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 # Figure 2: AI vs age (warped X, continuous age Greys) + separate group stats
 # ---------------------------------------------------------------------------
-def _warped_age_x(age_num, is_mt, vmin, max_age, mt_val) -> float:
-    return age_to_unit(age_num, bool(is_mt), vmin, max_age, mt_val)
-
-
-def _age_group_background_spans(
-    vmin: float, max_age: float, mt_val: float
-) -> list[tuple[str, float, float, str]]:
-    """
-    Warped-x spans for the active AGE_ASYM_BINS (for axvspan backgrounds).
-    Returns (label, x0, x1, color).
-    """
-    spans: list[tuple[str, float, float, str]] = []
-    numeric_bins = [
-        (lab, lo, hi, include_mt, color)
-        for lab, lo, hi, include_mt, color in AGE_ASYM_BINS
-        if not (lo is None and hi is None)
-    ]
-    for i, (lab, lo, hi, include_mt, color) in enumerate(numeric_bins):
-        if hi is None:
-            # open upper end: age > lo (P50+)
-            a0 = float(lo)
-            x0 = _warped_age_x(a0, False, vmin, max_age, mt_val)
-            x1 = 1.0 if include_mt else _warped_age_x(max_age, False, vmin, max_age, mt_val)
-        else:
-            a0 = float(lo) if i == 0 else float(lo) - 0.5
-            a1 = float(hi) + 0.5
-            a0 = max(a0, float(vmin))
-            a1 = min(a1, float(max_age)) if max_age >= float(lo) else float(hi)
-            if a1 < a0:
-                continue
-            x0 = _warped_age_x(a0, False, vmin, max_age, mt_val)
-            x1 = _warped_age_x(a1, False, vmin, max_age, mt_val)
-            # young-adult band may sit mostly in compressed tail
-            if float(lo) >= float(STRETCH_AGE_HI):
-                x0 = _warped_age_x(
-                    max(float(lo), float(STRETCH_AGE_HI) + 0.01),
-                    False,
-                    vmin,
-                    max_age,
-                    mt_val,
-                )
-                x1 = _warped_age_x(
-                    min(float(hi), float(max_age)),
-                    False,
-                    vmin,
-                    max_age,
-                    mt_val,
-                )
-        if x1 <= x0:
-            x1 = min(x0 + 0.02, 1.0)
-        spans.append((lab, float(x0), float(x1), color))
-
-    # breeding / MT-only bin
-    for lab, lo, hi, include_mt, color in AGE_ASYM_BINS:
-        if lo is None and hi is None and include_mt:
-            x_mt = _warped_age_x(None, True, vmin, max_age, mt_val)
-            spans.append((lab, max(0.0, x_mt - 0.045), min(1.0, x_mt + 0.01), color))
-    # Remove visual gaps between adjacent numeric bands
-    for i in range(len(spans) - 1):
-        lab0, x0, x1, c0 = spans[i]
-        lab1, y0, y1, c1 = spans[i + 1]
-        if x1 < y0:
-            mid = 0.5 * (x1 + y0)
-            spans[i] = (lab0, x0, mid, c0)
-            spans[i + 1] = (lab1, mid, y1, c1)
-    return spans
-
-
-def _draw_age_group_background(
-    ax,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-    *,
-    alpha: float = 0.11,
-    label: bool = True,
-):
-    """Paint age-group colour bands behind a warped-age scatter (e.g. fig 40)."""
-    spans = _age_group_background_spans(vmin, max_age, mt_val)
-    for lab, x0, x1, color in spans:
-        ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0, lw=0)
-        if label:
-            ax.text(
-                0.5 * (x0 + x1),
-                0.98,
-                lab,
-                transform=ax.get_xaxis_transform(),
-                ha="center",
-                va="top",
-                fontsize=7,
-                color=color,
-                alpha=0.95,
-                clip_on=False,
-                rotation=0,
-            )
-
-
-def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has_mt: bool):
-    majors = major_labeled_ages(age_ticks)
-    tick_u = [_warped_age_x(a, False, vmin, max_age, mt_val) for a in majors]
-    tick_lab = [_fmt_age_tick(a) for a in majors]
-    if has_mt:
-        tick_u.append(_warped_age_x(mt_val, True, vmin, max_age, mt_val))
-        tick_lab.append(MT_DISPLAY_LABEL)
-    # divider after P50
-    if max_age > STRETCH_AGE_HI:
-        u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
-        ax.axvline(u50, color="0.8", ls="--", lw=0.7, zorder=0)
-    ax.set_xticks(tick_u)
-    ax.set_xticklabels(tick_lab, fontsize=8)
-    ax.set_xlim(-0.02, 1.02)
-
-
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     """Scatter AI vs warped age; continuous age Greys colormap (same as day/asymmetry figs)."""
     sub = analysis_pool(df)
@@ -2134,7 +1860,7 @@ def _dunn_stats_lines(dunn: list[tuple[str, str, float]] | None) -> list[str]:
 
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (juvenile / adolescent / late adolescent / young adults / breeding).
+    AI by age group (scheme labels: early/late juvenile, adolescent, young adult, dams).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
     Separate stats figure: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
@@ -3623,7 +3349,7 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         ax.text(
             dam_x,
             1.08,
-            f"breeding\n$n_{{ec}}$={dam_n}",
+            f"{MT_DISPLAY_LABEL}\n$n_{{ec}}$={dam_n}",
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="bottom",
@@ -5530,7 +5256,7 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age juvenile / adolescent / late adolescent / young adults / breeding: pairs with any CCa
+      - age groups (active scheme): pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -6465,7 +6191,7 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups juvenile / adolescent / late adolescent / young adults / breeding;
+    Age groups from active scheme (e.g. early/late juvenile, adolescent, young adult, dams);
     Kruskal–Wallis + Dunn (Bonferroni).
     Companion text figure with medians, n, KW, Dunn and 95% CI.
     """
@@ -7885,63 +7611,6 @@ def _included_pair_age_ticks(
     return ticks, has_mt
 
 
-def _add_horizontal_age_colorbar_axis(
-    fig,
-    ax,
-    *,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-    age_ticks: list[float],
-    has_mt: bool,
-):
-    """
-    Replace conventional age X tick labels with a horizontal age colourbar
-    (same warped units / major ticks as other figures).
-    """
-    ax.set_xlabel("")
-    ax.set_xticks([])
-    ax.set_xlim(-0.02, 1.02)
-    if max_age > STRETCH_AGE_HI:
-        u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
-        ax.axvline(u50, color="0.8", ls="--", lw=0.7, zorder=0)
-
-    sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
-    sm.set_array([])
-    cbar = fig.colorbar(
-        sm,
-        ax=ax,
-        orientation="horizontal",
-        fraction=0.085,
-        pad=0.10,
-        aspect=42,
-    )
-    ages = list(age_ticks or [])
-    major_ages = major_labeled_ages(ages)
-
-    def _unit(t: float, is_mt: bool = False) -> float:
-        return age_to_unit(t, is_mt, vmin, max_age, mt_val)
-
-    # minor ticks = all observed ages
-    if ages:
-        cbar.ax.set_xticks([_unit(a) for a in ages], minor=True)
-        cbar.ax.tick_params(which="minor", length=3, width=0.6)
-    major_units = [_unit(a) for a in major_ages]
-    major_labels = [_fmt_age_tick(a) for a in major_ages]
-    if has_mt:
-        major_units.append(_unit(mt_val, is_mt=True))
-        major_labels.append(MT_DISPLAY_LABEL)
-    if major_units:
-        cbar.ax.set_xticks(major_units)
-        cbar.ax.set_xticklabels(major_labels)
-        cbar.ax.tick_params(which="major", length=6, width=1.0, labelsize=8)
-    if max_age > STRETCH_AGE_HI:
-        cbar.ax.axvline(_unit(float(STRETCH_AGE_HI)), color="0.75", lw=0.8, ls="--")
-    cbar.outline.set_linewidth(0.6)
-    cbar.set_label("Age [postnatal days]", fontsize=9)
-    return cbar
-
-
 def _annotate_counts(ax, xs, ys, labels, *, dy_frac: float = 0.04):
     """Integer labels just above each point."""
     y0, y1 = ax.get_ylim()
@@ -8082,7 +7751,9 @@ def plot_animals_pairs_vs_age(
         }
     ):
         fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
-        _draw_age_group_background(ax, vmin, max_age, mt_val, alpha=0.12, label=True)
+        draw_age_group_background(
+            ax, AGE_ASYM_BINS, vmin, max_age, mt_val, alpha=0.12, label=True
+        )
         ax.scatter(
             d["x_warp"],
             n_anim,
@@ -8149,8 +7820,8 @@ def parse_args():
         dest="age_groups",
         help=(
             "Age grouping scheme: 3 (10–32 / 33–50 / 50+), "
-            "4 (10–32 / 33–50 / 50–200 / breeding), "
-            "or 5 (10–20 / 21–32 / 33–50 / 50–200 / breeding). "
+            "4 (10–32 / 33–50 / 50–200 / dams), "
+            "or 5 (10–20 / 21–32 / 33–50 / 50–200 / dams). "
             "If omitted, the script asks interactively."
         ),
     )
@@ -8565,7 +8236,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (juv / adol / late / YA / breeding)",
+            "label": "37  Delays by age (EJ / LJ / adol / YA / dams)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
