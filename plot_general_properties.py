@@ -1,8 +1,10 @@
 """
 General properties plotting for mPFC electrical synapse pairs.
 
-PyCharm: Run this file. It asks for the data folder, then shows a window
-to choose which figures to (re)generate. Existing files are overwritten.
+PyCharm: Run this file. It asks for the data folder, then age grouping
+(3 / 4 / 5), then a window to choose which figures to (re)generate
+(none pre-selected; use Select all or pick manually). Existing files
+are overwritten.
 
 Expected Excel name (in that folder):
   General_Properties_FOR_PLOTTING_ONLY.xlsx
@@ -283,28 +285,33 @@ def normalize_age_group_scheme(raw: str) -> str:
     )
 
 
-def ask_age_group_scheme(cli_key: str | None = None) -> str:
-    """Ask which age grouping to use; apply it; return scheme id."""
+def ask_age_group_scheme(cli_key: str | None = None) -> str | None:
+    """
+    Ask which age grouping to use; apply it; return scheme id.
+    Returns None if the user cancels. Always prefers a GUI dialog when no
+    --age-groups is given (PyCharm often has a non-TTY stdin).
+    """
     if cli_key:
         key = apply_age_group_scheme(cli_key)
         print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
         return key
-    # Non-interactive shells (CI / piped): default to fine 5-bin scheme
-    if not sys.stdin.isatty():
-        key = apply_age_group_scheme("5")
-        print(
-            f"Age groups [{key}] (default, non-interactive): "
-            f"{AGE_GROUP_SCHEMES[key]['menu']}"
-        )
-        return key
+
+    key: str | None = None
     try:
         key = _ask_age_group_scheme_tk()
     except Exception as exc:
         print(f"Age-group window unavailable ({exc}); using console prompt.")
-        key = _ask_age_group_scheme_console()
+        if sys.stdin.isatty():
+            key = _ask_age_group_scheme_console()
+        else:
+            print(
+                "Non-interactive session: pass --age-groups 3|4|5 "
+                "(no age-group dialog could be shown)."
+            )
+            return None
+
     if key is None:
-        print("Cancelled — using default scheme 5.")
-        key = "5"
+        return None
     key = apply_age_group_scheme(key)
     print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
     return key
@@ -312,30 +319,47 @@ def ask_age_group_scheme(cli_key: str | None = None) -> str:
 
 def _ask_age_group_scheme_tk() -> str | None:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import messagebox, ttk
 
     root = tk.Tk()
     root.title("Age groups")
     root.resizable(False, False)
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after_idle(root.attributes, "-topmost", False)
+        root.focus_force()
+    except tk.TclError:
+        pass
     frm = ttk.Frame(root, padding=12)
     frm.pack(fill=tk.BOTH, expand=True)
     ttk.Label(
         frm,
-        text="Which age grouping should be used for stats and plots?",
+        text="Choose age grouping for stats and plots\n(nothing is pre-selected — pick one):",
         font=("Segoe UI", 10),
+        justify=tk.LEFT,
     ).pack(anchor=tk.W, pady=(0, 8))
-    var = tk.StringVar(value="5")
+    var = tk.StringVar(value="")  # force an explicit choice
     for key in ("3", "4", "5"):
+        note = AGE_GROUP_SCHEMES[key]["note"]
         ttk.Radiobutton(
             frm,
-            text=f"{key}:  {AGE_GROUP_SCHEMES[key]['menu']}",
+            text=f"{key}:  {AGE_GROUP_SCHEMES[key]['menu']}\n     ({note})",
             variable=var,
             value=key,
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=4)
     result: dict[str, str | None] = {"key": None}
 
     def _ok():
-        result["key"] = var.get()
+        chosen = var.get().strip()
+        if chosen not in AGE_GROUP_SCHEMES:
+            messagebox.showinfo(
+                "Age groups",
+                "Please select 3, 4, or 5 age groups.",
+                parent=root,
+            )
+            return
+        result["key"] = chosen
         root.destroy()
 
     def _cancel():
@@ -352,13 +376,12 @@ def _ask_age_group_scheme_tk() -> str | None:
 
 
 def _ask_age_group_scheme_console() -> str | None:
-    print("\nWhich age grouping should be used?")
+    print("\nWhich age grouping should be used? (required — no default)")
     for key in ("3", "4", "5"):
         print(f"  {key}  {AGE_GROUP_SCHEMES[key]['menu']}")
-    raw = input("Choose 3 / 4 / 5 [default 5] > ").strip()
-    if not raw:
-        return "5"
-    if raw.lower() in {"q", "cancel", "none"}:
+        print(f"      {AGE_GROUP_SCHEMES[key]['note']}")
+    raw = input("Choose 3 / 4 / 5 (or cancel) > ").strip()
+    if not raw or raw.lower() in {"q", "cancel", "none"}:
         return None
     return raw
 
@@ -8286,7 +8309,8 @@ def _ask_figures_tk(catalog: list[dict], out_dir: Path) -> list[str] | None:
     ttk.Label(
         frm,
         text=(
-            "Choose figures to (re)generate.\n"
+            "Choose figures to (re)generate (none selected at start).\n"
+            "Use “Select all” or tick only what you need.\n"
             f"Output folder: {out_dir}\n"
             "Existing files with the same name will be overwritten."
         ),
@@ -8308,7 +8332,8 @@ def _ask_figures_tk(catalog: list[dict], out_dir: Path) -> list[str] | None:
     for job in catalog:
         exists = any((out_dir / f).is_file() for f in job["outputs"])
         mark = "  [exists — will overwrite]" if exists else ""
-        var = tk.BooleanVar(value=True)
+        # Start with nothing checked; use "Select all" or pick manually
+        var = tk.BooleanVar(value=False)
         vars_by_id[job["id"]] = var
         ttk.Checkbutton(
             inner, text=f"{job['label']}{mark}", variable=var
@@ -8406,7 +8431,10 @@ def main():
     args = parse_args()
     folder = ask_data_folder(args.folder)
     # Age grouping must be chosen before any age-group figure runs
-    ask_age_group_scheme(getattr(args, "age_groups", None))
+    scheme = ask_age_group_scheme(getattr(args, "age_groups", None))
+    if scheme is None:
+        print("Cancelled — no figures generated.")
+        return
     excel_path = find_excel(folder)
     out_dir = folder / FIGURES_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
