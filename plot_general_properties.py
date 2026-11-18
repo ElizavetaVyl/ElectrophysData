@@ -140,24 +140,26 @@ PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
-# Age bins for group analyses (4 colours).
-# Juvenile / adolescent P10–32; late adolescent P33–50 (age 50 stays here);
+# Age bins for group analyses (5 colours).
+# juvenile P10–20; adolescent P21–32; late adolescent P33–50 (age 50 stays here);
 # young adults P51–200 (labeled P50–200 band, ages >50 up to 200);
 # Dam = MT / aged breeder dams only (no postnatal age).
 AGE_ASYM_BINS = [
-    ("Juvenile / adolescent", 10, 32, False, "#FB8C00"),  # orange
-    ("late adolescent", 33, 50, False, "#D84315"),       # deep orange-red
-    ("young adults", 51, 200, False, "#8E24AA"),         # purple
-    ("Dam", None, None, True, "#2E0854"),                # dark violet; MT
+    ("juvenile", 10, 20, False, "#FB8C00"),          # orange
+    ("adolescent", 21, 32, False, "#EF6C00"),        # deep orange
+    ("late adolescent", 33, 50, False, "#D84315"),   # orange-red
+    ("young adults", 51, 200, False, "#8E24AA"),     # purple
+    ("Dam", None, None, True, "#2E0854"),            # dark violet; MT
 ]
-# Delay-by-age figures use the same 4 developmental groups
+# Delay-by-age figures use the same developmental groups
 DELAY_AGE_BINS = list(AGE_ASYM_BINS)
 AGE_GROUP_NOTE = (
-    "Juvenile / adolescent P10–32 / late adolescent P33–50 / "
+    "juvenile P10–20 / adolescent P21–32 / late adolescent P33–50 / "
     "young adults P50–200 / Dam"
 )
 AGE_GROUP_ABBREV = {
-    "Juvenile / adolescent": "J/adol",
+    "juvenile": "juv",
+    "adolescent": "adol",
     "late adolescent": "late-adol",
     "young adults": "YA",
     "Dam": "Dam",
@@ -1861,7 +1863,7 @@ def _dunn_stats_lines(dunn: list[tuple[str, str, float]] | None) -> list[str]:
 
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (Juvenile / adolescent / late adolescent / young adults / Dam).
+    AI by age group (juvenile / adolescent / late adolescent / young adults / Dam).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
     Separate stats figure: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
@@ -3155,7 +3157,7 @@ def _draw_distance_hist(ax, dists: np.ndarray, panel_title: str):
 
 def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
     """
-    Warped age histogram; band labels for the 4 age groups with pair counts.
+    Warped age histogram; band labels for the age groups with pair counts.
     """
     numeric = frame.loc[~frame["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
     n_mt = int(frame["is_mt"].sum())
@@ -3219,7 +3221,7 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         band_ns.append(int(_age_bin_mask(frame, lo, hi, include_mt).sum()))
 
     # Numeric age bands (Dam/MT labeled separately near the Dam bar below)
-    band_alphas = (0.12, 0.10, 0.08, 0.08)
+    band_alphas = (0.12, 0.11, 0.10, 0.08, 0.08)
     band_specs = []
     for i, (lab, lo, hi, include_mt, col) in enumerate(AGE_ASYM_BINS):
         if lo is None and hi is None:
@@ -5181,7 +5183,7 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
     """
-    CCa vs age (gray points) plus CCa by 4 age groups with Dunn brackets (19 + 19b)
+    CCa vs age (gray points) plus CCa by age groups with Dunn brackets (19 + 19b)
     and a stats companion with 95% CI + Bonferroni-adjusted p (19c).
     """
     plot_cca_vs_age_gray(df, out_dir)
@@ -5257,7 +5259,7 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age Juvenile / adolescent / late adolescent / young adults / Dam: pairs with any CCa
+      - age juvenile / adolescent / late adolescent / young adults / Dam: pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -5675,7 +5677,7 @@ def plot_cca_by_day(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
     """
-    Day 1–2–3 CCa for Juvenile / adolescent (P10–32) only: overview + Day1 vs Day2 stats
+    Day 1–2–3 CCa for P10–32 (juvenile + adolescent) only: overview + Day1 vs Day2 stats
     + Kruskal–Wallis across days (pooled directions).
     """
     if not _cca_columns_present(df):
@@ -5683,8 +5685,8 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
         return
     c1, c2 = PARAM_DIRS["CCa"]
     dfp = included_pairs(df)
-    # first AGE_ASYM_BINS entry is Juvenile / adolescent (P10–32)
-    lab0, lo0, hi0, mt0, _col0 = AGE_ASYM_BINS[0]
+    # Keep combined P10–32 even though age bins now split 10–20 / 21–32
+    lab0, lo0, hi0, mt0 = "P10–32", 10, 32, False
     dfp = dfp.loc[_age_bin_mask(dfp, lo0, hi0, mt0)].copy()
     dfp = dfp[dfp[c1].notna() | dfp[c2].notna()].copy()
     if len(dfp) == 0:
@@ -6192,7 +6194,7 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
 def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
-    Age groups Juvenile / adolescent / late adolescent / young adults / Dam;
+    Age groups juvenile / adolescent / late adolescent / young adults / Dam;
     Kruskal–Wallis + Dunn (Bonferroni).
     Companion text figure with medians, n, KW, Dunn and 95% CI.
     """
@@ -8134,7 +8136,7 @@ def build_figure_catalog(
         },
         {
             "id": "33",
-            "label": "33  CCa by day for Juvenile / adolescent (+ stats)",
+            "label": "33  CCa by day for P10–32 (+ stats)",
             "outputs": ["33_CCa_by_day_P10_32.png"],
             "run": lambda: plot_cca_by_day_p10_32(df, out_dir),
         },
@@ -8279,7 +8281,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (J/adol / late adol. / YA / Dam)",
+            "label": "37  Delays by age (juv / adol / late / YA / Dam)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
