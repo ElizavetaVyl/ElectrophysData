@@ -201,9 +201,10 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
             "young adult P50–200 / dams"
         ),
         "bins": [
-            ("early juvenile", 10, 20, False, "#FB8C00"),
-            ("late juvenile", 21, 32, False, "#EF6C00"),
-            ("adolescent", 33, 50, False, "#D84315"),
+            # warmer / pinker separation so the three young bands read apart on backgrounds
+            ("early juvenile", 10, 20, False, "#F9C74F"),  # yellow
+            ("late juvenile", 21, 32, False, "#FB8C00"),  # orange
+            ("adolescent", 33, 50, False, "#EC407A"),  # rose / pink
             ("young adult", 51, 200, False, "#8E24AA"),
             ("dams", None, None, True, "#2E0854"),
         ],
