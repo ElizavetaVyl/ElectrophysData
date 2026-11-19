@@ -1112,6 +1112,20 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
             st = _friedman_wilcoxon_over_time(mat)
             stats_by_key[key] = st
             ax.axhline(1.0, color="0.75", ls="--", lw=0.9, zorder=0)
+            # Individual sample traces (light spaghetti under the mean)
+            for s in range(mat.shape[1]):
+                y = mat[:, s]
+                ok = np.isfinite(times) & np.isfinite(y)
+                if int(ok.sum()) < 2:
+                    continue
+                ax.plot(
+                    times[ok],
+                    y[ok],
+                    color="0.65",
+                    alpha=0.28,
+                    lw=0.8,
+                    zorder=1,
+                )
             ax.errorbar(
                 times,
                 mean,
@@ -1145,7 +1159,8 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
             ax.set_visible(False)
 
         fig.suptitle(
-            r"dCCIV baseline (per-sample mean-normalised; mean $\pm$ SEM across pairs)"
+            r"dCCIV baseline (per-sample mean-normalised; light = pairs, "
+            r"mean $\pm$ SEM)"
             "\n"
             r"Friedman over time (complete cases); dashed line = 1",
             fontsize=11,
