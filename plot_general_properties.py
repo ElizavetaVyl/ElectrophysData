@@ -78,7 +78,74 @@ EXCEL_NAME_ALIASES = (
 # Preferred Excel sheet names (case-insensitive match)
 SHEET_PROPERTIES = ("Properties",)
 SHEET_ANIMAL_COUNT = ("Animal Count", "Animal_Count", "Animals")
+SHEET_DCCIV_BASELINE = (
+    "dCCIV baseline",
+    "dCCIV Baseline",
+    "dCCIV_baseline",
+    "dcciv baseline",
+    "DCCIV baseline",
+)
 FIGURES_DIR_NAME = "general properties figures"
+# Repeating metric blocks on the dCCIV baseline sheet (already per-sample mean-normalised).
+# (canonical key, header aliases for matching, y-label)
+DCCIV_BASELINE_METRICS: list[tuple[str, tuple[str, ...], str]] = [
+    ("CC12", ("cc12 norm", "cc12_norm", "cc 12 norm", "cc12"), r"$CC_{12}$ (norm)"),
+    ("CC21", ("cc21 norm", "cc21_norm", "cc 21 norm", "cc21"), r"$CC_{21}$ (norm)"),
+    (
+        "Gj12",
+        ("gj12_ns norm", "gj12_ns_norm", "gj12 ns norm", "gj12_nS norm", "gj12"),
+        r"$G_{j,12}$ (norm)",
+    ),
+    (
+        "Gj21",
+        ("gj21_ns norm", "gj21_ns_norm", "gj21 ns norm", "gj21_nS norm", "gj21"),
+        r"$G_{j,21}$ (norm)",
+    ),
+    (
+        "Rin0",
+        (
+            "rin_ch0_mohm norm",
+            "rin_ch0_Mohm norm",
+            "rin ch0 mohm norm",
+            "rin_ch0",
+            "rin0",
+        ),
+        r"$R_{in,0}$ (norm)",
+    ),
+    (
+        "Rin2",
+        (
+            "rin_ch2_mohm norm",
+            "rin_ch2_Mohm norm",
+            "rin ch2 mohm norm",
+            "rin_ch2",
+            "rin2",
+        ),
+        r"$R_{in,2}$ (norm)",
+    ),
+    (
+        "Vm0",
+        (
+            "v_rest_mv_ch0 norm",
+            "v_rest_mV_ch0 norm",
+            "v rest mv ch0 norm",
+            "v_rest_ch0",
+            "vm_ch0",
+        ),
+        r"$V_{m,0}$ (norm)",
+    ),
+    (
+        "Vm2",
+        (
+            "v_rest_mv_ch2 norm",
+            "v_rest_mV_ch2 norm",
+            "v rest mv ch2 norm",
+            "v_rest_ch2",
+            "vm_ch2",
+        ),
+        r"$V_{m,2}$ (norm)",
+    ),
+]
 # Asymmetry / AI / coupling / coverage: Days 1–2 only. Day 3 stays on the
 # Day 1–2–3 comparison figure (01) and is not mixed into the analysis pool.
 POOL_DAYS = {1, 2}
@@ -783,6 +850,365 @@ def load_animal_counts(excel_path: Path) -> pd.DataFrame | None:
     )
     print(f"Animal Count rows (ages): {len(df)}; total animals={int(df['n_animals'].sum())}")
     return df
+
+
+def _norm_dcciv_header(text) -> str:
+    """Compact header for matching repeated dCCIV baseline metric names."""
+    s = str(text).strip().lower()
+    s = re.sub(r"\.(\d+)$", "", s)  # pandas duplicate suffix .1, .2, …
+    s = s.replace("µ", "u").replace("μ", "u").replace("ω", "ohm").replace("Ω", "ohm")
+    s = re.sub(r"[\s_\-]+", "", s)
+    return s
+
+
+def _header_matches_aliases(header, aliases: tuple[str, ...]) -> bool:
+    h = _norm_dcciv_header(header)
+    if not h or h.startswith("unnamed"):
+        return False
+    alias_norms = [_norm_dcciv_header(a) for a in aliases]
+    if h in alias_norms:
+        return True
+    # prefix match so "cc12norm.something" still works; prefer longer aliases first
+    for a in sorted(alias_norms, key=len, reverse=True):
+        if len(a) >= 4 and (h == a or h.startswith(a)):
+            return True
+    return False
+
+
+def _find_dcciv_header_row(peek: pd.DataFrame) -> int | None:
+    """Row index where column A is 'Time' (Excel 2nd line → often index 1)."""
+    n = min(5, len(peek))
+    for i in range(n):
+        cell = peek.iloc[i, 0] if peek.shape[1] else None
+        if pd.isna(cell):
+            continue
+        if str(cell).strip().lower() == "time":
+            return int(i)
+    # fallback: any cell in the row equals Time
+    for i in range(n):
+        for j in range(min(3, peek.shape[1])):
+            cell = peek.iloc[i, j]
+            if pd.notna(cell) and str(cell).strip().lower() == "time":
+                return int(i)
+    return None
+
+
+def load_dcciv_baseline(excel_path: Path) -> dict | None:
+    """
+    Sheet 'dCCIV baseline': Time in col A; then repeating blocks
+    CC12/CC21/Gj12/Gj21/Rin0/Rin2/Vm0/Vm2 (already mean-normalised per sample).
+
+    Returns dict:
+      times: (n_t,) float
+      metrics: {key: (n_t, n_samples) float array}
+      ylabels: {key: str}
+      n_samples: int
+      sheet: str
+    or None if sheet missing / unusable.
+    """
+    sheet = resolve_sheet_name(excel_path, SHEET_DCCIV_BASELINE)
+    if sheet is None:
+        print(
+            "dCCIV baseline sheet not found "
+            f"(available: {_excel_sheet_names(excel_path)}); "
+            "skipping baseline-vs-time figures."
+        )
+        return None
+    print(f"dCCIV baseline sheet: {sheet!r}")
+    peek = pd.read_excel(excel_path, sheet_name=sheet, header=None, nrows=5)
+    header_row = _find_dcciv_header_row(peek)
+    if header_row is None:
+        print(
+            "dCCIV baseline: could not find a 'Time' header in the first rows; "
+            "skipping."
+        )
+        return None
+    raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
+    headers = [
+        (str(v).strip() if pd.notna(v) else f"col{j}")
+        for j, v in enumerate(raw.iloc[header_row].tolist())
+    ]
+    body = raw.iloc[header_row + 1 :].copy()
+    if body.empty:
+        print("dCCIV baseline: no data rows under the header; skipping.")
+        return None
+
+    time_vals = pd.to_numeric(body.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+    row_ok = np.isfinite(time_vals)
+    if int(row_ok.sum()) < 2:
+        print("dCCIV baseline: fewer than 2 finite Time values; skipping.")
+        return None
+    times = time_vals[row_ok]
+
+    metrics: dict[str, np.ndarray] = {}
+    ylabels: dict[str, str] = {}
+    for key, aliases, ylab in DCCIV_BASELINE_METRICS:
+        col_idx = [
+            j
+            for j, h in enumerate(headers)
+            if j > 0 and _header_matches_aliases(h, aliases)
+        ]
+        if not col_idx:
+            continue
+        cols = []
+        for j in col_idx:
+            vals = pd.to_numeric(body.iloc[:, j], errors="coerce").to_numpy(dtype=float)
+            cols.append(vals[row_ok])
+        # (n_t, n_samples)
+        metrics[key] = np.column_stack(cols)
+        ylabels[key] = ylab
+
+    if not metrics:
+        print(
+            "dCCIV baseline: no metric columns matched "
+            f"(headers sample: {headers[:12]}); skipping."
+        )
+        return None
+
+    n_samp = int(max(arr.shape[1] for arr in metrics.values()))
+    print(
+        f"dCCIV baseline: n_time={len(times)}, n_sample_blocks≈{n_samp}, "
+        f"metrics={', '.join(metrics.keys())}"
+    )
+    return {
+        "times": times,
+        "metrics": metrics,
+        "ylabels": ylabels,
+        "n_samples": n_samp,
+        "sheet": sheet,
+    }
+
+
+def _holm_adjust(pvals: list[float | None]) -> list[float | None]:
+    """Holm–Bonferroni adjusted p-values (None stays None)."""
+    indexed = [(i, p) for i, p in enumerate(pvals) if p is not None and np.isfinite(p)]
+    out: list[float | None] = [None] * len(pvals)
+    if not indexed:
+        return out
+    indexed.sort(key=lambda t: t[1])
+    m = len(indexed)
+    adj_running = 0.0
+    for rank, (i, p) in enumerate(indexed):
+        adj = (m - rank) * float(p)
+        adj_running = max(adj_running, adj)
+        out[i] = float(min(1.0, adj_running))
+    return out
+
+
+def _friedman_wilcoxon_over_time(
+    mat: np.ndarray,
+) -> dict:
+    """
+    mat: (n_time, n_samples). Uses complete-case samples only.
+    Friedman across time; Wilcoxon signed-rank pairwise post-hoc with Holm.
+    """
+    mat = np.asarray(mat, dtype=float)
+    if mat.ndim != 2 or mat.shape[0] < 2 or mat.shape[1] < 1:
+        return {
+            "n_complete": 0,
+            "friedman_stat": float("nan"),
+            "friedman_p": float("nan"),
+            "pairs": [],
+        }
+    complete_mask = np.all(np.isfinite(mat), axis=0)
+    complete = mat[:, complete_mask]
+    n_c = int(complete.shape[1])
+    n_t = int(complete.shape[0])
+    if n_c < 3 or n_t < 2:
+        return {
+            "n_complete": n_c,
+            "friedman_stat": float("nan"),
+            "friedman_p": float("nan"),
+            "pairs": [],
+        }
+    try:
+        # each argument = one time point across subjects
+        fr = stats.friedmanchisquare(*[complete[t, :] for t in range(n_t)])
+        fr_stat, fr_p = float(fr.statistic), float(fr.pvalue)
+    except Exception:
+        fr_stat, fr_p = float("nan"), float("nan")
+
+    from itertools import combinations
+
+    pair_idx = list(combinations(range(n_t), 2))
+    raw_p: list[float | None] = []
+    for i, j in pair_idx:
+        diff = complete[j, :] - complete[i, :]
+        if np.allclose(diff, 0.0):
+            raw_p.append(1.0)
+            continue
+        try:
+            res = stats.wilcoxon(
+                complete[i, :],
+                complete[j, :],
+                zero_method="wilcox",
+                alternative="two-sided",
+            )
+            raw_p.append(float(res.pvalue))
+        except Exception:
+            raw_p.append(None)
+    adj = _holm_adjust(raw_p)
+    pairs = [
+        (int(i), int(j), raw_p[k], adj[k])
+        for k, (i, j) in enumerate(pair_idx)
+    ]
+    return {
+        "n_complete": n_c,
+        "friedman_stat": fr_stat,
+        "friedman_p": fr_p,
+        "pairs": pairs,
+    }
+
+
+def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
+    """
+    Mean ± SEM across sample blocks vs Time for normalised dCCIV baseline metrics.
+    Companion text figure: Friedman + Holm–Wilcoxon pairwise over time.
+    """
+    if data is None:
+        print("Skipping dCCIV baseline plots: sheet not loaded.")
+        return
+    times = np.asarray(data["times"], dtype=float)
+    metrics: dict[str, np.ndarray] = data["metrics"]
+    ylabels: dict[str, str] = data["ylabels"]
+    keys = [k for k, _, _ in DCCIV_BASELINE_METRICS if k in metrics]
+    if not keys:
+        print("Skipping dCCIV baseline plots: no matched metrics.")
+        return
+
+    n_panels = len(keys)
+    n_cols = 4 if n_panels > 4 else max(n_panels, 1)
+    n_rows = int(np.ceil(n_panels / n_cols))
+    stats_by_key: dict[str, dict] = {}
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(3.1 * n_cols + 0.6, 2.7 * n_rows + 0.8),
+            sharex=True,
+            constrained_layout=True,
+        )
+        axes_flat = np.atleast_1d(axes).ravel()
+        for ax, key in zip(axes_flat, keys):
+            mat = metrics[key]
+            mean = np.nanmean(mat, axis=1)
+            n_at_t = np.sum(np.isfinite(mat), axis=1)
+            sem = np.array(
+                [
+                    float(stats.sem(mat[t, np.isfinite(mat[t, :])]))
+                    if n_at_t[t] > 1
+                    else 0.0
+                    for t in range(mat.shape[0])
+                ],
+                dtype=float,
+            )
+            st = _friedman_wilcoxon_over_time(mat)
+            stats_by_key[key] = st
+            ax.axhline(1.0, color="0.75", ls="--", lw=0.9, zorder=0)
+            ax.errorbar(
+                times,
+                mean,
+                yerr=sem,
+                fmt="o-",
+                color="#6A1B9A",
+                markersize=5,
+                lw=1.2,
+                capsize=3,
+                ecolor="0.45",
+                zorder=2,
+            )
+            ax.set_ylabel(ylabels.get(key, key))
+            ax.set_xlabel("Time")
+            fr_txt = (
+                f"Friedman {format_p(st['friedman_p'])}\n"
+                f"$n_{{complete}}$={st['n_complete']}"
+            )
+            ax.text(
+                0.02,
+                0.98,
+                fr_txt,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7.5,
+                color="0.35",
+            )
+            _style_pub_ax(ax)
+        for ax in axes_flat[len(keys) :]:
+            ax.set_visible(False)
+
+        fig.suptitle(
+            r"dCCIV baseline (per-sample mean-normalised; mean $\pm$ SEM across pairs)"
+            "\n"
+            r"Friedman over time (complete cases); dashed line = 1",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "41_dcciv_baseline_vs_time.png")
+
+    # Stats companion
+    lines: list[str] = [
+        "dCCIV baseline — repeated-measures stats over Time",
+        "Normalisation: each sample / its own baseline mean (traces centre on 1).",
+        "Omnibus: Friedman test across time (complete cases only).",
+        "Post-hoc: Wilcoxon signed-rank, Holm-adjusted.",
+        "",
+    ]
+    for key in keys:
+        st = stats_by_key[key]
+        lines.append(
+            f"{key} ({ylabels.get(key, key)}): "
+            f"Friedman {format_p(st['friedman_p'])} "
+            f"(stat={st['friedman_stat']:.3g}), "
+            f"n_complete={st['n_complete']}"
+        )
+        sig_pairs = [
+            (i, j, p, pa)
+            for i, j, p, pa in st["pairs"]
+            if pa is not None and np.isfinite(pa) and p_to_stars(pa) != "ns"
+        ]
+        if not st["pairs"]:
+            lines.append("  (no pairwise tests)")
+        elif not sig_pairs:
+            lines.append("  pairwise Holm–Wilcoxon: all ns")
+        else:
+            for i, j, p, pa in sig_pairs:
+                ti = times[i] if i < len(times) else i
+                tj = times[j] if j < len(times) else j
+                lines.append(
+                    f"  t={ti:g} vs t={tj:g}: "
+                    f"{format_p(p)} → Holm {format_p(pa)} ({p_to_stars(pa)})"
+                )
+        lines.append("")
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig_s, ax_s = plt.subplots(figsize=(9.5, max(4.5, 0.28 * len(lines) + 1.0)))
+        ax_s.axis("off")
+        ax_s.text(
+            0.02,
+            0.98,
+            "\n".join(lines),
+            transform=ax_s.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            color="0.15",
+        )
+        savefig(fig_s, out_dir, "41b_dcciv_baseline_vs_time_stats.png")
 
 
 def pair_counts_by_age(df: pd.DataFrame, *, include_excluded: bool = False) -> pd.DataFrame:
@@ -7856,6 +8282,7 @@ def build_figure_catalog(
     df: pd.DataFrame,
     out_dir: Path,
     animals: pd.DataFrame | None = None,
+    dcciv_baseline: dict | None = None,
 ) -> list[dict]:
     """
     Registry of selectable figure jobs.
@@ -8290,6 +8717,24 @@ def build_figure_catalog(
             ],
             "run": lambda: plot_sample_size_figures(animals, df, out_dir),
         },
+        {
+            "id": "41",
+            "label": "41  dCCIV baseline vs time (mean±SEM + Friedman)",
+            "outputs": [
+                "41_dcciv_baseline_vs_time.png",
+                "41b_dcciv_baseline_vs_time_stats.png",
+            ],
+            "run": (
+                (lambda: plot_dcciv_baseline_vs_time(dcciv_baseline, out_dir))
+                if dcciv_baseline is not None
+                else (
+                    lambda: print(
+                        "Skipping 41: no dCCIV baseline sheet "
+                        "(expected sheet name like 'dCCIV baseline')."
+                    )
+                )
+            ),
+        },
     ]
 
 
@@ -8441,6 +8886,7 @@ def main():
     print(f"Reading: {excel_path}")
     df = load_and_prepare(excel_path)
     animals = load_animal_counts(excel_path)
+    dcciv_baseline = load_dcciv_baseline(excel_path)
     print(f"Rows kept (Gj and/or Distance and/or age): {len(df)}")
     print(f"  with Gj both sides: {int(df['has_gj'].sum())}")
     print(f"Days present: {sorted(df['day'].dropna().unique().tolist())}")
@@ -8467,7 +8913,9 @@ def main():
         f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
     )
 
-    catalog = build_figure_catalog(df, out_dir, animals=animals)
+    catalog = build_figure_catalog(
+        df, out_dir, animals=animals, dcciv_baseline=dcciv_baseline
+    )
 
     if args.all_figures or (args.figures and args.figures.strip().lower() == "all"):
         selected = [j["id"] for j in catalog]
