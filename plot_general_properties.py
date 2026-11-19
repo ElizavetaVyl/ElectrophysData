@@ -1256,7 +1256,13 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
                 )
             ax.set_ylim(y0 - 0.08 * span, y1 + 0.02 * span)
             ax.set_ylabel(ylabels.get(key, key))
-            ax.set_xlabel("Time")
+            ax.set_xlabel("Time [min]")
+            # Tick only observed time points (no dense auto ticks)
+            t_ticks = times[np.isfinite(times)]
+            ax.set_xticks(t_ticks)
+            ax.set_xticklabels(
+                [f"{t:g}" for t in t_ticks], fontsize=8
+            )
             method = st.get("omnibus_method") or "omnibus"
             ax.text(
                 0.02,
@@ -1276,7 +1282,8 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
             r"dCCIV baseline (per-sample mean-normalised; light = pairs, "
             r"mean $\pm$ SEM; $n$ per time)"
             "\n"
-            r"Omnibus time test + pairwise Wilcoxon/Holm in 41b; dashed = 1",
+            r"Omnibus time test + pairwise Wilcoxon/Holm in 41b; "
+            r"dashed = 1; Time [min]",
             fontsize=11,
             color="0.15",
         )
