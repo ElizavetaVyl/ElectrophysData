@@ -995,75 +995,175 @@ def _holm_adjust(pvals: list[float | None]) -> list[float | None]:
     return out
 
 
-def _friedman_wilcoxon_over_time(
-    mat: np.ndarray,
+def _omnibus_time_effect(
+    mat: np.ndarray, times: np.ndarray
 ) -> dict:
     """
-    mat: (n_time, n_samples). Uses complete-case samples only.
-    Friedman across time; Wilcoxon signed-rank pairwise post-hoc with Holm.
-    """
-    mat = np.asarray(mat, dtype=float)
-    if mat.ndim != 2 or mat.shape[0] < 2 or mat.shape[1] < 1:
-        return {
-            "n_complete": 0,
-            "friedman_stat": float("nan"),
-            "friedman_p": float("nan"),
-            "pairs": [],
-        }
-    complete_mask = np.all(np.isfinite(mat), axis=0)
-    complete = mat[:, complete_mask]
-    n_c = int(complete.shape[1])
-    n_t = int(complete.shape[0])
-    if n_c < 3 or n_t < 2:
-        return {
-            "n_complete": n_c,
-            "friedman_stat": float("nan"),
-            "friedman_p": float("nan"),
-            "pairs": [],
-        }
-    try:
-        # each argument = one time point across subjects
-        fr = stats.friedmanchisquare(*[complete[t, :] for t in range(n_t)])
-        fr_stat, fr_p = float(fr.statistic), float(fr.pvalue)
-    except Exception:
-        fr_stat, fr_p = float("nan"), float("nan")
+    Omnibus test for a Time effect with unbalanced / missing times.
 
+    Tries LMM y ~ C(time) + (1|sample) (ML LRT). After per-sample mean
+    normalisation the random intercept is often ~0 (singular) — then fall
+    back to OLS y ~ C(time) with cluster-robust SE (cluster = sample) and a
+    joint Wald test on the time dummies. Both use all finite observations.
+    """
+    import warnings
+
+    mat = np.asarray(mat, dtype=float)
+    times = np.asarray(times, dtype=float)
+    out = {
+        "omnibus_p": float("nan"),
+        "omnibus_stat": float("nan"),
+        "omnibus_df": 0,
+        "omnibus_n_obs": 0,
+        "omnibus_n_samples": 0,
+        "omnibus_method": "",
+        "omnibus_note": "",
+    }
+    rows: list[dict] = []
+    for s in range(mat.shape[1]):
+        for t_i in range(mat.shape[0]):
+            y = mat[t_i, s]
+            if not (np.isfinite(y) and np.isfinite(times[t_i])):
+                continue
+            rows.append(
+                {
+                    "y": float(y),
+                    "time": float(times[t_i]),
+                    "sample": int(s),
+                }
+            )
+    out["omnibus_n_obs"] = len(rows)
+    if len(rows) < 6:
+        out["omnibus_note"] = "too few observations"
+        return out
+    long_df = pd.DataFrame(rows)
+    n_samp = int(long_df["sample"].nunique())
+    n_time = int(long_df["time"].nunique())
+    out["omnibus_n_samples"] = n_samp
+    if n_samp < 3 or n_time < 2:
+        out["omnibus_note"] = "need ≥3 samples and ≥2 time levels"
+        return out
+    try:
+        import statsmodels.formula.api as smf
+    except ImportError:
+        out["omnibus_note"] = "statsmodels not installed"
+        return out
+
+    # 1) Prefer classical LMM when the random intercept is identifiable
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            full = smf.mixedlm(
+                "y ~ C(time)", long_df, groups=long_df["sample"]
+            ).fit(reml=False, method="lbfgs")
+            null = smf.mixedlm(
+                "y ~ 1", long_df, groups=long_df["sample"]
+            ).fit(reml=False, method="lbfgs")
+        cov_re = np.asarray(full.cov_re, dtype=float)
+        re_var = float(np.trace(cov_re)) if cov_re.size else 0.0
+        if np.isfinite(re_var) and re_var > 1e-10:
+            lr = float(max(0.0, 2.0 * (full.llf - null.llf)))
+            df_diff = max(int(n_time - 1), 1)
+            out["omnibus_stat"] = lr
+            out["omnibus_df"] = df_diff
+            out["omnibus_p"] = float(stats.chi2.sf(lr, df_diff))
+            out["omnibus_method"] = "LMM"
+            out["omnibus_note"] = "OK"
+            return out
+        out["omnibus_note"] = (
+            "LMM random intercept ~0 after mean-norm; using cluster-robust OLS"
+        )
+    except Exception as exc:
+        out["omnibus_note"] = f"LMM unavailable ({exc}); using cluster-robust OLS"
+
+    # 2) Fallback: OLS + cluster-robust SE by sample (dependence within pair)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = smf.ols("y ~ C(time)", data=long_df).fit(
+                cov_type="cluster",
+                cov_kwds={"groups": long_df["sample"]},
+            )
+        terms = [name for name in fit.params.index if name.startswith("C(time)")]
+        if not terms:
+            out["omnibus_note"] += "; no time terms"
+            return out
+        hyp = " = 0, ".join(terms) + " = 0"
+        ft = fit.f_test(hyp)
+        out["omnibus_stat"] = float(np.asarray(ft.fvalue).ravel()[0])
+        df_num = int(np.asarray(ft.df_num).ravel()[0]) if ft.df_num is not None else len(terms)
+        out["omnibus_df"] = df_num
+        out["omnibus_p"] = float(np.asarray(ft.pvalue).ravel()[0])
+        out["omnibus_method"] = "cluster-OLS"
+        if "mean-norm" not in out["omnibus_note"]:
+            out["omnibus_note"] = (
+                out["omnibus_note"] + "; cluster-OLS OK"
+                if out["omnibus_note"]
+                else "cluster-OLS OK"
+            )
+    except Exception as exc:
+        out["omnibus_note"] = f"omnibus failed: {exc}"
+    return out
+
+
+def _pairwise_wilcoxon_over_time(
+    mat: np.ndarray,
+    *,
+    min_n: int = 3,
+) -> dict:
+    """
+    Wilcoxon signed-rank for every time pair, pairwise-complete samples only.
+    Holm adjustment across all tested pairs. Reports n per pair.
+    """
     from itertools import combinations
 
+    mat = np.asarray(mat, dtype=float)
+    n_t = int(mat.shape[0]) if mat.ndim == 2 else 0
+    if n_t < 2:
+        return {"pairs": [], "n_at_time": []}
+    n_at_time = [int(np.sum(np.isfinite(mat[t, :]))) for t in range(n_t)]
     pair_idx = list(combinations(range(n_t), 2))
     raw_p: list[float | None] = []
+    ns: list[int] = []
     for i, j in pair_idx:
-        diff = complete[j, :] - complete[i, :]
-        if np.allclose(diff, 0.0):
+        mask = np.isfinite(mat[i, :]) & np.isfinite(mat[j, :])
+        n = int(mask.sum())
+        ns.append(n)
+        if n < min_n:
+            raw_p.append(None)
+            continue
+        a = mat[i, mask]
+        b = mat[j, mask]
+        if np.allclose(a, b):
             raw_p.append(1.0)
             continue
         try:
             res = stats.wilcoxon(
-                complete[i, :],
-                complete[j, :],
-                zero_method="wilcox",
-                alternative="two-sided",
+                a, b, zero_method="wilcox", alternative="two-sided"
             )
             raw_p.append(float(res.pvalue))
         except Exception:
             raw_p.append(None)
     adj = _holm_adjust(raw_p)
     pairs = [
-        (int(i), int(j), raw_p[k], adj[k])
+        (int(i), int(j), ns[k], raw_p[k], adj[k])
         for k, (i, j) in enumerate(pair_idx)
     ]
-    return {
-        "n_complete": n_c,
-        "friedman_stat": fr_stat,
-        "friedman_p": fr_p,
-        "pairs": pairs,
-    }
+    return {"pairs": pairs, "n_at_time": n_at_time}
+
+
+def _baseline_time_stats(mat: np.ndarray, times: np.ndarray) -> dict:
+    """Combine pairwise Wilcoxon (Holm) + omnibus time test for one metric."""
+    w = _pairwise_wilcoxon_over_time(mat)
+    omnibus = _omnibus_time_effect(mat, times)
+    return {**w, **omnibus}
 
 
 def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
     """
     Mean ± SEM across sample blocks vs Time for normalised dCCIV baseline metrics.
-    Companion text figure: Friedman + Holm–Wilcoxon pairwise over time.
+    Light individual traces; n annotated per time.
+    Companion: pairwise Wilcoxon (Holm) + omnibus time test (LMM or cluster-OLS).
     """
     if data is None:
         print("Skipping dCCIV baseline plots: sheet not loaded.")
@@ -1099,7 +1199,7 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
         for ax, key in zip(axes_flat, keys):
             mat = metrics[key]
             mean = np.nanmean(mat, axis=1)
-            n_at_t = np.sum(np.isfinite(mat), axis=1)
+            n_at_t = np.sum(np.isfinite(mat), axis=1).astype(int)
             sem = np.array(
                 [
                     float(stats.sem(mat[t, np.isfinite(mat[t, :])]))
@@ -1109,7 +1209,7 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
                 ],
                 dtype=float,
             )
-            st = _friedman_wilcoxon_over_time(mat)
+            st = _baseline_time_stats(mat, times)
             stats_by_key[key] = st
             ax.axhline(1.0, color="0.75", ls="--", lw=0.9, zorder=0)
             # Individual sample traces (light spaghetti under the mean)
@@ -1138,16 +1238,30 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
                 ecolor="0.45",
                 zorder=2,
             )
+            # n per time point under the mean markers
+            y0, y1 = ax.get_ylim()
+            span = max(y1 - y0, 1e-6)
+            for t, m, n in zip(times, mean, n_at_t):
+                if not (np.isfinite(t) and np.isfinite(m)):
+                    continue
+                ax.text(
+                    float(t),
+                    float(m) - 0.045 * span,
+                    f"n={int(n)}",
+                    ha="center",
+                    va="top",
+                    fontsize=6.5,
+                    color="0.45",
+                    zorder=3,
+                )
+            ax.set_ylim(y0 - 0.08 * span, y1 + 0.02 * span)
             ax.set_ylabel(ylabels.get(key, key))
             ax.set_xlabel("Time")
-            fr_txt = (
-                f"Friedman {format_p(st['friedman_p'])}\n"
-                f"$n_{{complete}}$={st['n_complete']}"
-            )
+            method = st.get("omnibus_method") or "omnibus"
             ax.text(
                 0.02,
                 0.98,
-                fr_txt,
+                f"{method} {format_p(st['omnibus_p'])}",
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
@@ -1160,9 +1274,9 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
 
         fig.suptitle(
             r"dCCIV baseline (per-sample mean-normalised; light = pairs, "
-            r"mean $\pm$ SEM)"
+            r"mean $\pm$ SEM; $n$ per time)"
             "\n"
-            r"Friedman over time (complete cases); dashed line = 1",
+            r"Omnibus time test + pairwise Wilcoxon/Holm in 41b; dashed = 1",
             fontsize=11,
             color="0.15",
         )
@@ -1172,34 +1286,48 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
     lines: list[str] = [
         "dCCIV baseline — repeated-measures stats over Time",
         "Normalisation: each sample / its own baseline mean (traces centre on 1).",
-        "Omnibus: Friedman test across time (complete cases only).",
-        "Post-hoc: Wilcoxon signed-rank, Holm-adjusted.",
+        "Omnibus: prefer LMM y ~ C(time) + (1|sample); if random intercept ~0",
+        "  (typical after mean-norm) → OLS y ~ C(time) with cluster-robust SE",
+        "  (cluster = sample) + Wald test on time. All finite values used.",
+        "Pairwise: Wilcoxon signed-rank on samples that have BOTH times; Holm.",
+        "  Later times may have smaller n — reported per pair.",
         "",
     ]
     for key in keys:
         st = stats_by_key[key]
+        n_str = ",".join(str(n) for n in st.get("n_at_time", []))
+        method = st.get("omnibus_method") or "?"
         lines.append(
             f"{key} ({ylabels.get(key, key)}): "
-            f"Friedman {format_p(st['friedman_p'])} "
-            f"(stat={st['friedman_stat']:.3g}), "
-            f"n_complete={st['n_complete']}"
+            f"{method} {format_p(st['omnibus_p'])} "
+            f"(stat={st['omnibus_stat']:.3g}, df={st['omnibus_df']}, "
+            f"n_obs={st['omnibus_n_obs']}, n_samp={st['omnibus_n_samples']}"
+            + (
+                f"; {st['omnibus_note']}"
+                if st.get("omnibus_note")
+                and "OK" not in str(st.get("omnibus_note"))
+                else ""
+            )
+            + f"); n_per_time=[{n_str}]"
         )
-        sig_pairs = [
-            (i, j, p, pa)
-            for i, j, p, pa in st["pairs"]
-            if pa is not None and np.isfinite(pa) and p_to_stars(pa) != "ns"
-        ]
-        if not st["pairs"]:
+        pairs = st.get("pairs", [])
+        if not pairs:
             lines.append("  (no pairwise tests)")
-        elif not sig_pairs:
-            lines.append("  pairwise Holm–Wilcoxon: all ns")
         else:
-            for i, j, p, pa in sig_pairs:
+            lines.append("  pairwise Wilcoxon (raw → Holm):")
+            for i, j, n, p, pa in pairs:
                 ti = times[i] if i < len(times) else i
                 tj = times[j] if j < len(times) else j
+                if p is None:
+                    lines.append(
+                        f"  t={ti:g} vs t={tj:g}: n={n} (skipped, n<{3})"
+                    )
+                    continue
+                star = p_to_stars(pa)
+                mark = f" ({star})" if star != "ns" else ""
                 lines.append(
-                    f"  t={ti:g} vs t={tj:g}: "
-                    f"{format_p(p)} → Holm {format_p(pa)} ({p_to_stars(pa)})"
+                    f"  t={ti:g} vs t={tj:g}: n={n}  "
+                    f"{format_p(p)} → Holm {format_p(pa)}{mark}"
                 )
         lines.append("")
 
@@ -1210,7 +1338,7 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig_s, ax_s = plt.subplots(figsize=(9.5, max(4.5, 0.28 * len(lines) + 1.0)))
+        fig_s, ax_s = plt.subplots(figsize=(10.0, max(5.0, 0.26 * len(lines) + 1.2)))
         ax_s.axis("off")
         ax_s.text(
             0.02,
@@ -1219,7 +1347,7 @@ def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
             transform=ax_s.transAxes,
             ha="left",
             va="top",
-            fontsize=9,
+            fontsize=8.5,
             family="monospace",
             color="0.15",
         )
@@ -8734,7 +8862,7 @@ def build_figure_catalog(
         },
         {
             "id": "41",
-            "label": "41  dCCIV baseline vs time (mean±SEM + Friedman)",
+            "label": "41  dCCIV baseline vs time (mean±SEM + omnibus/Wilcoxon)",
             "outputs": [
                 "41_dcciv_baseline_vs_time.png",
                 "41b_dcciv_baseline_vs_time_stats.png",
