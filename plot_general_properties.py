@@ -164,6 +164,7 @@ PARAM_DIRS = {
     "Rin": ("Rin_1", "Rin_2"),
     "Cm": ("Cm_1", "Cm_2"),
     "Vm": ("V_rest_mV_1", "V_rest_mV_2"),
+    "Tau": ("Tau_1", "Tau_2"),
     # Spike → spikelet transmission (optional Excel columns)
     "CCa": ("amp_ratio_mean_12", "amp_ratio_mean_21"),
     "DelayOnset": ("delay_onset_ms_mean_12", "delay_onset_ms_mean_21"),
@@ -176,6 +177,7 @@ PARAM_MATH = {
     "Rin": r"$R_{in}$",
     "Cm": r"$C_{m}$",
     "Vm": r"$E_{m}$",
+    "Tau": r"$\tau$",
     "CCa": r"$CC_{a}$",
     "DelayOnset": r"$t_{onset}$",
     "DelayPeak": r"$t_{peak}$",
@@ -187,6 +189,7 @@ PARAM_YLABELS = {
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_{m}$ [pF]",
     "Vm": r"$E_{m}$ [mV]",
+    "Tau": r"$\tau$ [ms]",
     "CCa": r"$CC_{a}$ (amp. ratio)",
     "DelayOnset": r"onset delay [ms]",
     "DelayPeak": r"peak delay [ms]",
@@ -217,6 +220,14 @@ STAT_PARAMS = [
     ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
     ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
     ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
+]
+
+# Day×age companion (fig 14c): intrinsic cell params + τ ≈ Rin×Cm/1000
+CELL_DAY_AGE_PARAMS = [
+    ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
+    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
+    ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
+    ("Tau", "Tau_1", "Tau_2", "Tau_pair_mean"),
 ]
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
@@ -4732,6 +4743,27 @@ def _empty_compare(n1: int = 0, n2: int = 0) -> dict:
     }
 
 
+def _day_age_overview_axes(n_params: int):
+    """Return (fig, list of axes in draw order) for Day×age overview panels."""
+    if n_params <= 0:
+        fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0), constrained_layout=True)
+        return fig, [ax]
+    if n_params == 4:
+        fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.5), constrained_layout=True)
+        return fig, [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]]
+    if n_params == 5:
+        fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.5), constrained_layout=True)
+        axes[0, 2].set_visible(False)
+        return fig, [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
+    # fallback: single row
+    fig, axes = plt.subplots(
+        1, n_params, figsize=(3.5 * n_params + 1.5, 4.8), constrained_layout=True
+    )
+    if n_params == 1:
+        axes = [axes]
+    return fig, list(axes)
+
+
 def _run_day_by_age_mode(
     sub: pd.DataFrame,
     out_dir: Path,
@@ -4740,6 +4772,7 @@ def _run_day_by_age_mode(
     outfile_overview: str,
     outfile_stats: str,
     title_mode: str,
+    params: list | None = None,
 ):
     """
     mode: 'pair' | 'pool'
@@ -4748,7 +4781,7 @@ def _run_day_by_age_mode(
     """
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     n_age = len(AGE_ASYM_BINS)
-    params = list(STAT_PARAMS)
+    params = list(STAT_PARAMS if params is None else params)
 
     day_vs: dict[str, list[dict]] = {}
     age_kw: dict[str, dict[int, dict]] = {}
@@ -4893,9 +4926,7 @@ def _run_day_by_age_mode(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.5), constrained_layout=True)
-        axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
-        axes[0, 2].set_visible(False)
+        fig, axes_flat = _day_age_overview_axes(len(params))
         first_panel = True
 
         for ax, (name, c1, c2, mean_col) in zip(axes_flat, params):
@@ -5042,6 +5073,7 @@ def _run_day_by_age_mode(
 
     # ----- Stats detail figure -----
     mode_tag = "pair mean" if mode == "pair" else r"pooled $\{x_1,x_2\}$"
+    n_params = max(len(params), 1)
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -5049,7 +5081,14 @@ def _run_day_by_age_mode(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 5, figsize=(16.5, 5.2), constrained_layout=True)
+        fig, axes = plt.subplots(
+            1,
+            n_params,
+            figsize=(3.3 * n_params + 0.8, 5.2),
+            constrained_layout=True,
+        )
+        if n_params == 1:
+            axes = [axes]
         for ax, (name, _c1, _c2, _mc) in zip(axes, params):
             ax.set_axis_off()
             if name not in day_vs:
@@ -5115,7 +5154,7 @@ def _run_day_by_age_mode(
                 color="0.15",
                 linespacing=1.12,
             )
-        fig.set_size_inches(16.5, 7.2)
+        fig.set_size_inches(3.3 * n_params + 0.8, 7.2)
         fig.suptitle(
             f"Day × age statistics ({title_mode}; Days 1–2 only)\n"
             f"Day within age: Shapiro→Welch or Mann–Whitney, "
@@ -5154,10 +5193,28 @@ def plot_day_by_age_pooled(df: pd.DataFrame, out_dir: Path):
     )
 
 
+def plot_day_by_age_pooled_cell_params(df: pd.DataFrame, out_dir: Path):
+    """
+    Companion to fig 14: Day×age for Rin, Cm, Em, τ (pooled sides).
+    τ ≈ Rin×Cm/1000 [ms]; same stats as fig 14.
+    """
+    sub = analysis_pool(df)
+    _run_day_by_age_mode(
+        sub,
+        out_dir,
+        mode="pool",
+        outfile_overview="14c_day_by_age_Rin_Cm_Em_Tau.png",
+        outfile_stats="14d_day_by_age_Rin_Cm_Em_Tau_stats.png",
+        title_mode=r"pooled $\{x_1,x_2\}$; $R_{in}$, $C_m$, $E_m$, $\tau$",
+        params=CELL_DAY_AGE_PARAMS,
+    )
+
+
 def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
     """Run Day×age analysis for pair means and for pooled sides."""
     plot_day_by_age_pair_mean(df, out_dir)
     plot_day_by_age_pooled(df, out_dir)
+    plot_day_by_age_pooled_cell_params(df, out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -8799,6 +8856,15 @@ def build_figure_catalog(
                 "14b_day_by_age_pooled_stats.png",
             ],
             "run": lambda: plot_day_by_age_pooled(df, out_dir),
+        },
+        {
+            "id": "14c",
+            "label": "14c Day×age Rin/Cm/Em/τ (pooled) + stats → 14d",
+            "outputs": [
+                "14c_day_by_age_Rin_Cm_Em_Tau.png",
+                "14d_day_by_age_Rin_Cm_Em_Tau_stats.png",
+            ],
+            "run": lambda: plot_day_by_age_pooled_cell_params(df, out_dir),
         },
         {
             "id": "15",
