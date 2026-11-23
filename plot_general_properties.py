@@ -231,13 +231,22 @@ CELL_DAY_AGE_PARAMS = [
     ("Tau", "Tau_1", "Tau_2", "Tau_pair_mean"),
 ]
 
-# Fig 42: detailed 6-group view (week 2 vs week 3 split) for coupling + cell params
+# Fig 42: detailed 6-group view (week 2 vs week 3 split) for coupling + cell params.
+# Panel order = 3 rows × 2 cols: CC|Gj ; Rin|Em ; Cm|τ
+DETAIL6_PANEL_ORDER = [
+    ("CC", "CC pool"),
+    ("Gj", "Gj pool"),
+    ("Rin", "Rin pool"),
+    ("Vm", "Vm pool"),
+    ("Cm", "Cm pool"),
+    ("Tau", "Tau pool"),
+]
 DETAIL6_PARAMS = [
-    ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
     ("CC", "CC_12", "CC_21", "CC_pair_mean"),
+    ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
     ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
-    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
     ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
+    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
     ("Tau", "Tau_1", "Tau_2", "Tau_pair_mean"),
 ]
 
@@ -5278,26 +5287,37 @@ def plot_day_by_age_pooled_cell_params(df: pd.DataFrame, out_dir: Path):
     )
 
 
-def plot_params_by_age_fine6(df: pd.DataFrame, out_dir: Path):
+def _fine6_day_subset(df: pd.DataFrame, days: set[int]) -> pd.DataFrame:
+    """analysis_pool restricted to the requested recording day(s)."""
+    sub = analysis_pool(df)
+    return sub[sub["day"].isin(days)].copy()
+
+
+def plot_params_by_age_fine6(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    days: set[int],
+    outfile_overview: str,
+    outfile_stats: str,
+    day_note: str,
+):
     """
     Detailed 6-group age comparison (W2/W3 split) for
-    Gj, CC, Rin, Cm, Em, τ — pooled sides; KW + Dunn.
+    CC, Gj, Rin, Em, Cm, τ — pooled sides; KW + Dunn.
+    Layout: 3 rows × 2 cols (CC|Gj ; Rin|Em ; Cm|τ).
     Does not change the global age-scheme picker.
     """
-    sub = analysis_pool(df)
+    sub = _fine6_day_subset(df, days)
     with temporary_age_scheme(AGE_FINE6_BINS, AGE_FINE6_ABBREV, AGE_FINE6_NOTE):
         group_labels = [b[0] for b in AGE_ASYM_BINS]
         x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
         panels_all = [
-            ("pool", PARAM_DIRS["Gj"], PARAM_YLABELS["Gj"], "Gj pool"),
-            ("pool", PARAM_DIRS["CC"], PARAM_YLABELS["CC"], "CC pool"),
-            ("pool", PARAM_DIRS["Rin"], PARAM_YLABELS["Rin"], "Rin pool"),
-            ("pool", PARAM_DIRS["Cm"], PARAM_YLABELS["Cm"], "Cm pool"),
-            ("pool", PARAM_DIRS["Vm"], PARAM_YLABELS["Vm"], "Vm pool"),
-            ("pool", PARAM_DIRS["Tau"], PARAM_YLABELS["Tau"], "Tau pool"),
+            ("pool", PARAM_DIRS[name], PARAM_YLABELS[name], title)
+            for name, title in DETAIL6_PANEL_ORDER
         ]
         print(
-            "\nParameters by 6 age groups (pooled; W2 P10–14 / W3 P15–20) — "
+            f"\nParameters by 6 age groups ({day_note}; W2 P10–14 / W3 P15–20) — "
             "Kruskal–Wallis + Dunn (Bonferroni):"
         )
         panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
@@ -5308,14 +5328,14 @@ def plot_params_by_age_fine6(df: pd.DataFrame, out_dir: Path):
                 "axes.unicode_minus": False,
             }
         ):
-            fig, axes = plt.subplots(2, 3, figsize=(16.0, 8.8), constrained_layout=True)
+            fig, axes = plt.subplots(3, 2, figsize=(12.0, 12.5), constrained_layout=True)
             ax_list = [
                 axes[0, 0],
                 axes[0, 1],
-                axes[0, 2],
                 axes[1, 0],
                 axes[1, 1],
-                axes[1, 2],
+                axes[2, 0],
+                axes[2, 1],
             ]
             for ax, (mode, spec, ylabel, title) in zip(ax_list, panels_all):
                 samples = _age_group_samples(sub, mode, spec)
@@ -5340,7 +5360,7 @@ def plot_params_by_age_fine6(df: pd.DataFrame, out_dir: Path):
                     group_labels=group_labels,
                     x_pos=x_pos,
                     ylabel=ylabel,
-                    seed_key=f"fine6-{title}",
+                    seed_key=f"fine6-{outfile_overview}-{title}",
                     dunn=dunn,
                 )
                 panel_stats.append((title, samples, H, p, dunn))
@@ -5373,50 +5393,46 @@ def plot_params_by_age_fine6(df: pd.DataFrame, out_dir: Path):
                 fontsize=9,
             )
             fig.suptitle(
-                r"$G_j$, $CC$, $R_{in}$, $C_m$, $E_m$, $\tau$ by age "
-                r"(6 groups; pooled sides)"
+                rf"$CC$, $G_j$, $R_{{in}}$, $E_m$, $C_m$, $\tau$ by age "
+                rf"(6 groups; pooled sides; {day_note})"
                 "\n"
-                rf"{AGE_FINE6_NOTE}; brackets: significant Dunn; {POOL_NOTE}",
+                rf"{AGE_FINE6_NOTE}; brackets: significant Dunn",
                 fontsize=11,
                 color="0.15",
             )
-            savefig(fig, out_dir, "42_params_by_age_fine6.png")
+            savefig(fig, out_dir, outfile_overview)
 
         _save_age_group_stats_figure(
             out_dir,
-            "42b_params_by_age_fine6_stats.png",
-            r"6-group age stats (W2/W3 split) — "
-            r"$G_j$/$CC$/$R_{in}$/$C_m$/$E_m$/$\tau$",
+            outfile_stats,
+            rf"6-group age stats (W2/W3; {day_note}) — "
+            r"$CC$/$G_j$/$R_{in}$/$E_m$/$C_m$/$\tau$",
             panel_stats,
             group_labels,
         )
 
 
-def plot_day_by_age_fine6(df: pd.DataFrame, out_dir: Path):
-    """
-    Day×age dynamics with fixed 6 age groups (W2/W3 split) for
-    Gj, CC, Rin, Cm, Em, τ (pooled sides).
-    """
-    sub = analysis_pool(df)
-    with temporary_age_scheme(AGE_FINE6_BINS, AGE_FINE6_ABBREV, AGE_FINE6_NOTE):
-        _run_day_by_age_mode(
-            sub,
-            out_dir,
-            mode="pool",
-            outfile_overview="42c_day_by_age_fine6.png",
-            outfile_stats="42d_day_by_age_fine6_stats.png",
-            title_mode=(
-                r"pooled $\{x_1,x_2\}$; 6 age groups "
-                r"(W2 P10–14 / W3 P15–20)"
-            ),
-            params=DETAIL6_PARAMS,
-        )
-
-
 def plot_detail_fine6(df: pd.DataFrame, out_dir: Path):
-    """Fig 42 family: by-age + Day×age with the fixed 6-group W2/W3 scheme."""
-    plot_params_by_age_fine6(df, out_dir)
-    plot_day_by_age_fine6(df, out_dir)
+    """
+    Fig 42 family: 6-group W2/W3 scheme, 3×2 panel layout.
+    Two day versions: Days 1+2 pooled, and Day 1 only.
+    """
+    plot_params_by_age_fine6(
+        df,
+        out_dir,
+        days={1, 2},
+        outfile_overview="42_params_by_age_fine6_days12.png",
+        outfile_stats="42b_params_by_age_fine6_days12_stats.png",
+        day_note="Days 1–2 pooled",
+    )
+    plot_params_by_age_fine6(
+        df,
+        out_dir,
+        days={1},
+        outfile_overview="42c_params_by_age_fine6_day1.png",
+        outfile_stats="42d_params_by_age_fine6_day1_stats.png",
+        day_note="Day 1 only",
+    )
 
 
 def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
@@ -9352,14 +9368,14 @@ def build_figure_catalog(
         {
             "id": "42",
             "label": (
-                "42  Detail 6 age groups W2/W3: "
-                "Gj/CC/Rin/Cm/Em/τ (by age + Day×age)"
+                "42  Detail 6 age groups W2/W3 "
+                "(CC/Gj · Rin/Em · Cm/τ; Days1–2 + Day1)"
             ),
             "outputs": [
-                "42_params_by_age_fine6.png",
-                "42b_params_by_age_fine6_stats.png",
-                "42c_day_by_age_fine6.png",
-                "42d_day_by_age_fine6_stats.png",
+                "42_params_by_age_fine6_days12.png",
+                "42b_params_by_age_fine6_days12_stats.png",
+                "42c_params_by_age_fine6_day1.png",
+                "42d_params_by_age_fine6_day1_stats.png",
             ],
             "run": lambda: plot_detail_fine6(df, out_dir),
         },
