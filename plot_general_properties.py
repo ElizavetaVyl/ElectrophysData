@@ -3396,8 +3396,8 @@ def _scatter_age_group_panel(
             c=color,
             s=POINT_SIZE,
             alpha=POINT_ALPHA,
-            edgecolors="white",
-            linewidths=0.35,
+            edgecolors="0.1",
+            linewidths=0.55,
             zorder=2,
         )
         ax.errorbar(
