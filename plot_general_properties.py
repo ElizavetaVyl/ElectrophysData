@@ -1,11 +1,17 @@
 """
 General properties plotting for mPFC electrical synapse pairs.
 
-PyCharm: Run this file. It asks for the data folder, then shows a window
-to choose which figures to (re)generate. Existing files are overwritten.
+PyCharm: Run this file. It asks for the data folder, then age grouping
+(3 / 4 / 5), then a window to choose which figures to (re)generate
+(none pre-selected; use Select all or pick manually). Existing files
+are overwritten.
 
 Expected Excel name (in that folder):
   General_Properties_FOR_PLOTTING_ONLY.xlsx
+
+Sheets:
+  Properties     — pair-level data for all existing figures
+  Animal Count   — columns age, animal number (sample-size figures)
 
 Figures are saved to:
   <chosen_folder>/general properties figures/
@@ -20,16 +26,47 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import cm
-from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from scipy import stats
+
+from plot_style import (
+    DAY_X,
+    MT_AGE_OFFSET,
+    MT_DISPLAY_LABEL,
+    POINT_ALPHA,
+    POINT_SIZE,
+    STRETCH_AGE_HI,
+    STRETCH_FRAC,
+    add_age_colorbar,
+    add_horizontal_age_colorbar_axis,
+    age_colors,
+    age_to_unit,
+    draw_age_group_background,
+    fmt_age_tick,
+    major_labeled_ages,
+    savefig,
+    set_warped_age_ticks,
+    sig_bracket,
+    style_day_ax,
+    style_pub_ax,
+    warped_age_x,
+)
+
+# Local aliases keep existing call sites readable
+_style_pub_ax = style_pub_ax
+_style_day_ax = style_day_ax
+_sig_bracket = sig_bracket
+_warped_age_x = warped_age_x
+_set_warped_age_ticks = set_warped_age_ticks
+_add_horizontal_age_colorbar_axis = add_horizontal_age_colorbar_axis
+_fmt_age_tick = fmt_age_tick
 
 # ---------------------------------------------------------------------------
 # Config
@@ -39,29 +76,86 @@ EXCEL_NAME_ALIASES = (
     "General Properties FOR PLOTTING ONLY.xlsx",
     "Generaral Properties FOR PLOTTING ONLY.xlsx",
 )
+# Preferred Excel sheet names (case-insensitive match)
+SHEET_PROPERTIES = ("Properties",)
+SHEET_ANIMAL_COUNT = ("Animal Count", "Animal_Count", "Animals")
+SHEET_DCCIV_BASELINE = (
+    "dCCIV baseline",
+    "dCCIV Baseline",
+    "dCCIV_baseline",
+    "dcciv baseline",
+    "DCCIV baseline",
+)
 FIGURES_DIR_NAME = "general properties figures"
+# Repeating metric blocks on the dCCIV baseline sheet (already per-sample mean-normalised).
+# (canonical key, header aliases for matching, y-label)
+DCCIV_BASELINE_METRICS: list[tuple[str, tuple[str, ...], str]] = [
+    ("CC12", ("cc12 norm", "cc12_norm", "cc 12 norm", "cc12"), r"$CC_{12}$ (norm)"),
+    ("CC21", ("cc21 norm", "cc21_norm", "cc 21 norm", "cc21"), r"$CC_{21}$ (norm)"),
+    (
+        "Gj12",
+        ("gj12_ns norm", "gj12_ns_norm", "gj12 ns norm", "gj12_nS norm", "gj12"),
+        r"$G_{j,12}$ (norm)",
+    ),
+    (
+        "Gj21",
+        ("gj21_ns norm", "gj21_ns_norm", "gj21 ns norm", "gj21_nS norm", "gj21"),
+        r"$G_{j,21}$ (norm)",
+    ),
+    (
+        "Rin0",
+        (
+            "rin_ch0_mohm norm",
+            "rin_ch0_Mohm norm",
+            "rin ch0 mohm norm",
+            "rin_ch0",
+            "rin0",
+        ),
+        r"$R_{in,0}$ (norm)",
+    ),
+    (
+        "Rin2",
+        (
+            "rin_ch2_mohm norm",
+            "rin_ch2_Mohm norm",
+            "rin ch2 mohm norm",
+            "rin_ch2",
+            "rin2",
+        ),
+        r"$R_{in,2}$ (norm)",
+    ),
+    (
+        "Vm0",
+        (
+            "v_rest_mv_ch0 norm",
+            "v_rest_mV_ch0 norm",
+            "v rest mv ch0 norm",
+            "v_rest_ch0",
+            "vm_ch0",
+        ),
+        r"$E_{m,0}$ (norm)",
+    ),
+    (
+        "Vm2",
+        (
+            "v_rest_mv_ch2 norm",
+            "v_rest_mV_ch2 norm",
+            "v rest mv ch2 norm",
+            "v_rest_ch2",
+            "vm_ch2",
+        ),
+        r"$E_{m,2}$ (norm)",
+    ),
+]
 # Asymmetry / AI / coupling / coverage: Days 1–2 only. Day 3 stays on the
 # Day 1–2–3 comparison figure (01) and is not mixed into the analysis pool.
 POOL_DAYS = {1, 2}
 POOL_NOTE = r"pool days 1–2 (Day 3 excluded)"
-MT_AGE_PLACEHOLDER = 400  # x-position for MT/Dam on age plots (days)
+MT_AGE_PLACEHOLDER = 400  # x-position for MT/dams on age plots (days)
 P50_ZOOM_MAX = 50
 DAY_PAIR_OFFSET = 0.14  # left/right shift within a day (wider for visibility)
-DAY_X = {1: 1.0, 2: 1.55, 3: 2.1}  # days closer together
-POINT_SIZE = 36
-POINT_ALPHA = 0.55
-MT_AGE_OFFSET = 50  # MT darker than max age by this many "days" on color scale
-# Excel age column uses German Muttertier token; figures show English label
+# Excel age column uses German Muttertier token; figures show MT_DISPLAY_LABEL
 MT_EXCEL_TOKEN = "MT"
-MT_DISPLAY_LABEL = "Dam"  # breeding female, postnatal age not recorded
-STRETCH_AGE_HI = 50  # ages up to this use most of the colorbar (linear ruler)
-STRETCH_FRAC = 0.75  # fraction of colorbar reserved for <= STRETCH_AGE_HI
-MAJOR_AGE_TARGETS = (20, 30, 40, 50)
-# saturated orange (young) -> almost-black purple (old / Dam)
-AGE_CMAP = LinearSegmentedColormap.from_list(
-    "age_orange_purple",
-    ["#FB8C00", "#EF6C00", "#D84315", "#8E24AA", "#4A148C", "#12001F"],
-)
 SHAPIRO_ALPHA = 0.05
 DAY_TICK_LABELS = {1: "Day 1", 2: "Day 2", 3: "Day 3"}
 
@@ -71,6 +165,7 @@ PARAM_DIRS = {
     "Rin": ("Rin_1", "Rin_2"),
     "Cm": ("Cm_1", "Cm_2"),
     "Vm": ("V_rest_mV_1", "V_rest_mV_2"),
+    "Tau": ("Tau_1", "Tau_2"),
     # Spike → spikelet transmission (optional Excel columns)
     "CCa": ("amp_ratio_mean_12", "amp_ratio_mean_21"),
     "DelayOnset": ("delay_onset_ms_mean_12", "delay_onset_ms_mean_21"),
@@ -82,7 +177,8 @@ PARAM_MATH = {
     "CC": r"$CC$",
     "Rin": r"$R_{in}$",
     "Cm": r"$C_{m}$",
-    "Vm": r"$V_{m}$",
+    "Vm": r"$E_{m}$",
+    "Tau": r"$\tau$",
     "CCa": r"$CC_{a}$",
     "DelayOnset": r"$t_{onset}$",
     "DelayPeak": r"$t_{peak}$",
@@ -93,7 +189,8 @@ PARAM_YLABELS = {
     "CC": r"$CC$",
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_{m}$ [pF]",
-    "Vm": r"$V_{m}$ [mV]",
+    "Vm": r"$E_{m}$ [mV]",
+    "Tau": r"$\tau$ [ms]",
     "CCa": r"$CC_{a}$ (amp. ratio)",
     "DelayOnset": r"onset delay [ms]",
     "DelayPeak": r"peak delay [ms]",
@@ -126,34 +223,341 @@ STAT_PARAMS = [
     ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
 ]
 
+# Day×age companion (fig 14c): intrinsic cell params + τ ≈ Rin×Cm/1000
+CELL_DAY_AGE_PARAMS = [
+    ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
+    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
+    ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
+    ("Tau", "Tau_1", "Tau_2", "Tau_pair_mean"),
+]
+
+# Fig 42: detailed 6-group view (week 2 vs week 3 split) for coupling + cell params.
+# Panel order = 3 rows × 2 cols: CC|Gj ; Rin|Em ; Cm|τ
+DETAIL6_PANEL_ORDER = [
+    ("CC", "CC pool"),
+    ("Gj", "Gj pool"),
+    ("Rin", "Rin pool"),
+    ("Vm", "Vm pool"),
+    ("Cm", "Cm pool"),
+    ("Tau", "Tau pool"),
+]
+DETAIL6_PARAMS = [
+    ("CC", "CC_12", "CC_21", "CC_pair_mean"),
+    ("Gj", "Gj_12", "Gj_21", "Gj_pair_mean"),
+    ("Rin", "Rin_1", "Rin_2", "Rin_pair_mean"),
+    ("Vm", "V_rest_mV_1", "V_rest_mV_2", "Vm_pair_mean"),
+    ("Cm", "Cm_1", "Cm_2", "Cm_pair_mean"),
+    ("Tau", "Tau_1", "Tau_2", "Tau_pair_mean"),
+]
+
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
-AI_FORMULA_VM_NOTE = r"for $V_m$: $AI$ from $|V_m|$"
+AI_FORMULA_VM_NOTE = r"for $E_m$: $AI$ from $|E_m|$"
 # AI=0 equal; AI≈0.33 ≈ 2×; 0–0.33 = up to ~2-fold
 PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
 TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else Mann–Whitney"
 
-# Age bins for asymmetry / AI group analyses (MT → P50+)
-AGE_ASYM_BINS = [
-    ("P10–32", 10, 32, False, "#FB8C00"),  # orange
-    ("P33–50", 33, 50, False, "#8E24AA"),  # purple
-    ("P50+", 50, None, True, "#2E0854"),   # dark violet; includes MT
+# Age-group schemes selectable at startup (or via --age-groups).
+# Convention: age 50 stays in the 33–50 bin; young adult = ages >50 ≤200.
+# Scheme 3 "adult" is open-ended age>50 and includes dams/MT.
+# Plot ticks / picker short labels: EJuv, LJuv, Adol, YAd, Dams (scheme 5).
+AGE_GROUP_SCHEMES: dict[str, dict] = {
+    "3": {
+        "menu": "Juv / Adol / Adult",
+        "note": "juvenile P10–32 / adolescent P33–50 / adult P50+",
+        "bins": [
+            ("juvenile", 10, 32, False, "#FB8C00"),
+            ("adolescent", 33, 50, False, "#D84315"),
+            ("adult", 50, None, True, "#2E0854"),  # age >50 + Dams/MT
+        ],
+        "abbrev": {
+            "juvenile": "Juv",
+            "adolescent": "Adol",
+            "adult": "Adult",
+        },
+    },
+    "4": {
+        "menu": "Juv / Adol / YAd / Dams",
+        "note": (
+            "juvenile P10–32 / adolescent P33–50 / "
+            "young adult P50–200 / Dams"
+        ),
+        "bins": [
+            ("juvenile", 10, 32, False, "#FB8C00"),
+            ("adolescent", 33, 50, False, "#D84315"),
+            ("young adult", 51, 200, False, "#8E24AA"),
+            ("Dams", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "juvenile": "Juv",
+            "adolescent": "Adol",
+            "young adult": "YAd",
+            "Dams": "Dams",
+        },
+    },
+    "5": {
+        "menu": "EJuv / LJuv / Adol / YAd / Dams",
+        "note": (
+            "early juvenile P10–20 / late juvenile P21–32 / adolescent P33–50 / "
+            "young adult P50–200 / Dams"
+        ),
+        "bins": [
+            # warmer / pinker separation so the three young bands read apart on backgrounds
+            ("early juvenile", 10, 20, False, "#F9C74F"),  # yellow
+            ("late juvenile", 21, 32, False, "#FB8C00"),  # orange
+            ("adolescent", 33, 50, False, "#EC407A"),  # rose / pink
+            ("young adult", 51, 200, False, "#8E24AA"),
+            ("Dams", None, None, True, "#2E0854"),
+        ],
+        "abbrev": {
+            "early juvenile": "EJuv",
+            "late juvenile": "LJuv",
+            "adolescent": "Adol",
+            "young adult": "YAd",
+            "Dams": "Dams",
+        },
+    },
+}
+ACTIVE_AGE_SCHEME = "5"
+AGE_ASYM_BINS = list(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["bins"])
+DELAY_AGE_BINS = list(AGE_ASYM_BINS)
+AGE_GROUP_NOTE = str(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["note"])
+AGE_GROUP_ABBREV = dict(AGE_GROUP_SCHEMES[ACTIVE_AGE_SCHEME]["abbrev"])
+
+# Fixed 6-group bins for the detailed fig 42 only (does not change the startup picker).
+# Splits early juvenile into postnatal week 2 (P10–14) vs week 3 (P15–20).
+AGE_FINE6_NOTE = (
+    "week 2 P10–14 / week 3 P15–20 / late juvenile P21–32 / "
+    "adolescent P33–50 / young adult P50–200 / Dams"
+)
+AGE_FINE6_BINS = [
+    ("week 2", 10, 14, False, "#F9C74F"),  # yellow
+    ("week 3", 15, 20, False, "#F4A261"),  # sand / peach
+    ("late juvenile", 21, 32, False, "#FB8C00"),
+    ("adolescent", 33, 50, False, "#EC407A"),
+    ("young adult", 51, 200, False, "#8E24AA"),
+    ("Dams", None, None, True, "#2E0854"),
 ]
+AGE_FINE6_ABBREV = {
+    "week 2": "W2",
+    "week 3": "W3",
+    "late juvenile": "LJuv",
+    "adolescent": "Adol",
+    "young adult": "YAd",
+    "Dams": "Dams",
+}
+
+
+@contextmanager
+def temporary_age_scheme(
+    bins: list,
+    abbrev: dict[str, str],
+    note: str = "",
+):
+    """Temporarily override global age bins/abbrevs for one figure family."""
+    global AGE_ASYM_BINS, DELAY_AGE_BINS, AGE_GROUP_NOTE, AGE_GROUP_ABBREV
+    old = (
+        list(AGE_ASYM_BINS),
+        list(DELAY_AGE_BINS),
+        AGE_GROUP_NOTE,
+        dict(AGE_GROUP_ABBREV),
+    )
+    AGE_ASYM_BINS = list(bins)
+    DELAY_AGE_BINS = list(bins)
+    AGE_GROUP_NOTE = str(note or AGE_GROUP_NOTE)
+    AGE_GROUP_ABBREV = dict(abbrev)
+    try:
+        yield
+    finally:
+        AGE_ASYM_BINS, DELAY_AGE_BINS, AGE_GROUP_NOTE, AGE_GROUP_ABBREV = old
+
+
+def apply_age_group_scheme(scheme_key: str) -> str:
+    """Set global AGE_ASYM_BINS / DELAY_AGE_BINS / note / abbrev. Returns scheme id."""
+    global ACTIVE_AGE_SCHEME, AGE_ASYM_BINS, DELAY_AGE_BINS
+    global AGE_GROUP_NOTE, AGE_GROUP_ABBREV
+    key = normalize_age_group_scheme(scheme_key)
+    spec = AGE_GROUP_SCHEMES[key]
+    ACTIVE_AGE_SCHEME = key
+    AGE_ASYM_BINS = list(spec["bins"])
+    DELAY_AGE_BINS = list(AGE_ASYM_BINS)
+    AGE_GROUP_NOTE = str(spec["note"])
+    AGE_GROUP_ABBREV = dict(spec["abbrev"])
+    return key
+
+
+def normalize_age_group_scheme(raw: str) -> str:
+    """Map user/CLI text to scheme id '3'|'4'|'5'."""
+    s = str(raw).strip().lower().replace("–", "-").replace("—", "-")
+    aliases = {
+        "3": "3",
+        "p50+": "3",
+        "50+": "3",
+        "classic": "3",
+        "10-32,33-50,50+": "3",
+        "4": "4",
+        "dams": "4",
+        "breeding": "4",
+        "10-32,33-50,50-200,breeding": "4",
+        "10-32,33-50,50-200,dams": "4",
+        "5": "5",
+        "fine": "5",
+        "split": "5",
+        "10-20,21-32,33-50,50-200,breeding": "5",
+        "10-20,21-32,33-50,50-200,dams": "5",
+    }
+    # compact punctuation
+    compact = (
+        s.replace(" ", "")
+        .replace("дамы", "dams")
+        .replace("бридинг", "dams")
+        .replace("breeding", "dams")
+    )
+    if compact in aliases:
+        return aliases[compact]
+    if s in aliases:
+        return aliases[s]
+    if "10-20" in compact or "21-32" in compact:
+        return "5"
+    if "50-200" in compact and ("dam" in compact or "breed" in compact):
+        return "4"
+    if "50+" in compact or compact.endswith("50+"):
+        return "3"
+    raise ValueError(
+        f"Unknown age-group scheme {raw!r}. "
+        f"Choose 3 ({AGE_GROUP_SCHEMES['3']['menu']}), "
+        f"4 ({AGE_GROUP_SCHEMES['4']['menu']}), "
+        f"or 5 ({AGE_GROUP_SCHEMES['5']['menu']})."
+    )
+
+
+def ask_age_group_scheme(cli_key: str | None = None) -> str | None:
+    """
+    Ask which age grouping to use; apply it; return scheme id.
+    Returns None if the user cancels. Always prefers a GUI dialog when no
+    --age-groups is given (PyCharm often has a non-TTY stdin).
+    """
+    if cli_key:
+        key = apply_age_group_scheme(cli_key)
+        print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
+        return key
+
+    key: str | None = None
+    try:
+        key = _ask_age_group_scheme_tk()
+    except Exception as exc:
+        print(f"Age-group window unavailable ({exc}); using console prompt.")
+        if sys.stdin.isatty():
+            key = _ask_age_group_scheme_console()
+        else:
+            print(
+                "Non-interactive session: pass --age-groups 3|4|5 "
+                "(no age-group dialog could be shown)."
+            )
+            return None
+
+    if key is None:
+        return None
+    key = apply_age_group_scheme(key)
+    print(f"Age groups [{key}]: {AGE_GROUP_SCHEMES[key]['menu']}")
+    return key
+
+
+def _ask_age_group_scheme_tk() -> str | None:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.title("Age groups")
+    root.resizable(False, False)
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after_idle(root.attributes, "-topmost", False)
+        root.focus_force()
+    except tk.TclError:
+        pass
+    frm = ttk.Frame(root, padding=12)
+    frm.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(
+        frm,
+        text="Choose age grouping for stats and plots\n(nothing is pre-selected — pick one):",
+        font=("Segoe UI", 10),
+        justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=(0, 8))
+    var = tk.StringVar(value="")  # force an explicit choice
+    for key in ("3", "4", "5"):
+        menu = AGE_GROUP_SCHEMES[key]["menu"]
+        note = AGE_GROUP_SCHEMES[key]["note"]
+        ttk.Radiobutton(
+            frm,
+            text=f"{key}:  {menu}\n     {note}",
+            variable=var,
+            value=key,
+        ).pack(anchor=tk.W, pady=4)
+    result: dict[str, str | None] = {"key": None}
+
+    def _ok():
+        chosen = var.get().strip()
+        if chosen not in AGE_GROUP_SCHEMES:
+            messagebox.showinfo(
+                "Age groups",
+                "Please select 3, 4, or 5 age groups.",
+                parent=root,
+            )
+            return
+        result["key"] = chosen
+        root.destroy()
+
+    def _cancel():
+        result["key"] = None
+        root.destroy()
+
+    btns = ttk.Frame(frm)
+    btns.pack(fill=tk.X, pady=(10, 0))
+    ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=4)
+    ttk.Button(btns, text="OK", command=_ok).pack(side=tk.RIGHT, padx=4)
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    root.mainloop()
+    return result["key"]
+
+
+def _ask_age_group_scheme_console() -> str | None:
+    print("\nWhich age grouping should be used? (required — no default)")
+    for key in ("3", "4", "5"):
+        print(f"  {key}  {AGE_GROUP_SCHEMES[key]['menu']}")
+        print(f"      {AGE_GROUP_SCHEMES[key]['note']}")
+    raw = input("Choose 3 / 4 / 5 (or cancel) > ").strip()
+    if not raw or raw.lower() in {"q", "cancel", "none"}:
+        return None
+    return raw
 
 AI_METRICS = [
     ("AI_Gj", r"AI $G_{j}$"),
     ("AI_CC", r"AI $CC$"),
     ("AI_Rin", r"AI $R_{in}$"),
     ("AI_Cm", r"AI $C_{m}$"),
-    ("AI_Vm", r"AI $|V_{m}|$"),
+    ("AI_Vm", r"AI $|E_{m}|$"),
 ]
 
 
-def _age_bin_mask(df: pd.DataFrame, lo: float, hi: float | None, include_mt: bool) -> pd.Series:
-    if hi is None:
-        mask = df["age_num"].notna() & (df["age_num"] > lo)
+def _age_bin_mask(
+    df: pd.DataFrame, lo: float | None, hi: float | None, include_mt: bool
+) -> pd.Series:
+    """
+    Numeric age window [lo, hi] (inclusive), or Dam-only when lo is hi is None.
+    When hi is None and lo is set: age > lo (open upper end).
+    """
+    if lo is None and hi is None:
+        mask = pd.Series(False, index=df.index)
+    elif hi is None:
+        mask = df["age_num"].notna() & (df["age_num"] > float(lo))
     else:
-        mask = df["age_num"].notna() & (df["age_num"] >= lo) & (df["age_num"] <= hi)
+        mask = (
+            df["age_num"].notna()
+            & (df["age_num"] >= float(lo))
+            & (df["age_num"] <= float(hi))
+        )
     if include_mt:
         mask = mask | df["is_mt"]
     else:
@@ -166,6 +570,8 @@ def _age_group_label_color(age_num, is_mt) -> tuple[str | None, str | None]:
         if is_mt:
             if include_mt:
                 return label, color
+            continue
+        if lo is None:
             continue
         if age_num is None or (isinstance(age_num, float) and np.isnan(age_num)):
             return None, None
@@ -273,8 +679,53 @@ def _find_exclude_column(columns: list[str]) -> str | None:
     return None
 
 
+def _excel_sheet_names(excel_path: Path) -> list[str]:
+    with pd.ExcelFile(excel_path) as xl:
+        return list(xl.sheet_names)
+
+
+def resolve_sheet_name(excel_path: Path, preferred: tuple[str, ...] | list[str]) -> str | None:
+    """Case-insensitive exact match, then 'contains' fallback."""
+    names = _excel_sheet_names(excel_path)
+    lower_map = {str(n).strip().lower(): n for n in names}
+    for pref in preferred:
+        key = str(pref).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    for pref in preferred:
+        key = str(pref).strip().lower().replace("_", " ")
+        for low, orig in lower_map.items():
+            if key in low.replace("_", " "):
+                return orig
+    return None
+
+
+def _find_column(columns: list[str], aliases: tuple[str, ...]) -> str | None:
+    lower = {str(c).strip().lower(): c for c in columns}
+    for alias in aliases:
+        key = alias.strip().lower()
+        if key in lower:
+            return lower[key]
+    # loose: ignore spaces/underscores
+    compact = {re.sub(r"[\s_]+", "", k): v for k, v in lower.items()}
+    for alias in aliases:
+        key = re.sub(r"[\s_]+", "", alias.strip().lower())
+        if key in compact:
+            return compact[key]
+    return None
+
+
 def load_and_prepare(excel_path: Path) -> pd.DataFrame:
-    df = pd.read_excel(excel_path, sheet_name=0)
+    sheet = resolve_sheet_name(excel_path, SHEET_PROPERTIES)
+    if sheet is None:
+        print(
+            "Warning: sheet 'Properties' not found "
+            f"(available: {_excel_sheet_names(excel_path)}); using first sheet."
+        )
+        df = pd.read_excel(excel_path, sheet_name=0)
+    else:
+        print(f"Properties sheet: {sheet!r}")
+        df = pd.read_excel(excel_path, sheet_name=sheet)
     df.columns = [str(c).strip() for c in df.columns]
 
     required = ["pair_id", "age", "day", "Gj_12", "Gj_21"]
@@ -426,6 +877,616 @@ def load_and_prepare(excel_path: Path) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def load_animal_counts(excel_path: Path) -> pd.DataFrame | None:
+    """
+    Sheet 'Animal Count': age + animal number → age_num, is_mt, n_animals.
+    Returns None if the sheet is missing.
+    """
+    sheet = resolve_sheet_name(excel_path, SHEET_ANIMAL_COUNT)
+    if sheet is None:
+        print(
+            "Animal Count sheet not found "
+            f"(available: {_excel_sheet_names(excel_path)}); "
+            "skipping animal-count figures."
+        )
+        return None
+    print(f"Animal Count sheet: {sheet!r}")
+    raw = pd.read_excel(excel_path, sheet_name=sheet)
+    raw.columns = [str(c).strip() for c in raw.columns]
+    age_col = _find_column(list(raw.columns), ("age", "Age", "P age", "postnatal age"))
+    n_col = _find_column(
+        list(raw.columns),
+        (
+            "animal number",
+            "animal_number",
+            "animals",
+            "n_animals",
+            "n animals",
+            "Animal number",
+            "N animals",
+        ),
+    )
+    if age_col is None or n_col is None:
+        raise ValueError(
+            "Animal Count sheet needs columns 'age' and 'animal number'. "
+            f"Found: {list(raw.columns)}"
+        )
+    df = pd.DataFrame(
+        {
+            "age": raw[age_col],
+            "n_animals": _to_float(raw[n_col]),
+        }
+    )
+    ages = df["age"].map(parse_age)
+    df["age_num"] = [a for a, _ in ages]
+    df["is_mt"] = [m for _, m in ages]
+    df = df[df["n_animals"].notna() & (df["is_mt"] | df["age_num"].notna())].copy()
+    # If the same age appears more than once, sum animals
+    df = (
+        df.groupby(["age_num", "is_mt"], dropna=False, as_index=False)["n_animals"]
+        .sum()
+        .sort_values(["is_mt", "age_num"], na_position="last")
+        .reset_index(drop=True)
+    )
+    print(f"Animal Count rows (ages): {len(df)}; total animals={int(df['n_animals'].sum())}")
+    return df
+
+
+def _norm_dcciv_header(text) -> str:
+    """Compact header for matching repeated dCCIV baseline metric names."""
+    s = str(text).strip().lower()
+    s = re.sub(r"\.(\d+)$", "", s)  # pandas duplicate suffix .1, .2, …
+    s = s.replace("µ", "u").replace("μ", "u").replace("ω", "ohm").replace("Ω", "ohm")
+    s = re.sub(r"[\s_\-]+", "", s)
+    return s
+
+
+def _header_matches_aliases(header, aliases: tuple[str, ...]) -> bool:
+    h = _norm_dcciv_header(header)
+    if not h or h.startswith("unnamed"):
+        return False
+    alias_norms = [_norm_dcciv_header(a) for a in aliases]
+    if h in alias_norms:
+        return True
+    # prefix match so "cc12norm.something" still works; prefer longer aliases first
+    for a in sorted(alias_norms, key=len, reverse=True):
+        if len(a) >= 4 and (h == a or h.startswith(a)):
+            return True
+    return False
+
+
+def _find_dcciv_header_row(peek: pd.DataFrame) -> int | None:
+    """Row index where column A is 'Time' (Excel 2nd line → often index 1)."""
+    n = min(5, len(peek))
+    for i in range(n):
+        cell = peek.iloc[i, 0] if peek.shape[1] else None
+        if pd.isna(cell):
+            continue
+        if str(cell).strip().lower() == "time":
+            return int(i)
+    # fallback: any cell in the row equals Time
+    for i in range(n):
+        for j in range(min(3, peek.shape[1])):
+            cell = peek.iloc[i, j]
+            if pd.notna(cell) and str(cell).strip().lower() == "time":
+                return int(i)
+    return None
+
+
+def load_dcciv_baseline(excel_path: Path) -> dict | None:
+    """
+    Sheet 'dCCIV baseline': Time in col A; then repeating blocks
+    CC12/CC21/Gj12/Gj21/Rin0/Rin2/Vm0/Vm2 (already mean-normalised per sample).
+
+    Returns dict:
+      times: (n_t,) float
+      metrics: {key: (n_t, n_samples) float array}
+      ylabels: {key: str}
+      n_samples: int
+      sheet: str
+    or None if sheet missing / unusable.
+    """
+    sheet = resolve_sheet_name(excel_path, SHEET_DCCIV_BASELINE)
+    if sheet is None:
+        print(
+            "dCCIV baseline sheet not found "
+            f"(available: {_excel_sheet_names(excel_path)}); "
+            "skipping baseline-vs-time figures."
+        )
+        return None
+    print(f"dCCIV baseline sheet: {sheet!r}")
+    peek = pd.read_excel(excel_path, sheet_name=sheet, header=None, nrows=5)
+    header_row = _find_dcciv_header_row(peek)
+    if header_row is None:
+        print(
+            "dCCIV baseline: could not find a 'Time' header in the first rows; "
+            "skipping."
+        )
+        return None
+    raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
+    headers = [
+        (str(v).strip() if pd.notna(v) else f"col{j}")
+        for j, v in enumerate(raw.iloc[header_row].tolist())
+    ]
+    body = raw.iloc[header_row + 1 :].copy()
+    if body.empty:
+        print("dCCIV baseline: no data rows under the header; skipping.")
+        return None
+
+    time_vals = pd.to_numeric(body.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+    row_ok = np.isfinite(time_vals)
+    if int(row_ok.sum()) < 2:
+        print("dCCIV baseline: fewer than 2 finite Time values; skipping.")
+        return None
+    times = time_vals[row_ok]
+
+    metrics: dict[str, np.ndarray] = {}
+    ylabels: dict[str, str] = {}
+    for key, aliases, ylab in DCCIV_BASELINE_METRICS:
+        col_idx = [
+            j
+            for j, h in enumerate(headers)
+            if j > 0 and _header_matches_aliases(h, aliases)
+        ]
+        if not col_idx:
+            continue
+        cols = []
+        for j in col_idx:
+            vals = pd.to_numeric(body.iloc[:, j], errors="coerce").to_numpy(dtype=float)
+            cols.append(vals[row_ok])
+        # (n_t, n_samples)
+        metrics[key] = np.column_stack(cols)
+        ylabels[key] = ylab
+
+    if not metrics:
+        print(
+            "dCCIV baseline: no metric columns matched "
+            f"(headers sample: {headers[:12]}); skipping."
+        )
+        return None
+
+    n_samp = int(max(arr.shape[1] for arr in metrics.values()))
+    print(
+        f"dCCIV baseline: n_time={len(times)}, n_sample_blocks≈{n_samp}, "
+        f"metrics={', '.join(metrics.keys())}"
+    )
+    return {
+        "times": times,
+        "metrics": metrics,
+        "ylabels": ylabels,
+        "n_samples": n_samp,
+        "sheet": sheet,
+    }
+
+
+def _holm_adjust(pvals: list[float | None]) -> list[float | None]:
+    """Holm–Bonferroni adjusted p-values (None stays None)."""
+    indexed = [(i, p) for i, p in enumerate(pvals) if p is not None and np.isfinite(p)]
+    out: list[float | None] = [None] * len(pvals)
+    if not indexed:
+        return out
+    indexed.sort(key=lambda t: t[1])
+    m = len(indexed)
+    adj_running = 0.0
+    for rank, (i, p) in enumerate(indexed):
+        adj = (m - rank) * float(p)
+        adj_running = max(adj_running, adj)
+        out[i] = float(min(1.0, adj_running))
+    return out
+
+
+def _omnibus_time_effect(
+    mat: np.ndarray, times: np.ndarray
+) -> dict:
+    """
+    Omnibus test for a Time effect with unbalanced / missing times.
+
+    Tries LMM y ~ C(time) + (1|sample) (ML LRT). After per-sample mean
+    normalisation the random intercept is often ~0 (singular) — then fall
+    back to OLS y ~ C(time) with cluster-robust SE (cluster = sample) and a
+    joint Wald test on the time dummies. Both use all finite observations.
+    """
+    import warnings
+
+    mat = np.asarray(mat, dtype=float)
+    times = np.asarray(times, dtype=float)
+    out = {
+        "omnibus_p": float("nan"),
+        "omnibus_stat": float("nan"),
+        "omnibus_df": 0,
+        "omnibus_n_obs": 0,
+        "omnibus_n_samples": 0,
+        "omnibus_method": "",
+        "omnibus_note": "",
+    }
+    rows: list[dict] = []
+    for s in range(mat.shape[1]):
+        for t_i in range(mat.shape[0]):
+            y = mat[t_i, s]
+            if not (np.isfinite(y) and np.isfinite(times[t_i])):
+                continue
+            rows.append(
+                {
+                    "y": float(y),
+                    "time": float(times[t_i]),
+                    "sample": int(s),
+                }
+            )
+    out["omnibus_n_obs"] = len(rows)
+    if len(rows) < 6:
+        out["omnibus_note"] = "too few observations"
+        return out
+    long_df = pd.DataFrame(rows)
+    n_samp = int(long_df["sample"].nunique())
+    n_time = int(long_df["time"].nunique())
+    out["omnibus_n_samples"] = n_samp
+    if n_samp < 3 or n_time < 2:
+        out["omnibus_note"] = "need ≥3 samples and ≥2 time levels"
+        return out
+    try:
+        import statsmodels.formula.api as smf
+    except ImportError:
+        out["omnibus_note"] = "statsmodels not installed"
+        return out
+
+    # 1) Prefer classical LMM when the random intercept is identifiable
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            full = smf.mixedlm(
+                "y ~ C(time)", long_df, groups=long_df["sample"]
+            ).fit(reml=False, method="lbfgs")
+            null = smf.mixedlm(
+                "y ~ 1", long_df, groups=long_df["sample"]
+            ).fit(reml=False, method="lbfgs")
+        cov_re = np.asarray(full.cov_re, dtype=float)
+        re_var = float(np.trace(cov_re)) if cov_re.size else 0.0
+        if np.isfinite(re_var) and re_var > 1e-10:
+            lr = float(max(0.0, 2.0 * (full.llf - null.llf)))
+            df_diff = max(int(n_time - 1), 1)
+            out["omnibus_stat"] = lr
+            out["omnibus_df"] = df_diff
+            out["omnibus_p"] = float(stats.chi2.sf(lr, df_diff))
+            out["omnibus_method"] = "LMM"
+            out["omnibus_note"] = "OK"
+            return out
+        out["omnibus_note"] = (
+            "LMM random intercept ~0 after mean-norm; using cluster-robust OLS"
+        )
+    except Exception as exc:
+        out["omnibus_note"] = f"LMM unavailable ({exc}); using cluster-robust OLS"
+
+    # 2) Fallback: OLS + cluster-robust SE by sample (dependence within pair)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = smf.ols("y ~ C(time)", data=long_df).fit(
+                cov_type="cluster",
+                cov_kwds={"groups": long_df["sample"]},
+            )
+        terms = [name for name in fit.params.index if name.startswith("C(time)")]
+        if not terms:
+            out["omnibus_note"] += "; no time terms"
+            return out
+        hyp = " = 0, ".join(terms) + " = 0"
+        ft = fit.f_test(hyp)
+        out["omnibus_stat"] = float(np.asarray(ft.fvalue).ravel()[0])
+        df_num = int(np.asarray(ft.df_num).ravel()[0]) if ft.df_num is not None else len(terms)
+        out["omnibus_df"] = df_num
+        out["omnibus_p"] = float(np.asarray(ft.pvalue).ravel()[0])
+        out["omnibus_method"] = "cluster-OLS"
+        if "mean-norm" not in out["omnibus_note"]:
+            out["omnibus_note"] = (
+                out["omnibus_note"] + "; cluster-OLS OK"
+                if out["omnibus_note"]
+                else "cluster-OLS OK"
+            )
+    except Exception as exc:
+        out["omnibus_note"] = f"omnibus failed: {exc}"
+    return out
+
+
+def _pairwise_wilcoxon_over_time(
+    mat: np.ndarray,
+    *,
+    min_n: int = 3,
+) -> dict:
+    """
+    Wilcoxon signed-rank for every time pair, pairwise-complete samples only.
+    Holm adjustment across all tested pairs. Reports n per pair.
+    """
+    from itertools import combinations
+
+    mat = np.asarray(mat, dtype=float)
+    n_t = int(mat.shape[0]) if mat.ndim == 2 else 0
+    if n_t < 2:
+        return {"pairs": [], "n_at_time": []}
+    n_at_time = [int(np.sum(np.isfinite(mat[t, :]))) for t in range(n_t)]
+    pair_idx = list(combinations(range(n_t), 2))
+    raw_p: list[float | None] = []
+    ns: list[int] = []
+    for i, j in pair_idx:
+        mask = np.isfinite(mat[i, :]) & np.isfinite(mat[j, :])
+        n = int(mask.sum())
+        ns.append(n)
+        if n < min_n:
+            raw_p.append(None)
+            continue
+        a = mat[i, mask]
+        b = mat[j, mask]
+        if np.allclose(a, b):
+            raw_p.append(1.0)
+            continue
+        try:
+            res = stats.wilcoxon(
+                a, b, zero_method="wilcox", alternative="two-sided"
+            )
+            raw_p.append(float(res.pvalue))
+        except Exception:
+            raw_p.append(None)
+    adj = _holm_adjust(raw_p)
+    pairs = [
+        (int(i), int(j), ns[k], raw_p[k], adj[k])
+        for k, (i, j) in enumerate(pair_idx)
+    ]
+    return {"pairs": pairs, "n_at_time": n_at_time}
+
+
+def _baseline_time_stats(mat: np.ndarray, times: np.ndarray) -> dict:
+    """Combine pairwise Wilcoxon (Holm) + omnibus time test for one metric."""
+    w = _pairwise_wilcoxon_over_time(mat)
+    omnibus = _omnibus_time_effect(mat, times)
+    return {**w, **omnibus}
+
+
+def plot_dcciv_baseline_vs_time(data: dict | None, out_dir: Path):
+    """
+    Mean ± SEM across sample blocks vs Time for normalised dCCIV baseline metrics.
+    Light individual traces; n annotated per time.
+    Companion: pairwise Wilcoxon (Holm) + omnibus time test (LMM or cluster-OLS).
+    """
+    if data is None:
+        print("Skipping dCCIV baseline plots: sheet not loaded.")
+        return
+    times = np.asarray(data["times"], dtype=float)
+    metrics: dict[str, np.ndarray] = data["metrics"]
+    ylabels: dict[str, str] = data["ylabels"]
+    keys = [k for k, _, _ in DCCIV_BASELINE_METRICS if k in metrics]
+    if not keys:
+        print("Skipping dCCIV baseline plots: no matched metrics.")
+        return
+
+    n_panels = len(keys)
+    n_cols = 4 if n_panels > 4 else max(n_panels, 1)
+    n_rows = int(np.ceil(n_panels / n_cols))
+    stats_by_key: dict[str, dict] = {}
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(3.1 * n_cols + 0.6, 2.7 * n_rows + 0.8),
+            sharex=True,
+            constrained_layout=True,
+        )
+        axes_flat = np.atleast_1d(axes).ravel()
+        for ax, key in zip(axes_flat, keys):
+            mat = metrics[key]
+            mean = np.nanmean(mat, axis=1)
+            n_at_t = np.sum(np.isfinite(mat), axis=1).astype(int)
+            sem = np.array(
+                [
+                    float(stats.sem(mat[t, np.isfinite(mat[t, :])]))
+                    if n_at_t[t] > 1
+                    else 0.0
+                    for t in range(mat.shape[0])
+                ],
+                dtype=float,
+            )
+            st = _baseline_time_stats(mat, times)
+            stats_by_key[key] = st
+            ax.axhline(1.0, color="0.75", ls="--", lw=0.9, zorder=0)
+            # Individual sample traces (light spaghetti under the mean)
+            for s in range(mat.shape[1]):
+                y = mat[:, s]
+                ok = np.isfinite(times) & np.isfinite(y)
+                if int(ok.sum()) < 2:
+                    continue
+                ax.plot(
+                    times[ok],
+                    y[ok],
+                    color="0.65",
+                    alpha=0.28,
+                    lw=0.8,
+                    zorder=1,
+                )
+            ax.errorbar(
+                times,
+                mean,
+                yerr=sem,
+                fmt="o-",
+                color="#6A1B9A",
+                markersize=5,
+                lw=1.2,
+                capsize=3,
+                ecolor="0.45",
+                zorder=2,
+            )
+            # n per time point under the mean markers
+            y0, y1 = ax.get_ylim()
+            span = max(y1 - y0, 1e-6)
+            for t, m, n in zip(times, mean, n_at_t):
+                if not (np.isfinite(t) and np.isfinite(m)):
+                    continue
+                ax.text(
+                    float(t),
+                    float(m) - 0.045 * span,
+                    f"n={int(n)}",
+                    ha="center",
+                    va="top",
+                    fontsize=6.5,
+                    color="0.45",
+                    zorder=3,
+                )
+            ax.set_ylim(y0 - 0.08 * span, y1 + 0.02 * span)
+            ax.set_ylabel(ylabels.get(key, key))
+            ax.set_xlabel("Time [min]")
+            # Tick only observed time points (no dense auto ticks)
+            t_ticks = times[np.isfinite(times)]
+            ax.set_xticks(t_ticks)
+            ax.set_xticklabels(
+                [f"{t:g}" for t in t_ticks], fontsize=8
+            )
+            method = st.get("omnibus_method") or "omnibus"
+            ax.text(
+                0.02,
+                0.98,
+                f"{method} {format_p(st['omnibus_p'])}",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7.5,
+                color="0.35",
+            )
+            _style_pub_ax(ax)
+        for ax in axes_flat[len(keys) :]:
+            ax.set_visible(False)
+
+        fig.suptitle(
+            r"dCCIV baseline (per-sample mean-normalised; light = pairs, "
+            r"mean $\pm$ SEM; $n$ per time)"
+            "\n"
+            r"Omnibus time test + pairwise Wilcoxon/Holm in 41b; "
+            r"dashed = 1; Time [min]",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "41_dcciv_baseline_vs_time.png")
+
+    # Stats companion
+    lines: list[str] = [
+        "dCCIV baseline — repeated-measures stats over Time",
+        "Normalisation: each sample / its own baseline mean (traces centre on 1).",
+        "Omnibus: prefer LMM y ~ C(time) + (1|sample); if random intercept ~0",
+        "  (typical after mean-norm) → OLS y ~ C(time) with cluster-robust SE",
+        "  (cluster = sample) + Wald test on time. All finite values used.",
+        "Pairwise: Wilcoxon signed-rank on samples that have BOTH times; Holm.",
+        "  Later times may have smaller n — reported per pair.",
+        "",
+    ]
+    for key in keys:
+        st = stats_by_key[key]
+        n_str = ",".join(str(n) for n in st.get("n_at_time", []))
+        method = st.get("omnibus_method") or "?"
+        lines.append(
+            f"{key} ({ylabels.get(key, key)}): "
+            f"{method} {format_p(st['omnibus_p'])} "
+            f"(stat={st['omnibus_stat']:.3g}, df={st['omnibus_df']}, "
+            f"n_obs={st['omnibus_n_obs']}, n_samp={st['omnibus_n_samples']}"
+            + (
+                f"; {st['omnibus_note']}"
+                if st.get("omnibus_note")
+                and "OK" not in str(st.get("omnibus_note"))
+                else ""
+            )
+            + f"); n_per_time=[{n_str}]"
+        )
+        pairs = st.get("pairs", [])
+        if not pairs:
+            lines.append("  (no pairwise tests)")
+        else:
+            lines.append("  pairwise Wilcoxon (raw → Holm):")
+            for i, j, n, p, pa in pairs:
+                ti = times[i] if i < len(times) else i
+                tj = times[j] if j < len(times) else j
+                if p is None:
+                    lines.append(
+                        f"  t={ti:g} vs t={tj:g}: n={n} (skipped, n<{3})"
+                    )
+                    continue
+                star = p_to_stars(pa)
+                mark = f" ({star})" if star != "ns" else ""
+                lines.append(
+                    f"  t={ti:g} vs t={tj:g}: n={n}  "
+                    f"{format_p(p)} → Holm {format_p(pa)}{mark}"
+                )
+        lines.append("")
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig_s, ax_s = plt.subplots(figsize=(10.0, max(5.0, 0.26 * len(lines) + 1.2)))
+        ax_s.axis("off")
+        ax_s.text(
+            0.02,
+            0.98,
+            "\n".join(lines),
+            transform=ax_s.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.5,
+            family="monospace",
+            color="0.15",
+        )
+        savefig(fig_s, out_dir, "41b_dcciv_baseline_vs_time_stats.png")
+
+
+def pair_counts_by_age(df: pd.DataFrame, *, include_excluded: bool = False) -> pd.DataFrame:
+    """
+    Count electrical pairs per age from Properties.
+    Default: skip Exclude?=yes rows (same pool as most sample accounting).
+    """
+    sub = df.copy()
+    if (not include_excluded) and "excluded" in sub.columns:
+        sub = sub.loc[~sub["excluded"]].copy()
+    sub = sub.loc[sub["is_mt"] | sub["age_num"].notna()].copy()
+    if len(sub) == 0:
+        return pd.DataFrame(columns=["age_num", "is_mt", "n_pairs"])
+    out = (
+        sub.groupby(["age_num", "is_mt"], dropna=False, as_index=False)
+        .size()
+        .rename(columns={"size": "n_pairs"})
+        .sort_values(["is_mt", "age_num"], na_position="last")
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def merge_animals_and_pairs(
+    animals: pd.DataFrame, pairs: pd.DataFrame
+) -> pd.DataFrame:
+    """Outer-join animal counts and pair counts on age_num / is_mt."""
+    a = animals.copy()
+    p = pairs.copy()
+    # float NaN age_num for MT rows — merge keys must match
+    for d in (a, p):
+        d["age_key"] = d["age_num"].where(~d["is_mt"], other=-999.0)
+    merged = pd.merge(
+        a,
+        p,
+        on=["age_key", "is_mt"],
+        how="outer",
+        suffixes=("", "_p"),
+    )
+    if "age_num_p" in merged.columns:
+        merged["age_num"] = merged["age_num"].combine_first(merged["age_num_p"])
+        merged = merged.drop(columns=["age_num_p"])
+    merged["n_animals"] = merged["n_animals"].fillna(0.0)
+    merged["n_pairs"] = merged.get("n_pairs", pd.Series(0.0, index=merged.index)).fillna(0.0)
+    merged = merged.drop(columns=["age_key"], errors="ignore")
+    return merged.sort_values(["is_mt", "age_num"], na_position="last").reset_index(drop=True)
+
+
 def included_pairs(df: pd.DataFrame) -> pd.DataFrame:
     """
     Day 1–2–3 comparison and day stats: Require Gj_12 & Gj_21 filled,
@@ -463,81 +1524,9 @@ def age_limits(df: pd.DataFrame) -> tuple[float, float, float, bool]:
     return vmin, max_age, mt_val, has_mt
 
 
-def age_to_unit(
-    age: float | None,
-    is_mt: bool,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-) -> float:
-    """
-    Piecewise map age -> [0, 1] for colormap:
-    - [vmin, STRETCH_AGE_HI] occupies STRETCH_FRAC of the bar (expanded)
-    - (STRETCH_AGE_HI, max_age] is compressed
-    - MT at mt_val = darkest (1.0)
-    """
-    if is_mt or age is None or (isinstance(age, float) and np.isnan(age)):
-        return 1.0
-    a = float(age)
-    stretch_hi = min(float(STRETCH_AGE_HI), max_age)
-    if a <= stretch_hi:
-        if stretch_hi <= vmin:
-            return 0.0
-        return STRETCH_FRAC * (a - vmin) / (stretch_hi - vmin)
-    if a <= max_age:
-        if max_age <= stretch_hi:
-            return STRETCH_FRAC
-        return STRETCH_FRAC + (0.92 - STRETCH_FRAC) * (a - stretch_hi) / (max_age - stretch_hi)
-    # between max_age and MT
-    return 0.92 + 0.08 * (a - max_age) / max(mt_val - max_age, 1e-9)
-
-
-def age_colors(age_num: np.ndarray, is_mt: np.ndarray, vmin: float, max_age: float, mt_val: float):
-    colors = []
-    for a, mt in zip(age_num, is_mt):
-        u = age_to_unit(a, bool(mt), vmin, max_age, mt_val)
-        colors.append(AGE_CMAP(u))
-    # dummy Normalize only for APIs that expect one; colorbar uses custom mapping
-    norm = Normalize(vmin=0.0, vmax=1.0)
-    return colors, norm, AGE_CMAP
-
-
 def unique_ages_for_colorbar(df: pd.DataFrame) -> list[float]:
     ages = sorted({float(a) for a in df.loc[~df["is_mt"], "age_num"].dropna().unique()})
     return ages
-
-
-def _fmt_age_tick(t: float) -> str:
-    return str(int(t)) if abs(t - round(t)) < 1e-9 else f"{t:g}"
-
-
-def major_labeled_ages(ages: list[float], min_gap: float = 8.0) -> list[float]:
-    """
-    Labels: minimum age, nearest available to 20/30/40/50 (always keep
-    the age nearest to P50, e.g. 49), then sparsely ages >50.
-    Avoid crowding (49+51+53) that makes the ~P50 mark unreadable.
-    Numeric maximum is not labeled (MT is labeled separately on the colorbar).
-    """
-    if not ages:
-        return []
-    ages = sorted(float(a) for a in ages)
-    max_age = ages[-1]
-    out: list[float] = [ages[0]]
-    for target in MAJOR_AGE_TARGETS:
-        nearest = min(ages, key=lambda a: abs(a - target))
-        if nearest not in out:
-            out.append(nearest)
-    # Always keep the observed age closest to the P50 stretch boundary
-    nearest_p50 = min(ages, key=lambda a: abs(a - float(STRETCH_AGE_HI)))
-    if nearest_p50 not in out:
-        out.append(nearest_p50)
-    # Older ages: only if far enough from already chosen majors
-    for a in ages:
-        if a <= float(STRETCH_AGE_HI) or a >= max_age:
-            continue
-        if all(abs(a - o) >= min_gap for o in out):
-            out.append(a)
-    return sorted(out)
 
 
 def binom_pvalue(k: int, n: int, p: float = 0.5) -> float:
@@ -823,64 +1812,6 @@ def _draw_width_bin_panel(
     return {"p_kw": p_kw, "dunn": dunn_pairs}
 
 
-def add_age_colorbar(
-    fig,
-    axs,
-    vmin: float,
-    max_age: float,
-    mt_val: float,
-    age_ticks: list[float] | None = None,
-    has_mt: bool = False,
-):
-    """
-    Colorbar: linear-stretched ruler to P50, compressed older tail.
-    Minor ticks = all ages present; major labels = min, ~20/30/40/50, >50, MT.
-    """
-    sm = cm.ScalarMappable(norm=Normalize(0, 1), cmap=AGE_CMAP)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axs, fraction=0.035, pad=0.02)
-    cbar.set_label("Age [postnatal days]")
-
-    ages = list(age_ticks or [])
-    major_ages = major_labeled_ages(ages)
-
-    def _unit(t: float, is_mt: bool = False) -> float:
-        return age_to_unit(t, is_mt, vmin, max_age, mt_val)
-
-    # minor ticks: every observed age (+ MT mark without label duplication)
-    minor_ages = list(ages)
-    minor_units = [_unit(a) for a in minor_ages]
-    if has_mt:
-        minor_units.append(_unit(mt_val, is_mt=True))
-    if minor_units:
-        cbar.ax.yaxis.set_ticks(sorted(set(minor_units)), minor=True)
-        cbar.ax.tick_params(which="minor", length=3, width=0.8)
-
-    major_units = [_unit(a) for a in major_ages]
-    major_labels = [_fmt_age_tick(a) for a in major_ages]
-    if has_mt:
-        major_units.append(_unit(mt_val, is_mt=True))
-        major_labels.append(MT_DISPLAY_LABEL)
-    if major_units:
-        cbar.set_ticks(major_units)
-        cbar.set_ticklabels(major_labels)
-        cbar.ax.tick_params(which="major", length=6, width=1.0)
-
-    if max_age > STRETCH_AGE_HI:
-        u_div = _unit(float(STRETCH_AGE_HI))
-        cbar.ax.axhline(u_div, color="0.75", lw=0.8, ls="--")
-    return cbar
-
-
-def savefig(fig: plt.Figure, out_dir: Path, name: str):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / name
-    existed = path.is_file()
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"{'Overwrote' if existed else 'Saved'}: {path}")
-
-
 def _spike_cols_present(df: pd.DataFrame) -> bool:
     need = [
         *PARAM_DIRS["CCa"],
@@ -1085,34 +2016,6 @@ def bonferroni_adjust(p: float | None, n_tests: int) -> float | None:
     return float(min(1.0, p * n_tests))
 
 
-def _sig_bracket(
-    ax,
-    x1: float,
-    x2: float,
-    y: float,
-    text: str,
-    *,
-    h: float | None = None,
-    fs: float = 9,
-    color: str = "0.2",
-):
-    """Draw a significance bracket between x1 and x2 at height y."""
-    if h is None:
-        ymin, ymax = ax.get_ylim()
-        h = 0.03 * (ymax - ymin)
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=0.9, c=color, clip_on=False)
-    ax.text(
-        0.5 * (x1 + x2),
-        y + h,
-        text,
-        ha="center",
-        va="bottom",
-        fontsize=fs,
-        color=color,
-        clip_on=False,
-    )
-
-
 def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
     sub = df[df["day"] == day]
     vals = pd.concat([sub[c1], sub[c2]], ignore_index=True)
@@ -1122,27 +2025,6 @@ def pool_both_sides(df: pd.DataFrame, day: int, c1: str, c2: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Figure 1: day comparison (X=day; pair left/right = channel identity)
 # ---------------------------------------------------------------------------
-def _style_pub_ax(ax):
-    """Publication-like axis: no top/right frame, light spines, no grid."""
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(0.8)
-    ax.spines["bottom"].set_linewidth(0.8)
-    ax.spines["left"].set_color("0.2")
-    ax.spines["bottom"].set_color("0.2")
-    ax.tick_params(axis="both", which="major", length=3.5, width=0.8, colors="0.2", labelsize=9)
-    ax.xaxis.label.set_size(10)
-    ax.yaxis.label.set_size(10)
-    ax.grid(False)
-
-
-def _style_day_ax(ax):
-    """Day-figure axis: publication style + soft vertical day guides."""
-    _style_pub_ax(ax)
-    for x in (DAY_X[1], DAY_X[2], DAY_X[3]):
-        ax.axvline(x, color="0.85", lw=0.7, zorder=0)
-
-
 def plot_day_comparison(
     df: pd.DataFrame,
     out_dir: Path,
@@ -1396,26 +2278,6 @@ def plot_day12_statistics(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 # Figure 2: AI vs age (warped X, continuous age Greys) + separate group stats
 # ---------------------------------------------------------------------------
-def _warped_age_x(age_num, is_mt, vmin, max_age, mt_val) -> float:
-    return age_to_unit(age_num, bool(is_mt), vmin, max_age, mt_val)
-
-
-def _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks: list[float], has_mt: bool):
-    majors = major_labeled_ages(age_ticks)
-    tick_u = [_warped_age_x(a, False, vmin, max_age, mt_val) for a in majors]
-    tick_lab = [_fmt_age_tick(a) for a in majors]
-    if has_mt:
-        tick_u.append(_warped_age_x(mt_val, True, vmin, max_age, mt_val))
-        tick_lab.append(MT_DISPLAY_LABEL)
-    # divider after P50
-    if max_age > STRETCH_AGE_HI:
-        u50 = _warped_age_x(float(STRETCH_AGE_HI), False, vmin, max_age, mt_val)
-        ax.axvline(u50, color="0.8", ls="--", lw=0.7, zorder=0)
-    ax.set_xticks(tick_u)
-    ax.set_xticklabels(tick_lab, fontsize=8)
-    ax.set_xlim(-0.02, 1.02)
-
-
 def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
     """Scatter AI vs warped age; continuous age Greys colormap (same as day/asymmetry figs)."""
     sub = analysis_pool(df)
@@ -1439,7 +2301,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         row2 = [
             ("AI_Rin", r"AI $R_{in}$"),
             ("AI_Cm", r"AI $C_{m}$"),
-            ("AI_Vm", r"AI $V_{m}$"),
+            ("AI_Vm", r"AI $E_{m}$"),
         ]
 
         def _ai_age_panel(ax, col: str, ylabel: str):
@@ -1550,16 +2412,149 @@ def _dunn_posthoc(
 
 def _short_age_pair(a: str, b: str) -> str:
     def _short(lab: str) -> str:
-        return lab.replace("P", "").replace("–", "-")
+        return AGE_GROUP_ABBREV.get(lab, lab.replace("P", "").replace("–", "-"))
 
     return f"{_short(a)} vs {_short(b)}"
 
 
+def _age_abbrev(lab: str) -> str:
+    """Short tick / legend label for an age-group full name."""
+    return AGE_GROUP_ABBREV.get(lab, lab)
+
+
+def _set_age_group_xticks(ax, group_labels, *, x_pos=None, fontsize: float = 7.5):
+    """X ticks for age-group panels (short abbrev labels: EJuv, LJuv, …)."""
+    if x_pos is None:
+        xs = list(range(1, len(group_labels) + 1))
+    else:
+        xs = [x_pos[lab] for lab in group_labels]
+    tick_lab = [_age_abbrev(lab) for lab in group_labels]
+    ax.set_xticks(xs)
+    # Short labels usually fit without heavy rotation
+    rot = 0 if max((len(t) for t in tick_lab), default=0) <= 5 else 18
+    ax.set_xticklabels(
+        tick_lab,
+        fontsize=fontsize,
+        rotation=rot,
+        ha="right" if rot else "center",
+    )
+    if xs:
+        ax.set_xlim(xs[0] - 0.55, xs[-1] + 0.55)
+
+
+def _mean_ci95(vals: np.ndarray) -> tuple[float, float, float]:
+    """Return (mean, lo, hi) for a Student 95% CI of the mean."""
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    n = len(vals)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan")
+    m = float(np.mean(vals))
+    if n < 2:
+        return m, m, m
+    se = float(stats.sem(vals))
+    tcrit = float(stats.t.ppf(0.975, n - 1))
+    return m, m - tcrit * se, m + tcrit * se
+
+
+def _kw_dunn_for_samples(
+    samples: list[np.ndarray], group_labels: list[str]
+) -> tuple[float, float, list[tuple[str, str, float]]]:
+    """Kruskal–Wallis + Dunn (Bonferroni). Empty groups skipped in KW."""
+    nonempty = [s for s in samples if len(s) > 0]
+    if len(nonempty) < 2:
+        return float("nan"), float("nan"), []
+    try:
+        H, p = stats.kruskal(*nonempty)
+        dunn = _dunn_posthoc(samples, group_labels)
+        return float(H), float(p), dunn
+    except Exception:
+        return float("nan"), float("nan"), []
+
+
+def _add_dunn_brackets(
+    ax,
+    dunn: list[tuple[str, str, float]] | None,
+    x_pos: dict[str, float],
+    y_hi: float,
+    *,
+    y_pad_frac: float = 0.06,
+    step_frac: float = 0.10,
+    h_frac: float = 0.035,
+    fs: float = 10,
+) -> float:
+    """
+    Draw significance brackets for Dunn pairs with stars.
+    Returns the top y used (for ylim).
+    """
+    sig = [
+        (a, b, pv)
+        for a, b, pv in (dunn or [])
+        if a in x_pos and b in x_pos and p_to_stars(pv) != "ns"
+    ]
+    sig.sort(key=lambda t: abs(x_pos[t[0]] - x_pos[t[1]]))
+    ymin, ymax = ax.get_ylim()
+    span = max(float(ymax - ymin), abs(float(y_hi)) * 0.2, 1e-6)
+    y_lo_data = float(y_hi) if np.isfinite(y_hi) else float(ymax)
+    bracket_y = y_lo_data + y_pad_frac * span
+    step = step_frac * span
+    h = h_frac * span
+    for a, b, pv in sig:
+        _sig_bracket(
+            ax,
+            x_pos[a],
+            x_pos[b],
+            bracket_y,
+            p_to_stars(pv),
+            h=h,
+            fs=fs,
+        )
+        bracket_y += step
+    top = bracket_y + (0.04 * span if sig else 0.0)
+    return max(float(ymax), top)
+
+
+def _group_summary_lines(
+    samples: list[np.ndarray], group_labels: list[str], *, unit: str = ""
+) -> list[str]:
+    """Per-group n / median / mean±SEM / 95% CI lines for stats figures."""
+    unit_s = f" {unit}" if unit else ""
+    lines = []
+    for lab, vals in zip(group_labels, samples):
+        short = _age_abbrev(lab)
+        if len(vals) == 0:
+            lines.append(f"  {short}: n=0")
+            continue
+        m, lo, hi = _mean_ci95(vals)
+        med = float(np.median(vals))
+        sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
+        lines.append(
+            f"  {short}: n={len(vals)}, median={med:.4g}{unit_s}"
+        )
+        lines.append(
+            f"    mean±SEM={m:.4g}±{sem:.4g}{unit_s}; "
+            f"95% CI [{lo:.4g}, {hi:.4g}]{unit_s}"
+        )
+    return lines
+
+
+def _dunn_stats_lines(dunn: list[tuple[str, str, float]] | None) -> list[str]:
+    lines = ["Dunn post-hoc (Bonferroni-adjusted p)"]
+    if not dunn:
+        lines.append("  —")
+        return lines
+    for a, b, pv in dunn:
+        lines.append(
+            f"  {_short_age_pair(a, b)}: {format_p(pv)} {p_to_stars(pv)}"
+        )
+    return lines
+
+
 def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
-    AI by age group (P10–32 / P33–50 / P50+).
+    AI by age group (scheme labels: early/late juvenile, adolescent, young adult, dams).
     Overview: points + mean±SEM + median; Dunn brackets/stars only (no p-text).
-    Separate stats figure: Kruskal–Wallis + Dunn (Bonferroni) details.
+    Separate stats figure: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
     sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
@@ -1569,47 +2564,33 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $|V_{m}|$"),
+        ("AI_Vm", r"AI $|E_{m}|$"),
     ]
 
-    # Collect samples + stats once for overview and stats figure
     panel_stats: dict[str, dict] = {}
     print("\nAI by age group — Kruskal–Wallis + Dunn (Bonferroni):")
     for col, _ylabel in panels:
         if col not in sub.columns:
             continue
         samples = []
-        ns = []
         for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             vals = sub.loc[mask, col].dropna().to_numpy(dtype=float)
             samples.append(vals)
-            ns.append(int(len(vals)))
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) >= 2:
-            try:
-                H, p = stats.kruskal(*nonempty)
-                dunn = _dunn_posthoc(samples, group_labels)
-            except Exception as exc:
-                H, p, dunn = float("nan"), float("nan"), []
-                print(f"  {col}: KW n/a ({exc})")
-            else:
-                dunn_bits = [
-                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-                ]
-                print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
+        H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+        dunn_bits = [f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn]
+        if np.isfinite(H):
+            print(f"  {col}: KW H={H:.3f}, {format_p(p)}; Dunn: {dunn_bits}")
         else:
-            H, p, dunn = float("nan"), float("nan"), []
             print(f"  {col}: KW n/a")
         panel_stats[col] = {
             "samples": samples,
-            "ns": ns,
+            "ns": [int(len(s)) for s in samples],
             "H": H,
             "p": p,
             "dunn": dunn,
         }
 
-    # ----- Clean overview (article figure) -----
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -1617,7 +2598,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(12.5, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=(13.0, 7.8), constrained_layout=True)
         ax_list = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
         axes[0, 2].set_visible(False)
 
@@ -1665,65 +2646,27 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 )
 
             ax.axhline(1 / 3, color="0.6", ls=":", lw=0.8, zorder=0)
-            ax.set_xticks([x_pos[l] for l in group_labels])
-            ax.set_xticklabels(group_labels)
+            _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
             ax.set_ylabel(ylabel)
             ax.set_xlabel("")
-
-            # Significant Dunn pairs only: brackets + stars (no p-text)
-            sig_pairs = [
-                (a, b, pv)
-                for a, b, pv in (info["dunn"] or [])
-                if p_to_stars(pv) != "ns"
-            ]
-            # Order short spans first so stacked brackets stay readable
-            sig_pairs.sort(
-                key=lambda t: abs(x_pos[t[0]] - x_pos[t[1]])
+            ax.set_ylim(0, max(1.05, y_hi * 1.05, 1 / 3 + 0.05))
+            y_top = _add_dunn_brackets(
+                ax, info["dunn"], x_pos, max(y_hi, 1 / 3)
             )
-            y_base = max(y_hi, 1 / 3) + 0.04
-            bracket_y = y_base
-            step = 0.08
-            for a, b, pv in sig_pairs:
-                _sig_bracket(
-                    ax,
-                    x_pos[a],
-                    x_pos[b],
-                    bracket_y,
-                    p_to_stars(pv),
-                    h=0.03,
-                    fs=10,
-                )
-                bracket_y += step
-            y_top = max(1.05, bracket_y + 0.02) if sig_pairs else 1.05
-            ax.set_ylim(0, y_top)
+            ax.set_ylim(0, max(1.05, y_top))
             _style_pub_ax(ax)
 
         legend_handles = [
             Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="crimson",
-                linestyle="None",
-                markersize=6,
-                label="mean ± SEM",
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
             ),
             Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="royalblue",
-                linestyle="None",
-                markersize=5,
-                label="median",
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
             ),
             Line2D(
-                [0],
-                [0],
-                color="0.6",
-                ls=":",
-                lw=0.9,
-                label=r"AI $=1/3$ (~2×)",
+                [0], [0], color="0.6", ls=":", lw=0.9, label=r"AI $=1/3$ (~2×)",
             ),
         ]
         fig.legend(
@@ -1742,7 +2685,6 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         )
         savefig(fig, out_dir, "02b_AI_by_age_group.png")
 
-    # ----- Stats detail figure -----
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -1750,29 +2692,20 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 5, figsize=(16.5, 4.8), constrained_layout=True)
+        fig, axes = plt.subplots(1, 5, figsize=(17.5, 5.4), constrained_layout=True)
         for ax, (col, ylabel) in zip(axes, panels):
             ax.set_axis_off()
             if col not in panel_stats:
                 continue
             info = panel_stats[col]
             lines = [ylabel.replace("$", ""), ""]
-            lines.append(f"n = {' / '.join(str(n) for n in info['ns'])}")
-            lines.append(f"  ({' / '.join(group_labels)})")
+            lines.extend(_group_summary_lines(info["samples"], group_labels))
             lines.append("")
             lines.append(f"Kruskal–Wallis: {format_p(info['p'])}")
             if np.isfinite(info["H"]):
                 lines.append(f"  H = {info['H']:.3f}")
             lines.append("")
-            lines.append("Dunn (Bonferroni)")
-            dunn = info["dunn"] or []
-            if not dunn:
-                lines.append("  —")
-            for a, b, pv in dunn:
-                lines.append(
-                    f"  {_short_age_pair(a, b)}: "
-                    f"{format_p(pv)} {p_to_stars(pv)}"
-                )
+            lines.extend(_dunn_stats_lines(info["dunn"]))
             ax.text(
                 0.02,
                 0.98,
@@ -1780,15 +2713,15 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=8,
+                fontsize=7.5,
                 family="monospace",
                 color="0.15",
-                linespacing=1.3,
+                linespacing=1.25,
             )
         fig.suptitle(
             "AI by age group — statistics\n"
-            f"Kruskal–Wallis across P10–32 / P33–50 / P50+; "
-            f"Dunn post-hoc with Bonferroni; {POOL_NOTE}",
+            f"Kruskal–Wallis across {AGE_GROUP_NOTE}; "
+            f"Dunn Bonferroni-adjusted p; per-group 95% CI of the mean; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
@@ -1945,11 +2878,12 @@ def plot_asymmetry_by_age_bins(
     title: str,
 ):
     """
-    rows x 3 age bins. Fixed colors per column, no age colorbar.
+    rows × age bins (4 groups). Fixed colors per column, no age colorbar.
     rows: list of (param_name, unit_note)
     """
     sub = analysis_pool(df)
     n_rows = len(rows)
+    n_age = len(AGE_ASYM_BINS)
 
     with plt.rc_context(
         {
@@ -1959,7 +2893,10 @@ def plot_asymmetry_by_age_bins(
         }
     ):
         fig_h = 3.5 * n_rows + 0.8
-        fig, axes = plt.subplots(n_rows, 3, figsize=(11.5, fig_h), constrained_layout=True)
+        fig_w = max(11.5, 2.9 * n_age + 0.8)
+        fig, axes = plt.subplots(
+            n_rows, n_age, figsize=(fig_w, fig_h), constrained_layout=True
+        )
         if n_rows == 1:
             axes = np.array([axes])
 
@@ -1971,7 +2908,7 @@ def plot_asymmetry_by_age_bins(
         for r, (name, unit_note) in enumerate(rows):
             xmin_c, xmax_c = f"{name}_min", f"{name}_max"
             if xmin_c not in sub.columns:
-                for c in range(3):
+                for c in range(n_age):
                     axes[r, c].set_visible(False)
                 continue
 
@@ -2048,7 +2985,7 @@ def plot_asymmetry_by_age_bins(
                 _style_pub_ax(ax)
                 if r == 0:
                     ax.set_title(
-                        f"{label}\n$n_{{ec}}$={n_by_col[c]}",
+                        f"{_age_abbrev(label)}\n$n_{{ec}}$={n_by_col[c]}",
                         fontsize=10,
                         color="0.2",
                     )
@@ -2406,120 +3343,173 @@ def plot_coupling_by_distance_bins(df: pd.DataFrame, out_dir: Path):
 # ---------------------------------------------------------------------------
 # Gj / CC by age group: pooled sides + pair mean (KW + Dunn)
 # ---------------------------------------------------------------------------
+def _age_group_samples(
+    sub: pd.DataFrame, mode: str, spec
+) -> list[np.ndarray]:
+    """Collect per-age-bin samples; mode 'pair' (one col) or 'pool' ((c1,c2))."""
+    samples = []
+    for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
+        mask = _age_bin_mask(sub, lo, hi, include_mt)
+        g = sub.loc[mask]
+        if mode == "pair":
+            vals = (
+                g[spec].dropna().to_numpy(dtype=float)
+                if spec in g.columns
+                else np.array([])
+            )
+        else:
+            c1, c2 = spec
+            if c1 not in g.columns or c2 not in g.columns:
+                vals = np.array([])
+            else:
+                vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
+                    dtype=float
+                )
+        samples.append(vals)
+    return samples
+
+
+def _scatter_age_group_panel(
+    ax,
+    samples: list[np.ndarray],
+    *,
+    group_labels: list[str],
+    x_pos: dict[str, float],
+    ylabel: str,
+    seed_key: str,
+    dunn: list[tuple[str, str, float]] | None,
+):
+    """Points + mean±SEM + median + Dunn brackets (no p-text on axis)."""
+    y_hi = 0.0
+    y_lo = 0.0
+    for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
+        if len(vals) == 0:
+            continue
+        y_hi = max(y_hi, float(np.max(vals)))
+        y_lo = min(y_lo, float(np.min(vals)))
+        jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
+            0, 0.06, len(vals)
+        )
+        ax.scatter(
+            np.full(len(vals), x_pos[label]) + jitter,
+            vals,
+            c=color,
+            s=POINT_SIZE,
+            alpha=POINT_ALPHA,
+            edgecolors="0.1",
+            linewidths=0.55,
+            zorder=2,
+        )
+        ax.errorbar(
+            [x_pos[label]],
+            [np.mean(vals)],
+            yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
+            fmt="o",
+            color="crimson",
+            markersize=6,
+            capsize=3,
+            zorder=3,
+        )
+        ax.plot(
+            [x_pos[label]],
+            [np.median(vals)],
+            marker="D",
+            color="royalblue",
+            markersize=5,
+            zorder=4,
+        )
+    _set_age_group_xticks(ax, group_labels, x_pos=x_pos)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("")
+    if y_hi > y_lo:
+        pad = 0.08 * (y_hi - y_lo)
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+    y_top = _add_dunn_brackets(ax, dunn, x_pos, y_hi)
+    cur_lo, _ = ax.get_ylim()
+    ax.set_ylim(cur_lo, max(ax.get_ylim()[1], y_top))
+    _style_pub_ax(ax)
+
+
+def _save_age_group_stats_figure(
+    out_dir: Path,
+    outfile: str,
+    title: str,
+    panels: list[tuple[str, list[np.ndarray], float, float, list]],
+    group_labels: list[str],
+    *,
+    unit: str = "",
+):
+    """Text companion: per-group CI + KW + Dunn Bonferroni p."""
+    n = max(len(panels), 1)
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1, n, figsize=(max(4.2 * n, 8.0), 5.6), constrained_layout=True
+        )
+        axes_list = list(np.atleast_1d(axes).ravel())
+        for ax, (lab, samples, H, p, dunn) in zip(axes_list, panels):
+            ax.set_axis_off()
+            lines = [lab, ""]
+            lines.extend(_group_summary_lines(samples, group_labels, unit=unit))
+            lines.append("")
+            lines.append(f"Kruskal–Wallis: {format_p(p)}")
+            if np.isfinite(H):
+                lines.append(f"  H = {H:.3f}")
+            lines.append("")
+            lines.extend(_dunn_stats_lines(dunn))
+            ax.text(
+                0.02,
+                0.98,
+                "\n".join(lines),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7.5,
+                family="monospace",
+                color="0.15",
+                linespacing=1.25,
+            )
+        for ax in axes_list[len(panels) :]:
+            ax.set_visible(False)
+        fig.suptitle(
+            f"{title}\n"
+            f"Kruskal–Wallis across {AGE_GROUP_NOTE}; "
+            f"Dunn Bonferroni-adjusted p; per-group 95% CI of the mean; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, outfile)
+
+
 def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
     """
     2×2: top = pooled {x1, x2} for Gj and CC; bottom = pair means.
-    Age groups P10–32 / P33–50 / P50+; Kruskal–Wallis + Dunn (Bonferroni).
+    Overview: points + mean±SEM + median + Dunn brackets/stars only.
+    Companion 07b: KW + Dunn (Bonferroni) + per-group 95% CI.
     """
     sub = analysis_pool(df)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
 
-    # (mode, col_or_pair, ylabel) — mode "pair" uses one column; "pool" uses (c1, c2)
     row_pooled = [
-        ("pool", ("Gj_12", "Gj_21"), rf"{PARAM_MATH['Gj']} pooled [nS]"),
-        ("pool", ("CC_12", "CC_21"), rf"{PARAM_MATH['CC']} pooled"),
+        ("pool", ("Gj_12", "Gj_21"), rf"{PARAM_MATH['Gj']} pooled [nS]", "Gj pool"),
+        ("pool", ("CC_12", "CC_21"), rf"{PARAM_MATH['CC']} pooled", "CC pool"),
     ]
     row_mean = [
-        ("pair", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]"),
-        ("pair", "CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean"),
+        ("pair", "Gj_pair_mean", rf"{PARAM_MATH['Gj']} pair mean [nS]", "Gj pair mean"),
+        ("pair", "CC_pair_mean", rf"{PARAM_MATH['CC']} pair mean", "CC pair mean"),
     ]
 
-    def _samples_for(mode: str, spec) -> list[np.ndarray]:
-        samples = []
-        for _label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
-            mask = _age_bin_mask(sub, lo, hi, include_mt)
-            g = sub.loc[mask]
-            if mode == "pair":
-                vals = g[spec].dropna().to_numpy(dtype=float) if spec in g.columns else np.array([])
-            else:
-                c1, c2 = spec
-                if c1 not in g.columns or c2 not in g.columns:
-                    vals = np.array([])
-                else:
-                    vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(
-                        dtype=float
-                    )
-            samples.append(vals)
-        return samples
-
-    def _panel(ax, mode: str, spec, ylabel: str, seed_key: str):
-        samples = _samples_for(mode, spec)
-        for (label, _lo, _hi, _mt, color), vals in zip(AGE_ASYM_BINS, samples):
-            if len(vals) == 0:
-                continue
-            jitter = np.random.default_rng(abs(hash(seed_key + label)) % (2**32)).normal(
-                0, 0.06, len(vals)
-            )
-            ax.scatter(
-                np.full(len(vals), x_pos[label]) + jitter,
-                vals,
-                c=color,
-                s=POINT_SIZE,
-                alpha=POINT_ALPHA,
-                edgecolors="white",
-                linewidths=0.35,
-                zorder=2,
-            )
-            ax.errorbar(
-                [x_pos[label]],
-                [np.mean(vals)],
-                yerr=[stats.sem(vals) if len(vals) > 1 else 0.0],
-                fmt="o",
-                color="crimson",
-                markersize=6,
-                capsize=3,
-                zorder=3,
-            )
-            ax.plot(
-                [x_pos[label]],
-                [np.median(vals)],
-                marker="D",
-                color="royalblue",
-                markersize=5,
-                zorder=4,
-            )
-
-        nonempty = [s for s in samples if len(s) > 0]
-        if len(nonempty) >= 2:
-            try:
-                H, p = stats.kruskal(*nonempty)
-                dunn = _dunn_posthoc(samples, group_labels)
-                dunn_bits = [
-                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
-                ]
-                stat_txt = f"KW {format_p(p)}"
-                if dunn_bits:
-                    stat_txt += "\nDunn: " + "; ".join(dunn_bits)
-                n_bits = ", ".join(
-                    f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
-                )
-                print(
-                    f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
-                    f"Dunn: {dunn_bits}; {n_bits}"
-                )
-            except Exception as exc:
-                stat_txt = "KW n/a"
-                print(f"  {seed_key}: KW n/a ({exc})")
-        else:
-            stat_txt = "KW n/a"
-            print(f"  {seed_key}: KW n/a")
-
-        ax.set_xticks([x_pos[l] for l in group_labels])
-        ax.set_xticklabels(group_labels)
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel("")
-        ax.text(
-            0.5,
-            1.02,
-            stat_txt,
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=7,
-            color="0.25",
-        )
-        _style_pub_ax(ax)
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+    print(
+        "\nGj / CC by age group — pooled sides & pair mean — "
+        "Kruskal–Wallis + Dunn (Bonferroni):"
+    )
 
     with plt.rc_context(
         {
@@ -2528,40 +3518,53 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(10.0, 8.2), constrained_layout=True)
-        print(
-            "\nGj / CC by age group — pooled sides & pair mean — "
-            "Kruskal–Wallis + Dunn (Bonferroni):"
-        )
-        for ax, (mode, spec, ylabel) in zip(axes[0], row_pooled):
-            key = f"pooled_{spec[0]}"
-            _panel(ax, mode, spec, ylabel, key)
-        for ax, (mode, spec, ylabel) in zip(axes[1], row_mean):
-            _panel(ax, mode, spec, ylabel, spec)
+        fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.4), constrained_layout=True)
+        panel_defs = [
+            (axes[0, 0], *row_pooled[0], "pooled_Gj"),
+            (axes[0, 1], *row_pooled[1], "pooled_CC"),
+            (axes[1, 0], *row_mean[0], "Gj_pair_mean"),
+            (axes[1, 1], *row_mean[1], "CC_pair_mean"),
+        ]
+        for ax, mode, spec, ylabel, title, seed_key in panel_defs:
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {seed_key}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {seed_key}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=seed_key,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
 
-        axes[0, 0].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
-        axes[0, 1].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25", pad=18)
-        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
-        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25", pad=18)
+        axes[0, 0].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25")
+        axes[0, 1].set_title(r"pooled $\{x_1,x_2\}$", fontsize=10, color="0.25")
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
 
         legend_handles = [
             Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="crimson",
-                linestyle="None",
-                markersize=6,
-                label="mean ± SEM",
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
             ),
             Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="royalblue",
-                linestyle="None",
-                markersize=5,
-                label="median",
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
             ),
         ]
         fig.legend(
@@ -2574,11 +3577,114 @@ def plot_coupling_by_age_groups(df: pd.DataFrame, out_dir: Path):
         fig.suptitle(
             r"$G_{j}$ and $CC$ by age group"
             "\n"
-            rf"top: pooled sides; bottom: pair mean; Kruskal–Wallis; Dunn (Bonferroni); {POOL_NOTE}",
+            rf"top: pooled sides; bottom: pair mean; brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "07_Gj_CC_by_age_group.png")
+
+    _save_age_group_stats_figure(
+        out_dir,
+        "07b_Gj_CC_by_age_group_stats.png",
+        r"$G_j$ / $CC$ by age group — statistics",
+        panel_stats,
+        group_labels,
+    )
+
+
+def plot_params_by_age_groups_pooled(df: pd.DataFrame, out_dir: Path):
+    """
+    Gj / CC / Rin / Cm / Vm by age group using all directed values
+    (pooled sides, not pair-averaged). Dunn brackets/stars on overview;
+    companion stats with 95% CI + Bonferroni-adjusted p.
+    """
+    sub = analysis_pool(df)
+    group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    panels_all = [
+        ("pool", PARAM_DIRS["Gj"], PARAM_YLABELS["Gj"], "Gj pool"),
+        ("pool", PARAM_DIRS["CC"], PARAM_YLABELS["CC"], "CC pool"),
+        ("pool", PARAM_DIRS["Rin"], PARAM_YLABELS["Rin"], "Rin pool"),
+        ("pool", PARAM_DIRS["Cm"], PARAM_YLABELS["Cm"], "Cm pool"),
+        ("pool", PARAM_DIRS["Vm"], PARAM_YLABELS["Vm"], "Vm pool"),
+    ]
+
+    print(
+        "\nParameters by age group (pooled sides) — "
+        "Kruskal–Wallis + Dunn (Bonferroni):"
+    )
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 3, figsize=(14.0, 8.2), constrained_layout=True)
+        ax_list = [axes[0, 0], axes[0, 1], axes[0, 2], axes[1, 0], axes[1, 1]]
+        axes[1, 2].set_visible(False)
+        for ax, (mode, spec, ylabel, title) in zip(ax_list, panels_all):
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {title}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {title}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=title,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
+
+        legend_handles = [
+            Line2D(
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
+            ),
+            Line2D(
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.55),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"$G_j$, $CC$, $R_{in}$, $C_m$, $E_m$ by age group (pooled sides)"
+            "\n"
+            rf"all directed values (not pair-averaged); brackets: significant Dunn; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "07c_params_by_age_group_pooled.png")
+
+    _save_age_group_stats_figure(
+        out_dir,
+        "07d_params_by_age_group_pooled_stats.png",
+        r"Pooled $G_j$/$CC$/$R_{in}$/$C_m$/$E_m$ by age — statistics",
+        panel_stats,
+        group_labels,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2688,6 +3794,110 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "10_Gj_CC_vs_age_continuous.png")
 
 
+def plot_cell_params_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
+    """
+    Pair-mean Rin, Cm, Em vs warped continuous age (no age-group bins).
+    Same style as fig 10: Spearman ρ + LOWESS.
+    """
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    sub = sub.copy()
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
+    panels = [
+        ("Rin_pair_mean", PARAM_YLABELS["Rin"] + r" pair mean"),
+        ("Cm_pair_mean", PARAM_YLABELS["Cm"] + r" pair mean"),
+        ("Vm_pair_mean", PARAM_YLABELS["Vm"] + r" pair mean"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
+        print("\nPair-mean Rin / Cm / Em vs warped age (Spearman + LOWESS):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d["x_warp"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 5:
+                xs, ys = lowess_smooth(
+                    d["x_warp"].to_numpy(dtype=float),
+                    d[col].to_numpy(dtype=float),
+                    frac=0.45,
+                )
+                ax.plot(xs, ys, color="crimson", lw=1.6, zorder=3, label="LOWESS")
+            if len(d) >= 3:
+                age_for_rank = np.where(
+                    d["is_mt"].to_numpy(),
+                    mt_val,
+                    d["age_num"].to_numpy(dtype=float),
+                )
+                rho, p = stats.spearmanr(age_for_rank, d[col].to_numpy(dtype=float))
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col}: n={len(d)} (too few)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("Age [postnatal days]")
+            _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], color="crimson", lw=1.6, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Pair-mean $R_{in}$, $C_m$, $E_m$ vs age (continuous)"
+            "\n"
+            rf"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "10b_Rin_Cm_Em_vs_age_continuous.png")
+
+
 # ---------------------------------------------------------------------------
 # Coverage: Distance + age histograms (with / without Exclude?=yes)
 # ---------------------------------------------------------------------------
@@ -2740,7 +3950,7 @@ def _draw_distance_hist(ax, dists: np.ndarray, panel_title: str):
 
 def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
     """
-    Warped age histogram; band labels P10–32 / P33–50 / P50+ with pair counts.
+    Warped age histogram; band labels for the age groups with pair counts.
     """
     numeric = frame.loc[~frame["is_mt"], "age_num"].dropna().to_numpy(dtype=float)
     n_mt = int(frame["is_mt"].sum())
@@ -2803,11 +4013,25 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
     for label, lo, hi, include_mt, _c in AGE_ASYM_BINS:
         band_ns.append(int(_age_bin_mask(frame, lo, hi, include_mt).sum()))
 
-    band_specs = [
-        (10.0, 32.5, "#FB8C00", 0.12, "P10–32", False, band_ns[0]),
-        (32.5, 50.0, "#8E24AA", 0.10, "P33–50", False, band_ns[1]),
-        (50.0, max_age, "#2E0854", 0.08, "P50+", True, band_ns[2]),
-    ]
+    # Numeric age bands (Dam/MT labeled separately near the Dam bar below)
+    band_alphas = (0.12, 0.11, 0.10, 0.08, 0.08)
+    band_specs = []
+    for i, (lab, lo, hi, include_mt, col) in enumerate(AGE_ASYM_BINS):
+        if lo is None and hi is None:
+            continue  # Dam — MT slot
+        is_old = lo is not None and float(lo) >= float(STRETCH_AGE_HI)
+        lo_b = float(lo) if lo is not None else 10.0
+        if is_old:
+            lo_b, hi_b = float(STRETCH_AGE_HI), float(max_age)
+        elif hi is None:
+            hi_b = float(max_age)
+        else:
+            # half-open visual boundary between adjacent bins
+            hi_b = float(hi) + 0.5
+            lo_b = float(lo) if i == 0 else float(lo) - 0.5
+        band_specs.append(
+            (lo_b, hi_b, col, band_alphas[i % len(band_alphas)], lab, is_old, band_ns[i])
+        )
     for lo_b, hi_b, col_b, alpha_b, lab_b, is_old, n_band in band_specs:
         if is_old:
             if not old_ages and max_age <= float(STRETCH_AGE_HI) and n_mt == 0:
@@ -2826,7 +4050,7 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         ax.text(
             0.5 * (u_lo + u_hi),
             1.08,
-            f"{lab_b}\n$n_{{ec}}$={n_band}",
+            f"{_age_abbrev(lab_b)}\n$n_{{ec}}$={n_band}",
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="bottom",
@@ -2888,11 +4112,23 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         dam_x = u_tail1 + 0.015 + slot
         dam_w = old_bar_w
         ax.axvline(sep_x, color="0.35", ls=":", lw=0.9, zorder=1)
+        dam_color = next(
+            (c for lab, lo, hi, mt, c in AGE_ASYM_BINS if lo is None and hi is None),
+            "#2E0854",
+        )
+        dam_n = next(
+            (
+                n
+                for (lab, lo, hi, _mt, _c), n in zip(AGE_ASYM_BINS, band_ns)
+                if lo is None and hi is None
+            ),
+            n_mt,
+        )
         ax.axvspan(
             dam_x - 0.5 * dam_w,
             dam_x + 0.5 * dam_w,
-            color="#2E0854",
-            alpha=0.06,
+            color=dam_color,
+            alpha=0.08,
             zorder=0,
             lw=0,
         )
@@ -2905,6 +4141,19 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
             alpha=0.9,
             align="center",
             zorder=2,
+        )
+        ax.text(
+            dam_x,
+            1.08,
+            f"{MT_DISPLAY_LABEL}\n$n_{{ec}}$={dam_n}",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            color=dam_color,
+            alpha=0.9,
+            clip_on=False,
+            linespacing=1.15,
         )
         tick_pos.append(dam_x)
         tick_lab.append(MT_DISPLAY_LABEL)
@@ -3440,7 +4689,7 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
     row2 = [
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $|V_{m}|$"),
+        ("AI_Vm", r"AI $|E_{m}|$"),
     ]
     hist_color = "0.55"  # gray (no age encoding on these plots)
 
@@ -3561,6 +4810,37 @@ def _empty_compare(n1: int = 0, n2: int = 0) -> dict:
     }
 
 
+def _day_age_overview_axes(n_params: int):
+    """Return (fig, list of axes in draw order) for Day×age overview panels."""
+    if n_params <= 0:
+        fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0), constrained_layout=True)
+        return fig, [ax]
+    if n_params == 4:
+        fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.5), constrained_layout=True)
+        return fig, [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]]
+    if n_params == 5:
+        fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.5), constrained_layout=True)
+        axes[0, 2].set_visible(False)
+        return fig, [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
+    if n_params == 6:
+        fig, axes = plt.subplots(2, 3, figsize=(16.0, 8.8), constrained_layout=True)
+        return fig, [
+            axes[0, 0],
+            axes[0, 1],
+            axes[0, 2],
+            axes[1, 0],
+            axes[1, 1],
+            axes[1, 2],
+        ]
+    # fallback: single row
+    fig, axes = plt.subplots(
+        1, n_params, figsize=(3.5 * n_params + 1.5, 4.8), constrained_layout=True
+    )
+    if n_params == 1:
+        axes = [axes]
+    return fig, list(axes)
+
+
 def _run_day_by_age_mode(
     sub: pd.DataFrame,
     out_dir: Path,
@@ -3569,15 +4849,16 @@ def _run_day_by_age_mode(
     outfile_overview: str,
     outfile_stats: str,
     title_mode: str,
+    params: list | None = None,
 ):
     """
     mode: 'pair' | 'pool'
-    Day within age: MW/Welch + Bonferroni×3 ages.
+    Day within age: MW/Welch + Bonferroni across age groups.
     Age within day: KW + Dunn; significant brackets on overview.
     """
     group_labels = [b[0] for b in AGE_ASYM_BINS]
     n_age = len(AGE_ASYM_BINS)
-    params = list(STAT_PARAMS)
+    params = list(STAT_PARAMS if params is None else params)
 
     day_vs: dict[str, list[dict]] = {}
     age_kw: dict[str, dict[int, dict]] = {}
@@ -3614,11 +4895,19 @@ def _run_day_by_age_mode(
                 hi=hi,
                 include_mt=include_mt,
             )
-            res = (
-                compare_two_groups(v1, v2)
-                if len(v1) >= 1 and len(v2) >= 1
-                else _empty_compare(len(v1), len(v2))
-            )
+            if len(v1) >= 1 and len(v2) >= 1:
+                res = compare_two_groups(v1, v2)
+            else:
+                # Still report mean±SEM for whichever day has data
+                res = _empty_compare(len(v1), len(v2))
+                if len(v1) >= 1:
+                    m1, s1, med1 = _mean_sem_median(v1)
+                    res["mean1"], res["sem1"], res["median1"] = m1, s1, med1
+                    res["n1"] = int(len(v1))
+                if len(v2) >= 1:
+                    m2, s2, med2 = _mean_sem_median(v2)
+                    res["mean2"], res["sem2"], res["median2"] = m2, s2, med2
+                    res["n2"] = int(len(v2))
             res["p_adj"] = bonferroni_adjust(res.get("p"), n_age)
             res["age"] = label
             day_results.append(res)
@@ -3701,7 +4990,7 @@ def _run_day_by_age_mode(
             color="w",
             markerfacecolor=color,
             markersize=7,
-            label=label,
+            label=_age_abbrev(label),
         )
         for label, _lo, _hi, _mt, color in AGE_ASYM_BINS
     ]
@@ -3714,9 +5003,8 @@ def _run_day_by_age_mode(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(13.5, 8.5), constrained_layout=True)
-        axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
-        axes[0, 2].set_visible(False)
+        fig, axes_flat = _day_age_overview_axes(len(params))
+        first_panel = True
 
         for ax, (name, c1, c2, mean_col) in zip(axes_flat, params):
             if name not in day_vs:
@@ -3776,7 +5064,7 @@ def _run_day_by_age_mode(
                 y_all = np.concatenate(all_y)
                 y_lo, y_hi = float(np.min(y_all)), float(np.max(y_all))
                 span = max(y_hi - y_lo, abs(y_hi) * 0.05, 1e-6)
-                ax.set_ylim(y_lo - 0.08 * span, y_hi + 0.55 * span)
+                ax.set_ylim(y_lo - 0.14 * span, y_hi + 0.55 * span)
             else:
                 y_lo, y_hi, span = 0.0, 1.0, 1.0
 
@@ -3812,11 +5100,35 @@ def _run_day_by_age_mode(
                     )
                     bracket_y += step
 
-            ax.set_xticks([1, 2, 3])
-            ax.set_xticklabels(group_labels)
-            ax.set_xlim(0.45, 3.55)
+            _set_age_group_xticks(ax, group_labels)
             ax.set_ylabel(PARAM_YLABELS[name])
             ax.set_xlabel("")
+            # On the first panel: explicit Day 1 / Day 2 under the first age bin
+            if first_panel and group_labels:
+                lab0 = group_labels[0]
+                if lab0 in x_day[1] and lab0 in x_day[2]:
+                    y_lab = y_lo - 0.06 * span
+                    ax.text(
+                        x_day[1][lab0],
+                        y_lab,
+                        "Day 1",
+                        ha="center",
+                        va="top",
+                        fontsize=7.5,
+                        color="0.25",
+                        clip_on=False,
+                    )
+                    ax.text(
+                        x_day[2][lab0],
+                        y_lab,
+                        "Day 2",
+                        ha="center",
+                        va="top",
+                        fontsize=7.5,
+                        color="0.25",
+                        clip_on=False,
+                    )
+                first_panel = False
             _style_pub_ax(ax)
 
         fig.legend(
@@ -3838,6 +5150,7 @@ def _run_day_by_age_mode(
 
     # ----- Stats detail figure -----
     mode_tag = "pair mean" if mode == "pair" else r"pooled $\{x_1,x_2\}$"
+    n_params = max(len(params), 1)
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -3845,31 +5158,66 @@ def _run_day_by_age_mode(
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 5, figsize=(16.5, 5.2), constrained_layout=True)
+        fig, axes = plt.subplots(
+            1,
+            n_params,
+            figsize=(3.3 * n_params + 0.8, 5.2),
+            constrained_layout=True,
+        )
+        if n_params == 1:
+            axes = [axes]
         for ax, (name, _c1, _c2, _mc) in zip(axes, params):
             ax.set_axis_off()
             if name not in day_vs:
                 continue
             lines = [rf"{PARAM_MATH[name]} {mode_tag}", ""]
-            lines.append("Day1 vs Day2 (Bonferroni×3)")
+            lines.append(
+                f"Per age group — mean±SEM (shown even if one day is missing)"
+            )
+            lines.append(f"Day1 vs Day2 test (Bonferroni×{n_age}) when both days present")
             for res in day_vs[name]:
-                lines.append(f"  {res['age']}: n={res['n1']}/{res['n2']}")
-                lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
                 lines.append(
-                    f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
+                    f"  {_age_abbrev(res['age'])}: n={res['n1']}/{res['n2']}"
                 )
+                # Always list available days (including single-day groups)
+                for tag, mean_k, sem_k, n_k in (
+                    ("D1", "mean1", "sem1", "n1"),
+                    ("D2", "mean2", "sem2", "n2"),
+                ):
+                    m = res.get(mean_k, np.nan)
+                    sem = res.get(sem_k, np.nan)
+                    n = int(res.get(n_k, 0) or 0)
+                    if n >= 2 and np.isfinite(m) and np.isfinite(sem):
+                        tcrit = float(stats.t.ppf(0.975, n - 1))
+                        lo, hi = m - tcrit * sem, m + tcrit * sem
+                        lines.append(
+                            f"    {tag}: mean±SEM={m:.4g}±{sem:.4g}; "
+                            f"95% CI [{lo:.4g}, {hi:.4g}]"
+                        )
+                    elif n == 1 and np.isfinite(m):
+                        lines.append(f"    {tag}: mean={m:.4g} (n=1)")
+                    elif n == 0:
+                        lines.append(f"    {tag}: n=0")
+                if res.get("test") in (None, "n/a") or not np.isfinite(
+                    res.get("p", np.nan)
+                ):
+                    lines.append("    Day1–Day2 test: n/a (need both days)")
+                else:
+                    lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
+                    lines.append(
+                        f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
+                    )
             lines.append("")
             for day in (1, 2):
                 info = age_kw[name][day]
                 lines.append(f"Age KW Day{day}: {format_p(info['p'])}")
-                dunn = info.get("dunn") or []
-                if not dunn:
-                    lines.append("  Dunn: —")
-                for a, b, pv in dunn:
-                    lines.append(
-                        f"  {_short_age_pair(a, b)}: "
-                        f"{format_p(pv)} {p_to_stars(pv)}"
+                lines.extend(
+                    _group_summary_lines(
+                        info.get("samples") or [], group_labels
                     )
+                )
+                dunn = info.get("dunn") or []
+                lines.extend(_dunn_stats_lines(dunn))
                 lines.append("")
             ax.text(
                 0.02,
@@ -3878,15 +5226,18 @@ def _run_day_by_age_mode(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=7.5,
+                fontsize=6.2,
                 family="monospace",
                 color="0.15",
-                linespacing=1.25,
+                linespacing=1.12,
             )
+        fig.set_size_inches(3.3 * n_params + 0.8, 7.2)
         fig.suptitle(
             f"Day × age statistics ({title_mode}; Days 1–2 only)\n"
-            "Day within age: Shapiro→Welch or Mann–Whitney, Bonferroni across 3 ages; "
-            "Age within day: Kruskal–Wallis + Dunn (Bonferroni)",
+            f"Day within age: Shapiro→Welch or Mann–Whitney, "
+            f"Bonferroni across {n_age} ages; "
+            "Age within day: Kruskal–Wallis + Dunn (Bonferroni); "
+            "mean±SEM for every age×day with data",
             fontsize=11,
             color="0.15",
         )
@@ -3919,10 +5270,304 @@ def plot_day_by_age_pooled(df: pd.DataFrame, out_dir: Path):
     )
 
 
+def plot_day_by_age_pooled_cell_params(df: pd.DataFrame, out_dir: Path):
+    """
+    Companion to fig 14: Day×age for Rin, Cm, Em, τ (pooled sides).
+    τ ≈ Rin×Cm/1000 [ms]; same stats as fig 14.
+    """
+    sub = analysis_pool(df)
+    _run_day_by_age_mode(
+        sub,
+        out_dir,
+        mode="pool",
+        outfile_overview="14c_day_by_age_Rin_Cm_Em_Tau.png",
+        outfile_stats="14d_day_by_age_Rin_Cm_Em_Tau_stats.png",
+        title_mode=r"pooled $\{x_1,x_2\}$; $R_{in}$, $C_m$, $E_m$, $\tau$",
+        params=CELL_DAY_AGE_PARAMS,
+    )
+
+
+def _fine6_day_subset(df: pd.DataFrame, days: set[int]) -> pd.DataFrame:
+    """analysis_pool restricted to the requested recording day(s)."""
+    sub = analysis_pool(df)
+    return sub[sub["day"].isin(days)].copy()
+
+
+def plot_params_by_age_fine6(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    days: set[int],
+    outfile_overview: str,
+    outfile_stats: str,
+    day_note: str,
+):
+    """
+    Detailed 6-group age comparison (W2/W3 split) for
+    CC, Gj, Rin, Em, Cm, τ — pooled sides; KW + Dunn.
+    Layout: 3 rows × 2 cols (CC|Gj ; Rin|Em ; Cm|τ).
+    Does not change the global age-scheme picker.
+    """
+    sub = _fine6_day_subset(df, days)
+    with temporary_age_scheme(AGE_FINE6_BINS, AGE_FINE6_ABBREV, AGE_FINE6_NOTE):
+        group_labels = [b[0] for b in AGE_ASYM_BINS]
+        x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+        panels_all = [
+            ("pool", PARAM_DIRS[name], PARAM_YLABELS[name], title)
+            for name, title in DETAIL6_PANEL_ORDER
+        ]
+        print(
+            f"\nParameters by 6 age groups ({day_note}; W2 P10–14 / W3 P15–20) — "
+            "Kruskal–Wallis + Dunn (Bonferroni):"
+        )
+        panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+        with plt.rc_context(
+            {
+                "font.family": "sans-serif",
+                "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+                "axes.unicode_minus": False,
+            }
+        ):
+            fig, axes = plt.subplots(3, 2, figsize=(12.0, 12.5), constrained_layout=True)
+            ax_list = [
+                axes[0, 0],
+                axes[0, 1],
+                axes[1, 0],
+                axes[1, 1],
+                axes[2, 0],
+                axes[2, 1],
+            ]
+            for ax, (mode, spec, ylabel, title) in zip(ax_list, panels_all):
+                samples = _age_group_samples(sub, mode, spec)
+                H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+                dunn_bits = [
+                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                ]
+                n_bits = ", ".join(
+                    f"{_age_abbrev(lab)} n={len(s)}"
+                    for lab, s in zip(group_labels, samples)
+                )
+                if np.isfinite(H):
+                    print(
+                        f"  {title}: KW H={H:.3f}, {format_p(p)}; "
+                        f"Dunn: {dunn_bits}; {n_bits}"
+                    )
+                else:
+                    print(f"  {title}: KW n/a; {n_bits}")
+                _scatter_age_group_panel(
+                    ax,
+                    samples,
+                    group_labels=group_labels,
+                    x_pos=x_pos,
+                    ylabel=ylabel,
+                    seed_key=f"fine6-{outfile_overview}-{title}",
+                    dunn=dunn,
+                )
+                panel_stats.append((title, samples, H, p, dunn))
+
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="crimson",
+                    linestyle="None",
+                    markersize=6,
+                    label="mean ± SEM",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="D",
+                    color="royalblue",
+                    linestyle="None",
+                    markersize=5,
+                    label="median",
+                ),
+            ]
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.55),
+                frameon=False,
+                fontsize=9,
+            )
+            fig.suptitle(
+                rf"$CC$, $G_j$, $R_{{in}}$, $E_m$, $C_m$, $\tau$ by age "
+                rf"(6 groups; pooled sides; {day_note})"
+                "\n"
+                rf"{AGE_FINE6_NOTE}; brackets: significant Dunn",
+                fontsize=11,
+                color="0.15",
+            )
+            savefig(fig, out_dir, outfile_overview)
+
+        _save_age_group_stats_figure(
+            out_dir,
+            outfile_stats,
+            rf"6-group age stats (W2/W3; {day_note}) — "
+            r"$CC$/$G_j$/$R_{in}$/$E_m$/$C_m$/$\tau$",
+            panel_stats,
+            group_labels,
+        )
+
+
+def plot_detail_fine6(df: pd.DataFrame, out_dir: Path):
+    """
+    Fig 42 family: 6-group W2/W3 scheme, 3×2 panel layout.
+    Two day versions: Days 1+2 pooled, and Day 1 only.
+    """
+    plot_params_by_age_fine6(
+        df,
+        out_dir,
+        days={1, 2},
+        outfile_overview="42_params_by_age_fine6_days12.png",
+        outfile_stats="42b_params_by_age_fine6_days12_stats.png",
+        day_note="Days 1–2 pooled",
+    )
+    plot_params_by_age_fine6(
+        df,
+        out_dir,
+        days={1},
+        outfile_overview="42c_params_by_age_fine6_day1.png",
+        outfile_stats="42d_params_by_age_fine6_day1_stats.png",
+        day_note="Day 1 only",
+    )
+
+
+def plot_coupling_pairmean_by_age_fine6(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    days: set[int],
+    outfile_overview: str,
+    outfile_stats: str,
+    day_note: str,
+):
+    """
+    Fast companion to fig 42: pair-mean CC and Gj only, 6 age groups (W2/W3).
+    Layout: 1×2 (CC | Gj). Separate catalog entry so it rebuilds quickly.
+    """
+    sub = _fine6_day_subset(df, days)
+    with temporary_age_scheme(AGE_FINE6_BINS, AGE_FINE6_ABBREV, AGE_FINE6_NOTE):
+        group_labels = [b[0] for b in AGE_ASYM_BINS]
+        x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+        panels_all = [
+            ("pair", "CC_pair_mean", PARAM_YLABELS["CC"] + r" pair mean", "CC pair mean"),
+            ("pair", "Gj_pair_mean", PARAM_YLABELS["Gj"] + r" pair mean", "Gj pair mean"),
+        ]
+        print(
+            f"\nPair-mean CC / Gj by 6 age groups ({day_note}; W2/W3) — "
+            "Kruskal–Wallis + Dunn (Bonferroni):"
+        )
+        panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+        with plt.rc_context(
+            {
+                "font.family": "sans-serif",
+                "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+                "axes.unicode_minus": False,
+            }
+        ):
+            fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.2), constrained_layout=True)
+            for ax, (mode, spec, ylabel, title) in zip(axes, panels_all):
+                samples = _age_group_samples(sub, mode, spec)
+                H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+                dunn_bits = [
+                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                ]
+                n_bits = ", ".join(
+                    f"{_age_abbrev(lab)} n={len(s)}"
+                    for lab, s in zip(group_labels, samples)
+                )
+                if np.isfinite(H):
+                    print(
+                        f"  {title}: KW H={H:.3f}, {format_p(p)}; "
+                        f"Dunn: {dunn_bits}; {n_bits}"
+                    )
+                else:
+                    print(f"  {title}: KW n/a; {n_bits}")
+                _scatter_age_group_panel(
+                    ax,
+                    samples,
+                    group_labels=group_labels,
+                    x_pos=x_pos,
+                    ylabel=ylabel,
+                    seed_key=f"fine6-pair-{outfile_overview}-{title}",
+                    dunn=dunn,
+                )
+                panel_stats.append((title, samples, H, p, dunn))
+
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="crimson",
+                    linestyle="None",
+                    markersize=6,
+                    label="mean ± SEM",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="D",
+                    color="royalblue",
+                    linestyle="None",
+                    markersize=5,
+                    label="median",
+                ),
+            ]
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.55),
+                frameon=False,
+                fontsize=9,
+            )
+            fig.suptitle(
+                rf"Pair-mean $CC$ and $G_j$ by age "
+                rf"(6 groups; {PAIR_MEAN_FORMULA}; {day_note})"
+                "\n"
+                rf"{AGE_FINE6_NOTE}; brackets: significant Dunn",
+                fontsize=11,
+                color="0.15",
+            )
+            savefig(fig, out_dir, outfile_overview)
+
+        _save_age_group_stats_figure(
+            out_dir,
+            outfile_stats,
+            rf"6-group pair-mean $CC$/$G_j$ stats (W2/W3; {day_note})",
+            panel_stats,
+            group_labels,
+        )
+
+
+def plot_detail_fine6_coupling_pairmean(df: pd.DataFrame, out_dir: Path):
+    """Fig 43: pair-mean CC/Gj, 6 age groups — Days 1–2 and Day 1 only."""
+    plot_coupling_pairmean_by_age_fine6(
+        df,
+        out_dir,
+        days={1, 2},
+        outfile_overview="43_CC_Gj_pairmean_by_age_fine6_days12.png",
+        outfile_stats="43b_CC_Gj_pairmean_by_age_fine6_days12_stats.png",
+        day_note="Days 1–2 pooled",
+    )
+    plot_coupling_pairmean_by_age_fine6(
+        df,
+        out_dir,
+        days={1},
+        outfile_overview="43c_CC_Gj_pairmean_by_age_fine6_day1.png",
+        outfile_stats="43d_CC_Gj_pairmean_by_age_fine6_day1_stats.png",
+        day_note="Day 1 only",
+    )
+
+
 def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
     """Run Day×age analysis for pair means and for pooled sides."""
     plot_day_by_age_pair_mean(df, out_dir)
     plot_day_by_age_pooled(df, out_dir)
+    plot_day_by_age_pooled_cell_params(df, out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -4396,8 +6041,8 @@ def plot_cca_delays_vs_distance(df: pd.DataFrame, out_dir: Path):
 
 
 def plot_delay_spread(df: pd.DataFrame, out_dir: Path):
-    """Alias: CCa + delays vs age (gray points) — fig 18/19."""
-    plot_cca_delays_vs_age(df, out_dir)
+    """Alias: delays vs age (gray points) — fig 18."""
+    plot_delays_vs_age_gray(df, out_dir)
 
 
 def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
@@ -4405,7 +6050,8 @@ def plot_spike_transmission_figures(df: pd.DataFrame, out_dir: Path):
     plot_cca_vs_cc_gj(df, out_dir)
     plot_delays_vs_cca_cc_gj(df, out_dir)
     plot_cca_delays_vs_distance(df, out_dir)
-    plot_cca_delays_vs_age(df, out_dir)
+    plot_delays_vs_age_gray(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
 
 
 def _cca_columns_present(df: pd.DataFrame) -> bool:
@@ -4500,10 +6146,12 @@ def _coverage_grouped_bars(
                 color="0.4",
             )
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=7 if len(labels) > 6 else 8)
-    if len(labels) > 6:
+    long_labs = len(labels) > 6 or any(len(str(lab)) > 10 for lab in labels)
+    ax.set_xticklabels(labels, fontsize=7 if long_labs else 8)
+    if long_labs:
         for lab in ax.get_xticklabels():
-            lab.set_rotation(35)
+            lab.set_rotation(18)
+            lab.set_ha("right")
     ax.set_ylabel("Count")
     ax.set_xlabel(xlabel)
     ax.set_ylim(0, y_top * 1.22)
@@ -4521,10 +6169,12 @@ def _pct_points(ax, *, labels: list[str], pct: list[float], xlabel: str, ylabel:
             ha="center", va="bottom", fontsize=7.5, color="0.25",
         )
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=7 if len(labels) > 6 else 8)
-    if len(labels) > 6:
+    long_labs = len(labels) > 6 or any(len(str(lab)) > 10 for lab in labels)
+    ax.set_xticklabels(labels, fontsize=7 if long_labs else 8)
+    if long_labs:
         for lab in ax.get_xticklabels():
-            lab.set_rotation(35)
+            lab.set_rotation(18)
+            lab.set_ha("right")
     ax.set_ylim(0, 110)
     ax.set_ylabel(ylabel)
     ax.set_xlabel(xlabel)
@@ -4595,23 +6245,24 @@ def _scatter_gray_vs_warped_age(
     _style_pub_ax(ax)
 
 
-def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
+def _plot_panels_vs_age_gray(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    panels: list[tuple[str, str, str, str]],
+    outfile: str,
+    title_main: str,
+    log_label: str,
+):
     """
-    CCa + onset/peak delay vs warped age on one figure (3 panels).
-    Points gray; age encoded only by x-axis (+ shared age colourbar).
+    Shared gray-vs-age figure builder.
+    panels: (c1, c2, mean_col, ylabel)
     """
-    if not _spike_cols_present(df):
-        print("Skipping CCa/delays vs age: spike columns not found.")
-        return
     sub = analysis_pool(df)
     vmin, max_age, mt_val, has_mt = age_limits(sub)
     age_ticks = unique_ages_for_colorbar(sub)
-    panels = [
-        (*PARAM_DIRS["CCa"], "CCa_pair_mean", PARAM_YLABELS["CCa"]),
-        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
-        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
-    ]
-    print("\nCCa / delays vs age (gray points; age on x):")
+    n = len(panels)
+    print(f"\n{log_label} (gray points; age on x):")
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -4619,8 +6270,16 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
-        for ax, (c1, c2, mean_col, ylab) in zip(axes, panels):
+        fig_w = 5.0 + 4.2 * max(n - 1, 0) if n > 1 else 6.2
+        fig, axes = plt.subplots(
+            1, n, figsize=(fig_w, 4.6), constrained_layout=True, squeeze=False
+        )
+        axes_flat = list(axes.ravel())
+        for ax, (c1, c2, mean_col, ylab) in zip(axes_flat, panels):
+            if c1 not in sub.columns or c2 not in sub.columns:
+                ax.set_visible(False)
+                print(f"  {ylab}: columns missing")
+                continue
             d = sub[sub[c1].notna() | sub[c2].notna()].copy()
             print(f"  {ylab}: n_pairs={len(d)}")
             if len(d) == 0:
@@ -4643,44 +6302,93 @@ def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
         ]
         fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
         _age_axis_colorbar(
-            fig, axes, vmin=vmin, max_age=max_age, mt_val=mt_val,
+            fig, axes_flat, vmin=vmin, max_age=max_age, mt_val=mt_val,
             age_ticks=age_ticks, has_mt=has_mt,
         )
         fig.suptitle(
-            r"$CC_a$ and delays vs age"
-            "\n"
-            r"gray points (age = x-axis / colourbar only; no point colour); "
+            title_main
+            + "\n"
+            + r"gray points (age = x-axis / colourbar only; no point colour); "
             + POOL_NOTE,
             fontsize=11,
             color="0.15",
         )
-        savefig(fig, out_dir, "18_CCa_delays_vs_age.png")
-        # Alias for catalog / prior 19 naming (savefig closes the figure)
-        alias = out_dir / "19_CCa_vs_age.png"
-        src = out_dir / "18_CCa_delays_vs_age.png"
-        if src.is_file():
-            alias.write_bytes(src.read_bytes())
-            print(f"{'Overwrote' if alias.is_file() else 'Saved'}: {alias}")
+        savefig(fig, out_dir, outfile)
+
+
+def plot_delays_vs_age_gray(df: pd.DataFrame, out_dir: Path):
+    """Onset / peak delay vs warped age; gray points (fig 18)."""
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays vs age (gray): delay columns not found.")
+        return
+    panels = [
+        (*PARAM_DIRS["DelayOnset"], "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        (*PARAM_DIRS["DelayPeak"], "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+    _plot_panels_vs_age_gray(
+        df,
+        out_dir,
+        panels=panels,
+        outfile="18_delays_vs_age.png",
+        title_main=r"Onset / peak delay vs age",
+        log_label="Delays vs age",
+    )
+
+
+def plot_cca_vs_age_gray(df: pd.DataFrame, out_dir: Path):
+    """CCa vs warped age; gray points (fig 19) — companion to age-group KW."""
+    if not _cca_columns_present(df):
+        print("Skipping CCa vs age (gray): amp_ratio columns not found.")
+        return
+    panels = [
+        (*PARAM_DIRS["CCa"], "CCa_pair_mean", PARAM_YLABELS["CCa"]),
+    ]
+    _plot_panels_vs_age_gray(
+        df,
+        out_dir,
+        panels=panels,
+        outfile="19_CCa_vs_age.png",
+        title_main=r"$CC_a$ vs age",
+        log_label="CCa vs age",
+    )
+
+
+def plot_cca_delays_vs_age(df: pd.DataFrame, out_dir: Path):
+    """Backward-compatible wrapper: separate gray delay + CCa age figures."""
+    plot_delays_vs_age_gray(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
 
 
 def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
     """
-    Combined CCa+delays vs age (gray points), plus CCa by age-group KW companion.
+    CCa vs age (gray points) plus CCa by age groups with Dunn brackets (19 + 19b)
+    and a stats companion with 95% CI + Bonferroni-adjusted p (19c).
     """
-    plot_cca_delays_vs_age(df, out_dir)
+    plot_cca_vs_age_gray(df, out_dir)
     if not _cca_columns_present(df):
         return
     sub = analysis_pool(df)
     c1, c2 = PARAM_DIRS["CCa"]
-    # Age-group summary with KW (directed CCa pooled within group)
     group_labels = [b[0] for b in AGE_ASYM_BINS]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
     samples = []
-    print("\nCCa by age group (directed pool):")
-    for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
+    print("\nCCa by age group (directed pool) — KW + Dunn (Bonferroni):")
+    for label, lo, hi, include_mt, _color in AGE_ASYM_BINS:
         g = sub.loc[_age_bin_mask(sub, lo, hi, include_mt)]
         vals = pd.concat([g[c1], g[c2]], ignore_index=True).dropna().to_numpy(dtype=float)
         samples.append(vals)
-        print(f"  {label}: n_dir={len(vals)}, median={np.median(vals) if len(vals) else float('nan'):.3g}")
+        print(
+            f"  {label}: n_dir={len(vals)}, "
+            f"median={np.median(vals) if len(vals) else float('nan'):.3g}"
+        )
+    H, p_kw, dunn = _kw_dunn_for_samples(samples, group_labels)
+    dunn_bits = [f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn]
+    if np.isfinite(H):
+        print(f"  KW H={H:.3f}, {format_p(p_kw)}; Dunn: {dunn_bits}")
+    else:
+        print("  KW n/a")
+
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -4688,58 +6396,49 @@ def plot_cca_vs_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, ax = plt.subplots(figsize=(6.5, 4.8), constrained_layout=True)
-        for i, ((label, _lo, _hi, _mt, color), vals) in enumerate(zip(AGE_ASYM_BINS, samples)):
-            if len(vals) == 0:
-                continue
-            xpos = i + 1
-            jitter = np.random.default_rng(abs(hash("cca-age" + label)) % (2**32)).normal(
-                0, 0.06, len(vals)
-            )
-            ax.scatter(
-                np.full(len(vals), xpos) + jitter, vals, c=color,
-                s=POINT_SIZE, alpha=POINT_ALPHA, edgecolors="white", linewidths=0.35, zorder=2,
-            )
-            ax.errorbar(
-                [xpos], [float(np.mean(vals))],
-                yerr=[float(stats.sem(vals)) if len(vals) > 1 else 0.0],
-                fmt="o", color="crimson", markersize=6, capsize=3, zorder=3,
-            )
-            ax.plot([xpos], [float(np.median(vals))], marker="D", color="royalblue", markersize=5, zorder=4)
-        nonempty = [s for s in samples if len(s) >= 3]
-        if len(nonempty) >= 2:
-            _h, p_kw = stats.kruskal(*nonempty)
-            ax.text(
-                0.98, 0.96, f"KW {format_p(p_kw)}\n(bins n≥3)",
-                transform=ax.transAxes, ha="right", va="top", fontsize=8, color="0.35",
-            )
-            print(f"  KW {format_p(p_kw)}")
-        ax.set_xticks(range(1, len(group_labels) + 1))
-        ax.set_xticklabels(
-            [f"{lab}\nn={len(s)}" for lab, s in zip(group_labels, samples)], fontsize=8
+        fig, ax = plt.subplots(figsize=(7.2, 5.0), constrained_layout=True)
+        _scatter_age_group_panel(
+            ax,
+            samples,
+            group_labels=group_labels,
+            x_pos=x_pos,
+            ylabel=PARAM_YLABELS["CCa"],
+            seed_key="cca-age",
+            dunn=dunn,
         )
-        ax.set_ylabel(PARAM_YLABELS["CCa"])
         ax.set_xlabel("Age group")
-        _style_pub_ax(ax)
         handles = [
-            Line2D([0], [0], marker="o", color="crimson", lw=0, markersize=6, label="mean ± SEM"),
-            Line2D([0], [0], marker="D", color="royalblue", lw=0, markersize=5, label="median"),
+            Line2D(
+                [0], [0], marker="o", color="crimson", lw=0, markersize=6,
+                label="mean ± SEM",
+            ),
+            Line2D(
+                [0], [0], marker="D", color="royalblue", lw=0, markersize=5,
+                label="median",
+            ),
         ]
         fig.legend(handles=handles, loc="upper left", frameon=False, fontsize=9)
         fig.suptitle(
-            r"$CC_a$ by age group (directed values)"
+            r"$CC_a$ by age group (directed / pooled sides)"
             "\n"
-            + POOL_NOTE,
+            rf"brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
             color="0.15",
         )
         savefig(fig, out_dir, "19b_CCa_by_age_group.png")
 
+    _save_age_group_stats_figure(
+        out_dir,
+        "19c_CCa_by_age_group_stats.png",
+        r"$CC_a$ by age group — statistics",
+        [("CCa pool (directed)", samples, H, p_kw, dunn)],
+        group_labels,
+    )
 
 def plot_cca_coverage(df: pd.DataFrame, out_dir: Path):
     """
     CCa coverage counts + % (points):
-      - age P10–32 / P33–50 / P50+: pairs with any CCa
+      - age groups (active scheme): pairs with any CCa
       - Distance 20 µm: counts + %
       - directed CC bins width 0.025: % of directions with CCa
     """
@@ -5157,7 +6856,7 @@ def plot_cca_by_day(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
     """
-    Day 1–2–3 CCa for age P10–32 only: overview + Day1 vs Day2 stats
+    Day 1–2–3 CCa for P10–32 (juvenile + adolescent) only: overview + Day1 vs Day2 stats
     + Kruskal–Wallis across days (pooled directions).
     """
     if not _cca_columns_present(df):
@@ -5165,8 +6864,8 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
         return
     c1, c2 = PARAM_DIRS["CCa"]
     dfp = included_pairs(df)
-    # first AGE_ASYM_BINS entry is P10–32
-    lab0, lo0, hi0, mt0, _col0 = AGE_ASYM_BINS[0]
+    # Keep combined P10–32 even though age bins now split 10–20 / 21–32
+    lab0, lo0, hi0, mt0 = "P10–32", 10, 32, False
     dfp = dfp.loc[_age_bin_mask(dfp, lo0, hi0, mt0)].copy()
     dfp = dfp[dfp[c1].notna() | dfp[c2].notna()].copy()
     if len(dfp) == 0:
@@ -5273,7 +6972,7 @@ def plot_cca_by_day_p10_32(df: pd.DataFrame, out_dir: Path):
 
 def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
     """
-    CCa vs CC pair means by age group (P10–32 / P33–50 / P50+), separate Spearman.
+    CCa vs CC pair means by age group (4 groups), separate Spearman.
     Top: both CCa required; bottom: missing CCa → 0.
     """
     if not _cca_columns_present(df):
@@ -5298,6 +6997,7 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
     )
     x_mean = sub["CC_pair_mean"].to_numpy(dtype=float)
     print("\nCCa vs CC by age (Spearman):")
+    n_age = len(AGE_ASYM_BINS)
 
     with plt.rc_context(
         {
@@ -5306,7 +7006,9 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
             "axes.unicode_minus": False,
         }
     ):
-        fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.6), constrained_layout=True)
+        fig, axes = plt.subplots(
+            2, n_age, figsize=(max(11.5, 2.9 * n_age + 0.8), 7.6), constrained_layout=True
+        )
         for row, (y_mean, ylab) in enumerate(
             (
                 (y_both, r"$CC_a$ pair mean (both sides)"),
@@ -5344,7 +7046,11 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
                     ax.set_ylabel(ylab)
                 _style_pub_ax(ax)
                 if row == 0:
-                    ax.set_title(f"{label}\n$n_{{ec}}$={int(mask.sum())}", fontsize=10, color="0.2")
+                    ax.set_title(
+                        f"{_age_abbrev(label)}\n$n_{{ec}}$={int(mask.sum())}",
+                        fontsize=10,
+                        color="0.2",
+                    )
         fig.suptitle(
             r"$CC_a$ vs $CC$ by age group"
             "\n"
@@ -5473,7 +7179,16 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
         )
         savefig(fig, out_dir, "24_CCa_asymmetry.png")
 
-        fig, axes = plt.subplots(1, 3, figsize=(11.5, 4.2), constrained_layout=True)
+        n_age = len(AGE_ASYM_BINS)
+        n_rows_age = 2 if n_age > 3 else 1
+        n_cols_age = int(np.ceil(n_age / n_rows_age))
+        fig, axes = plt.subplots(
+            n_rows_age,
+            n_cols_age,
+            figsize=(max(10.0, 2.8 * n_cols_age + 0.6), 4.0 * n_rows_age + 0.6),
+            constrained_layout=True,
+        )
+        axes_flat = np.atleast_1d(axes).ravel()
         all_x, all_y = [], []
         for label, lo, hi, include_mt, color in AGE_ASYM_BINS:
             mask = _age_bin_mask(sub, lo, hi, include_mt)
@@ -5487,7 +7202,7 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
             )
         else:
             lim_min, lim_max = 0.0, 1.0
-        for ax, (label, lo, hi, include_mt, color) in zip(axes, AGE_ASYM_BINS):
+        for ax, (label, lo, hi, include_mt, color) in zip(axes_flat, AGE_ASYM_BINS):
             mask = _age_bin_mask(sub, lo, hi, include_mt)
             g = sub.loc[mask & sub["CCa_min_z"].notna() & sub["CCa_max_z"].notna()].copy()
             ax.plot(
@@ -5526,10 +7241,15 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
             ax.set_xlabel(r"$CC_a$ min (missing→0)")
             ax.set_ylabel(r"$CC_a$ max (missing→0)")
             ax.set_title(
-                f"{label}\n$n$={len(g)} (both={int((g['cca_modality']=='both').sum()) if len(g) else 0})",
-                fontsize=10, color="0.2",
+                f"{_age_abbrev(label)}\n"
+                f"$n$={len(g)} (both="
+                f"{int((g['cca_modality']=='both').sum()) if len(g) else 0})",
+                fontsize=10,
+                color="0.2",
             )
             _style_pub_ax(ax)
+        for ax in axes_flat[n_age:]:
+            ax.set_visible(False)
         fig.suptitle(
             r"$CC_a$ asymmetry by age (missing→0)"
             "\n"
@@ -5652,6 +7372,138 @@ def plot_delays_by_day(df: pd.DataFrame, out_dir: Path):
             color="0.15",
         )
         savefig(fig, out_dir, "25_delays_day1_vs_day2.png")
+
+
+# ---------------------------------------------------------------------------
+# Delay onset / peak by age group: pooled sides + pair mean (KW + Dunn)
+# ---------------------------------------------------------------------------
+def plot_delays_by_age_groups(df: pd.DataFrame, out_dir: Path):
+    """
+    2×2: top = pooled {12, 21} for onset/peak delay; bottom = pair means.
+    Age groups from active scheme (e.g. early/late juvenile, adolescent, young adult, dams);
+    Kruskal–Wallis + Dunn (Bonferroni).
+    Companion text figure with medians, n, KW, Dunn and 95% CI.
+    """
+    need = [*PARAM_DIRS["DelayOnset"], *PARAM_DIRS["DelayPeak"]]
+    if any(c not in df.columns for c in need):
+        print("Skipping delays by age group: delay columns not found.")
+        return
+    sub = analysis_pool(df)
+    on12, on21 = PARAM_DIRS["DelayOnset"]
+    pk12, pk21 = PARAM_DIRS["DelayPeak"]
+    has_any = (
+        sub[on12].notna()
+        | sub[on21].notna()
+        | sub[pk12].notna()
+        | sub[pk21].notna()
+    )
+    sub = sub.loc[has_any].copy()
+    if len(sub) == 0:
+        print("Skipping delays by age group: no delay values in analysis pool.")
+        return
+
+    age_bins = DELAY_AGE_BINS
+    group_labels = [b[0] for b in age_bins]
+    x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+    bins_note = " / ".join(group_labels)
+
+    row_pooled = [
+        ("pool", (on12, on21), PARAM_YLABELS["DelayOnset"]),
+        ("pool", (pk12, pk21), PARAM_YLABELS["DelayPeak"]),
+    ]
+    row_mean = [
+        ("pair", "DelayOnset_pair_mean", PARAM_YLABELS["DelayOnset"]),
+        ("pair", "DelayPeak_pair_mean", PARAM_YLABELS["DelayPeak"]),
+    ]
+
+    panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+    print(
+        "\nDelays by age group — pooled sides & pair mean — "
+        f"{bins_note} — Kruskal–Wallis + Dunn (Bonferroni):"
+    )
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.4), constrained_layout=True)
+        titles_keys = [
+            ("Onset pooled", "pooled_onset", row_pooled[0]),
+            ("Peak pooled", "pooled_peak", row_pooled[1]),
+            ("Onset pair mean", "DelayOnset_pair_mean", row_mean[0]),
+            ("Peak pair mean", "DelayPeak_pair_mean", row_mean[1]),
+        ]
+        for ax, (title, key, (mode, spec, ylabel)) in zip(
+            [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]], titles_keys
+        ):
+            samples = _age_group_samples(sub, mode, spec)
+            H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+            dunn_bits = [
+                f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+            ]
+            n_bits = ", ".join(
+                f"{lab} n={len(s)}" for lab, s in zip(group_labels, samples)
+            )
+            if np.isfinite(H):
+                print(
+                    f"  {key}: KW H={H:.3f}, {format_p(p)}; "
+                    f"Dunn: {dunn_bits}; {n_bits}"
+                )
+            else:
+                print(f"  {key}: KW n/a; {n_bits}")
+            _scatter_age_group_panel(
+                ax,
+                samples,
+                group_labels=group_labels,
+                x_pos=x_pos,
+                ylabel=ylabel,
+                seed_key=key,
+                dunn=dunn,
+            )
+            panel_stats.append((title, samples, H, p, dunn))
+
+        axes[0, 0].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25")
+        axes[0, 1].set_title(r"pooled $\{12,21\}$", fontsize=10, color="0.25")
+        axes[1, 0].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
+        axes[1, 1].set_title(r"pair mean $(x_1+x_2)/2$", fontsize=10, color="0.25")
+
+        legend_handles = [
+            Line2D(
+                [0], [0], marker="o", color="crimson", linestyle="None",
+                markersize=6, label="mean ± SEM",
+            ),
+            Line2D(
+                [0], [0], marker="D", color="royalblue", linestyle="None",
+                markersize=5, label="median",
+            ),
+        ]
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+            frameon=False,
+            fontsize=9,
+        )
+        fig.suptitle(
+            r"Onset / peak delay by age group"
+            "\n"
+            rf"top: pooled sides; bottom: pair mean; brackets: significant Dunn; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "37_delays_by_age_group.png")
+
+    _save_age_group_stats_figure(
+        out_dir,
+        "37b_delays_by_age_group_stats.png",
+        "Delays by age group — statistics",
+        panel_stats,
+        group_labels,
+        unit="ms",
+    )
 
 
 def plot_cca_modality_by_conductance(df: pd.DataFrame, out_dir: Path):
@@ -6904,6 +8756,239 @@ def plot_delay_cca_followup_figures(df: pd.DataFrame, out_dir: Path):
     plot_cca_cc_partial_correlation(df, out_dir)
 
 
+# ---------------------------------------------------------------------------
+# Sample size: animals / pairs vs age (Animal Count + Properties)
+# ---------------------------------------------------------------------------
+def _age_scale_from_frames(*frames: pd.DataFrame) -> tuple[float, float, float, bool, list[float]]:
+    """Union age limits / tick ages across Property pairs and Animal Count."""
+    parts = []
+    for fr in frames:
+        if fr is None or len(fr) == 0:
+            continue
+        need = {"age_num", "is_mt"}
+        if not need.issubset(fr.columns):
+            continue
+        parts.append(fr.loc[:, ["age_num", "is_mt"]].copy())
+    if not parts:
+        return 10.0, float(STRETCH_AGE_HI), float(STRETCH_AGE_HI) + MT_AGE_OFFSET, False, []
+    cat = pd.concat(parts, ignore_index=True)
+    vmin, max_age, mt_val, has_mt = age_limits(cat)
+    ticks = unique_ages_for_colorbar(cat)
+    return vmin, max_age, mt_val, has_mt, ticks
+
+
+def _included_pair_age_ticks(
+    pairs_df: pd.DataFrame | None,
+) -> tuple[list[float], bool]:
+    """
+    Colourbar tick ages = postnatal ages with ≥1 pair that is NOT Exclude?=yes.
+    Returns (numeric_age_ticks, has_mt_among_included).
+    """
+    if pairs_df is None or len(pairs_df) == 0:
+        return [], False
+    counts = pair_counts_by_age(pairs_df, include_excluded=False)
+    counts = counts.loc[counts["n_pairs"].fillna(0) > 0]
+    if len(counts) == 0:
+        return [], False
+    has_mt = bool(counts["is_mt"].any())
+    ticks = sorted(
+        {
+            float(a)
+            for a in counts.loc[~counts["is_mt"], "age_num"].dropna().unique()
+        }
+    )
+    return ticks, has_mt
+
+
+def _annotate_counts(ax, xs, ys, labels, *, dy_frac: float = 0.04):
+    """Integer labels just above each point."""
+    y0, y1 = ax.get_ylim()
+    dy = max((y1 - y0) * dy_frac, 0.15)
+    for x, y, lab in zip(xs, ys, labels):
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        ax.text(
+            float(x),
+            float(y) + dy,
+            str(int(round(float(lab)))),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="0.15",
+            zorder=4,
+        )
+
+
+def plot_animal_count_vs_age(animals: pd.DataFrame, out_dir: Path, pairs_df: pd.DataFrame | None = None):
+    """
+    Animals vs age: points sit on warped-age X; age ticks on the colourbar
+    are only ages with non-excluded pairs. Point labels = pair counts.
+    Animal zeros omitted.
+    """
+    if animals is None or len(animals) == 0:
+        print("Skipping animal count vs age: no Animal Count data.")
+        return
+    pairs = (
+        pair_counts_by_age(pairs_df, include_excluded=False)
+        if pairs_df is not None
+        else pd.DataFrame(columns=["age_num", "is_mt", "n_pairs"])
+    )
+    merged = merge_animals_and_pairs(animals, pairs)
+    d = merged.loc[merged["n_animals"].fillna(0) > 0].copy()
+    if len(d) == 0:
+        print("Skipping animal count vs age: all animal counts are zero.")
+        return
+    vmin, max_age, mt_val, _has_mt_scale, _ = _age_scale_from_frames(d, pairs_df)
+    tick_ages, has_mt_tick = _included_pair_age_ticks(pairs_df)
+    d["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(d["age_num"], d["is_mt"])
+    ]
+    colors, _, _ = age_colors(
+        d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+    )
+    print(
+        f"\nAnimal count vs age: n_ages={len(d)}, "
+        f"animals={int(d['n_animals'].sum())}, "
+        f"colourbar ticks (Exclude?=no ages)={tick_ages}"
+    )
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.4, 5.0), constrained_layout=True)
+        ax.scatter(
+            d["x_warp"],
+            d["n_animals"],
+            c=colors,
+            s=POINT_SIZE * 2.2,
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.45,
+            zorder=3,
+        )
+        ax.set_ylabel("Animals [N]")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        y_max = float(np.nanmax(d["n_animals"]))
+        ax.set_ylim(0, max(y_max * 1.22, 1.0))
+        _annotate_counts(ax, d["x_warp"], d["n_animals"], d["n_pairs"].fillna(0))
+        _style_pub_ax(ax)
+        _add_horizontal_age_colorbar_axis(
+            fig, ax,
+            vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=tick_ages, has_mt=has_mt_tick,
+        )
+        fig.suptitle(
+            "Animals used per age"
+            "\n"
+            r"numbers = electrical pairs (Exclude?=yes out); "
+            r"colour-bar ticks = ages with included pairs",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "39_animal_count_vs_age.png")
+
+
+def plot_animals_pairs_vs_age(
+    animals: pd.DataFrame,
+    pairs_df: pd.DataFrame,
+    out_dir: Path,
+):
+    """
+    Bubble plot: Y = animals (>0 only), bubble area ∝ pairs, colour/X = age.
+    Numbers on bubbles = pair counts. Colourbar ticks = ages with pairs that
+    are not Exclude?=yes.
+    """
+    if animals is None or len(animals) == 0:
+        print("Skipping animals+pairs vs age: no Animal Count data.")
+        return
+    pairs = pair_counts_by_age(pairs_df, include_excluded=False)
+    merged = merge_animals_and_pairs(animals, pairs)
+    d = merged.loc[merged["n_animals"].fillna(0) > 0].copy()
+    if len(d) == 0:
+        print("Skipping animals+pairs vs age: no positive animal counts.")
+        return
+    vmin, max_age, mt_val, _has_mt_scale, _ = _age_scale_from_frames(d, pairs_df)
+    tick_ages, has_mt_tick = _included_pair_age_ticks(pairs_df)
+    d["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(d["age_num"], d["is_mt"])
+    ]
+    colors, _, _ = age_colors(
+        d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+    )
+    n_pairs = d["n_pairs"].fillna(0).to_numpy(dtype=float)
+    n_anim = d["n_animals"].to_numpy(dtype=float)
+    pmax = float(np.nanmax(n_pairs)) if np.isfinite(n_pairs).any() else 1.0
+    pmax = max(pmax, 1.0)
+    sizes = 55.0 + 260.0 * (n_pairs / pmax)
+
+    print(
+        "\nAnimals + pairs vs age: "
+        f"n_ages={len(d)}, animals={int(np.nansum(n_anim))}, pairs={int(np.nansum(n_pairs))}; "
+        f"colourbar ticks (Exclude?=no)={tick_ages}"
+    )
+    scheme_menu = AGE_GROUP_SCHEMES.get(ACTIVE_AGE_SCHEME, {}).get("menu", AGE_GROUP_NOTE)
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+        bins_short = [
+            (_age_abbrev(lab), lo, hi, mt, col)
+            for lab, lo, hi, mt, col in AGE_ASYM_BINS
+        ]
+        draw_age_group_background(
+            ax, bins_short, vmin, max_age, mt_val, alpha=0.12, label=True
+        )
+        ax.scatter(
+            d["x_warp"],
+            n_anim,
+            c=colors,
+            s=sizes,
+            alpha=0.85,
+            edgecolors="0.2",
+            linewidths=0.5,
+            zorder=3,
+        )
+        ax.set_ylabel("Animals [N]")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_ylim(0, max(float(np.nanmax(n_anim)) * 1.28, 1.0))
+        _annotate_counts(ax, d["x_warp"], n_anim, n_pairs)
+        _style_pub_ax(ax)
+        _add_horizontal_age_colorbar_axis(
+            fig, ax,
+            vmin=vmin, max_age=max_age, mt_val=mt_val,
+            age_ticks=tick_ages, has_mt=has_mt_tick,
+        )
+        fig.suptitle(
+            r"Animals and electrical pairs vs age"
+            "\n"
+            rf"bands = {scheme_menu}; Y = animals; bubble area $\propto$ pairs; "
+            r"numbers = pairs (Exclude?=yes out)",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "40_animals_pairs_vs_age.png")
+
+
+def plot_sample_size_figures(
+    animals: pd.DataFrame | None,
+    pairs_df: pd.DataFrame,
+    out_dir: Path,
+):
+    """Figs 39–40."""
+    plot_animal_count_vs_age(animals, out_dir, pairs_df=pairs_df)
+    if animals is not None:
+        plot_animals_pairs_vs_age(animals, pairs_df, out_dir)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Plot general properties of ES pairs")
     p.add_argument(
@@ -6922,10 +9007,26 @@ def parse_args():
         action="store_true",
         help="Generate all figures without asking (same as --figures all).",
     )
+    p.add_argument(
+        "--age-groups",
+        default=None,
+        dest="age_groups",
+        help=(
+            "Age grouping scheme: 3 (10–32 / 33–50 / 50+), "
+            "4 (Juv / Adol / YAd / Dams), "
+            "or 5 (EJuv / LJuv / Adol / YAd / Dams). "
+            "If omitted, the script asks interactively."
+        ),
+    )
     return p.parse_args()
 
 
-def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
+def build_figure_catalog(
+    df: pd.DataFrame,
+    out_dir: Path,
+    animals: pd.DataFrame | None = None,
+    dcciv_baseline: dict | None = None,
+) -> list[dict]:
     """
     Registry of selectable figure jobs.
     Each item: id, label, outputs (file names), run (callable).
@@ -6945,7 +9046,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             out_dir,
             params=DAY_FIG_CELL,
             outfile="01_day_comparison_Rin_Cm_Vm.png",
-            subtitle=r"$R_{in}$, $C_m$, $V_m$",
+            subtitle=r"$R_{in}$, $C_m$, $E_m$",
         )
 
     def _asym_by_age_coupling():
@@ -7036,9 +9137,21 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "07",
-            "label": "07  Gj/CC by age group (pooled + pair mean)",
-            "outputs": ["07_Gj_CC_by_age_group.png"],
+            "label": "07  Gj/CC by age (stars; stats → 07b)",
+            "outputs": [
+                "07_Gj_CC_by_age_group.png",
+                "07b_Gj_CC_by_age_group_stats.png",
+            ],
             "run": lambda: plot_coupling_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "07c",
+            "label": "07c Pooled Gj/CC/Rin/Cm/Em by age (stars; stats → 07d)",
+            "outputs": [
+                "07c_params_by_age_group_pooled.png",
+                "07d_params_by_age_group_pooled_stats.png",
+            ],
+            "run": lambda: plot_params_by_age_groups_pooled(df, out_dir),
         },
         {
             "id": "08",
@@ -7057,6 +9170,12 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "label": "10  Gj/CC vs age continuous (Spearman + LOWESS)",
             "outputs": ["10_Gj_CC_vs_age_continuous.png"],
             "run": lambda: plot_coupling_vs_age_continuous(df, out_dir),
+        },
+        {
+            "id": "10b",
+            "label": "10b Rin/Cm/Em vs age continuous (Spearman + LOWESS)",
+            "outputs": ["10b_Rin_Cm_Em_vs_age_continuous.png"],
+            "run": lambda: plot_cell_params_vs_age_continuous(df, out_dir),
         },
         {
             "id": "11",
@@ -7092,6 +9211,15 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "run": lambda: plot_day_by_age_pooled(df, out_dir),
         },
         {
+            "id": "14c",
+            "label": "14c Day×age Rin/Cm/Em/τ (pooled) + stats → 14d",
+            "outputs": [
+                "14c_day_by_age_Rin_Cm_Em_Tau.png",
+                "14d_day_by_age_Rin_Cm_Em_Tau_stats.png",
+            ],
+            "run": lambda: plot_day_by_age_pooled_cell_params(df, out_dir),
+        },
+        {
             "id": "15",
             "label": "15  CCa vs CC/Gj (directed + means)",
             "outputs": [
@@ -7117,12 +9245,9 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "18",
-            "label": "18  CCa + delays vs age (gray points)",
-            "outputs": [
-                "18_CCa_delays_vs_age.png",
-                "19_CCa_vs_age.png",
-            ],
-            "run": lambda: plot_cca_delays_vs_age(df, out_dir),
+            "label": "18  Delays vs age (gray points)",
+            "outputs": ["18_delays_vs_age.png"],
+            "run": lambda: plot_delays_vs_age_gray(df, out_dir),
         },
         {
             "id": "15-18",
@@ -7133,18 +9258,18 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
                 "16_delays_vs_CCa_CC_Gj.png",
                 "16b_delays_vs_CCa_CC_Gj_pair_mean.png",
                 "17_CCa_delays_vs_distance.png",
-                "18_CCa_delays_vs_age.png",
+                "18_delays_vs_age.png",
                 "19_CCa_vs_age.png",
             ],
             "run": lambda: plot_spike_transmission_figures(df, out_dir),
         },
         {
             "id": "19",
-            "label": "19  CCa+delays vs age + age-group KW",
+            "label": "19  CCa vs age + age-group (stars; stats → 19c)",
             "outputs": [
-                "18_CCa_delays_vs_age.png",
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
             ],
             "run": lambda: plot_cca_vs_age(df, out_dir),
         },
@@ -7175,7 +9300,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
         },
         {
             "id": "33",
-            "label": "33  CCa by day for age P10–32 (+ stats)",
+            "label": "33  CCa by day for P10–32 (+ stats)",
             "outputs": ["33_CCa_by_day_P10_32.png"],
             "run": lambda: plot_cca_by_day_p10_32(df, out_dir),
         },
@@ -7185,6 +9310,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "outputs": [
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
                 "20_CCa_coverage_counts.png",
                 "20b_CCa_coverage_percent_age_distance.png",
                 "20c_CCa_coverage_percent_by_CC_directed.png",
@@ -7198,6 +9324,7 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "outputs": [
                 "19_CCa_vs_age.png",
                 "19b_CCa_by_age_group.png",
+                "19c_CCa_by_age_group_stats.png",
                 "20_CCa_coverage_counts.png",
                 "20b_CCa_coverage_percent_age_distance.png",
                 "20c_CCa_coverage_percent_by_CC_directed.png",
@@ -7316,6 +9443,84 @@ def build_figure_catalog(df: pd.DataFrame, out_dir: Path) -> list[dict]:
             "outputs": ["36_delays_by_Rin_Tau_quartiles.png"],
             "run": lambda: plot_delays_by_rin_tau_quartiles(df, out_dir),
         },
+        {
+            "id": "37",
+            "label": "37  Delays by age (EJuv / LJuv / Adol / YAd / Dams)",
+            "outputs": [
+                "37_delays_by_age_group.png",
+                "37b_delays_by_age_group_stats.png",
+            ],
+            "run": lambda: plot_delays_by_age_groups(df, out_dir),
+        },
+        {
+            "id": "39",
+            "label": "39  Animals vs age (Animal Count, age colour)",
+            "outputs": ["39_animal_count_vs_age.png"],
+            "run": lambda: plot_animal_count_vs_age(animals, out_dir, pairs_df=df),
+        },
+        {
+            "id": "40",
+            "label": "40  Animals × pairs vs age (bubble; age colourbar)",
+            "outputs": ["40_animals_pairs_vs_age.png"],
+            "run": lambda: plot_animals_pairs_vs_age(animals, df, out_dir)
+            if animals is not None
+            else print("Skipping 40: no Animal Count sheet."),
+        },
+        {
+            "id": "39-40",
+            "label": "39–40  Sample size (animals + pairs vs age)",
+            "outputs": [
+                "39_animal_count_vs_age.png",
+                "40_animals_pairs_vs_age.png",
+            ],
+            "run": lambda: plot_sample_size_figures(animals, df, out_dir),
+        },
+        {
+            "id": "41",
+            "label": "41  dCCIV baseline vs time (mean±SEM + omnibus/Wilcoxon)",
+            "outputs": [
+                "41_dcciv_baseline_vs_time.png",
+                "41b_dcciv_baseline_vs_time_stats.png",
+            ],
+            "run": (
+                (lambda: plot_dcciv_baseline_vs_time(dcciv_baseline, out_dir))
+                if dcciv_baseline is not None
+                else (
+                    lambda: print(
+                        "Skipping 41: no dCCIV baseline sheet "
+                        "(expected sheet name like 'dCCIV baseline')."
+                    )
+                )
+            ),
+        },
+        {
+            "id": "42",
+            "label": (
+                "42  Detail 6 age groups W2/W3 "
+                "(CC/Gj · Rin/Em · Cm/τ; Days1–2 + Day1)"
+            ),
+            "outputs": [
+                "42_params_by_age_fine6_days12.png",
+                "42b_params_by_age_fine6_days12_stats.png",
+                "42c_params_by_age_fine6_day1.png",
+                "42d_params_by_age_fine6_day1_stats.png",
+            ],
+            "run": lambda: plot_detail_fine6(df, out_dir),
+        },
+        {
+            "id": "43",
+            "label": (
+                "43  Pair-mean CC/Gj × 6 age groups W2/W3 "
+                "(Days1–2 + Day1; fast)"
+            ),
+            "outputs": [
+                "43_CC_Gj_pairmean_by_age_fine6_days12.png",
+                "43b_CC_Gj_pairmean_by_age_fine6_days12_stats.png",
+                "43c_CC_Gj_pairmean_by_age_fine6_day1.png",
+                "43d_CC_Gj_pairmean_by_age_fine6_day1_stats.png",
+            ],
+            "run": lambda: plot_detail_fine6_coupling_pairmean(df, out_dir),
+        },
     ]
 
 
@@ -7335,7 +9540,8 @@ def _ask_figures_tk(catalog: list[dict], out_dir: Path) -> list[str] | None:
     ttk.Label(
         frm,
         text=(
-            "Choose figures to (re)generate.\n"
+            "Choose figures to (re)generate (none selected at start).\n"
+            "Use “Select all” or tick only what you need.\n"
             f"Output folder: {out_dir}\n"
             "Existing files with the same name will be overwritten."
         ),
@@ -7357,7 +9563,8 @@ def _ask_figures_tk(catalog: list[dict], out_dir: Path) -> list[str] | None:
     for job in catalog:
         exists = any((out_dir / f).is_file() for f in job["outputs"])
         mark = "  [exists — will overwrite]" if exists else ""
-        var = tk.BooleanVar(value=True)
+        # Start with nothing checked; use "Select all" or pick manually
+        var = tk.BooleanVar(value=False)
         vars_by_id[job["id"]] = var
         ttk.Checkbutton(
             inner, text=f"{job['label']}{mark}", variable=var
@@ -7454,11 +9661,18 @@ def parse_figure_ids(catalog: list[dict], figures_arg: str) -> list[str]:
 def main():
     args = parse_args()
     folder = ask_data_folder(args.folder)
+    # Age grouping must be chosen before any age-group figure runs
+    scheme = ask_age_group_scheme(getattr(args, "age_groups", None))
+    if scheme is None:
+        print("Cancelled — no figures generated.")
+        return
     excel_path = find_excel(folder)
     out_dir = folder / FIGURES_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Reading: {excel_path}")
     df = load_and_prepare(excel_path)
+    animals = load_animal_counts(excel_path)
+    dcciv_baseline = load_dcciv_baseline(excel_path)
     print(f"Rows kept (Gj and/or Distance and/or age): {len(df)}")
     print(f"  with Gj both sides: {int(df['has_gj'].sum())}")
     print(f"Days present: {sorted(df['day'].dropna().unique().tolist())}")
@@ -7485,7 +9699,9 @@ def main():
         f"(Day 3 omitted from asymmetry/AI/coupling: n={n_day3})"
     )
 
-    catalog = build_figure_catalog(df, out_dir)
+    catalog = build_figure_catalog(
+        df, out_dir, animals=animals, dcciv_baseline=dcciv_baseline
+    )
 
     if args.all_figures or (args.figures and args.figures.strip().lower() == "all"):
         selected = [j["id"] for j in catalog]
