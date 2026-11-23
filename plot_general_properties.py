@@ -132,7 +132,7 @@ DCCIV_BASELINE_METRICS: list[tuple[str, tuple[str, ...], str]] = [
             "v_rest_ch0",
             "vm_ch0",
         ),
-        r"$V_{m,0}$ (norm)",
+        r"$E_{m,0}$ (norm)",
     ),
     (
         "Vm2",
@@ -143,7 +143,7 @@ DCCIV_BASELINE_METRICS: list[tuple[str, tuple[str, ...], str]] = [
             "v_rest_ch2",
             "vm_ch2",
         ),
-        r"$V_{m,2}$ (norm)",
+        r"$E_{m,2}$ (norm)",
     ),
 ]
 # Asymmetry / AI / coupling / coverage: Days 1–2 only. Day 3 stays on the
@@ -175,7 +175,7 @@ PARAM_MATH = {
     "CC": r"$CC$",
     "Rin": r"$R_{in}$",
     "Cm": r"$C_{m}$",
-    "Vm": r"$V_{m}$",
+    "Vm": r"$E_{m}$",
     "CCa": r"$CC_{a}$",
     "DelayOnset": r"$t_{onset}$",
     "DelayPeak": r"$t_{peak}$",
@@ -186,7 +186,7 @@ PARAM_YLABELS = {
     "CC": r"$CC$",
     "Rin": r"$R_{in}$ [M$\Omega$]",
     "Cm": r"$C_{m}$ [pF]",
-    "Vm": r"$V_{m}$ [mV]",
+    "Vm": r"$E_{m}$ [mV]",
     "CCa": r"$CC_{a}$ (amp. ratio)",
     "DelayOnset": r"onset delay [ms]",
     "DelayPeak": r"peak delay [ms]",
@@ -220,7 +220,7 @@ STAT_PARAMS = [
 ]
 
 AI_FORMULA = r"$AI=(max-min)/(max+min)$"
-AI_FORMULA_VM_NOTE = r"for $V_m$: $AI$ from $|V_m|$"
+AI_FORMULA_VM_NOTE = r"for $E_m$: $AI$ from $|E_m|$"
 # AI=0 equal; AI≈0.33 ≈ 2×; 0–0.33 = up to ~2-fold
 PAIR_MEAN_FORMULA = r"$x_{pair}=(x_1+x_2)/2$"
 POOL_FORMULA = r"pool $=\{x_1,x_2\}$ for each pair"
@@ -459,7 +459,7 @@ AI_METRICS = [
     ("AI_CC", r"AI $CC$"),
     ("AI_Rin", r"AI $R_{in}$"),
     ("AI_Cm", r"AI $C_{m}$"),
-    ("AI_Vm", r"AI $|V_{m}|$"),
+    ("AI_Vm", r"AI $|E_{m}|$"),
 ]
 
 
@@ -2223,7 +2223,7 @@ def plot_ai_vs_age(df: pd.DataFrame, out_dir: Path):
         row2 = [
             ("AI_Rin", r"AI $R_{in}$"),
             ("AI_Cm", r"AI $C_{m}$"),
-            ("AI_Vm", r"AI $V_{m}$"),
+            ("AI_Vm", r"AI $E_{m}$"),
         ]
 
         def _ai_age_panel(ax, col: str, ylabel: str):
@@ -2486,7 +2486,7 @@ def plot_ai_by_age_groups(df: pd.DataFrame, out_dir: Path):
         ("AI_CC", r"AI $CC$"),
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $|V_{m}|$"),
+        ("AI_Vm", r"AI $|E_{m}|$"),
     ]
 
     panel_stats: dict[str, dict] = {}
@@ -3592,7 +3592,7 @@ def plot_params_by_age_groups_pooled(df: pd.DataFrame, out_dir: Path):
             fontsize=9,
         )
         fig.suptitle(
-            r"$G_j$, $CC$, $R_{in}$, $C_m$, $V_m$ by age group (pooled sides)"
+            r"$G_j$, $CC$, $R_{in}$, $C_m$, $E_m$ by age group (pooled sides)"
             "\n"
             rf"all directed values (not pair-averaged); brackets: significant Dunn; {POOL_NOTE}",
             fontsize=11,
@@ -3603,7 +3603,7 @@ def plot_params_by_age_groups_pooled(df: pd.DataFrame, out_dir: Path):
     _save_age_group_stats_figure(
         out_dir,
         "07d_params_by_age_group_pooled_stats.png",
-        r"Pooled $G_j$/$CC$/$R_{in}$/$C_m$/$V_m$ by age — statistics",
+        r"Pooled $G_j$/$CC$/$R_{in}$/$C_m$/$E_m$ by age — statistics",
         panel_stats,
         group_labels,
     )
@@ -4507,7 +4507,7 @@ def plot_ai_histograms(df: pd.DataFrame, out_dir: Path):
     row2 = [
         ("AI_Rin", r"AI $R_{in}$"),
         ("AI_Cm", r"AI $C_{m}$"),
-        ("AI_Vm", r"AI $|V_{m}|$"),
+        ("AI_Vm", r"AI $|E_{m}|$"),
     ]
     hist_color = "0.55"  # gray (no age encoding on these plots)
 
@@ -8507,7 +8507,7 @@ def build_figure_catalog(
             out_dir,
             params=DAY_FIG_CELL,
             outfile="01_day_comparison_Rin_Cm_Vm.png",
-            subtitle=r"$R_{in}$, $C_m$, $V_m$",
+            subtitle=r"$R_{in}$, $C_m$, $E_m$",
         )
 
     def _asym_by_age_coupling():
