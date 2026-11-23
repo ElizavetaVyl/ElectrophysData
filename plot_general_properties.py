@@ -229,7 +229,7 @@ TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else M
 # Age-group schemes selectable at startup (or via --age-groups).
 # Convention: age 50 stays in the 33–50 bin; young adult = ages >50 ≤200.
 # Scheme 3 "adult" is open-ended age>50 and includes dams/MT.
-# Plot ticks / picker short labels: EJuv, LJuv, Adol, YAd, dams (scheme 5).
+# Plot ticks / picker short labels: EJuv, LJuv, Adol, YAd, Dams (scheme 5).
 AGE_GROUP_SCHEMES: dict[str, dict] = {
     "3": {
         "menu": "Juv / Adol / Adult",
@@ -237,7 +237,7 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
         "bins": [
             ("juvenile", 10, 32, False, "#FB8C00"),
             ("adolescent", 33, 50, False, "#D84315"),
-            ("adult", 50, None, True, "#2E0854"),  # age >50 + dams/MT
+            ("adult", 50, None, True, "#2E0854"),  # age >50 + Dams/MT
         ],
         "abbrev": {
             "juvenile": "Juv",
@@ -246,29 +246,29 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
         },
     },
     "4": {
-        "menu": "Juv / Adol / YAd / dams",
+        "menu": "Juv / Adol / YAd / Dams",
         "note": (
             "juvenile P10–32 / adolescent P33–50 / "
-            "young adult P50–200 / dams"
+            "young adult P50–200 / Dams"
         ),
         "bins": [
             ("juvenile", 10, 32, False, "#FB8C00"),
             ("adolescent", 33, 50, False, "#D84315"),
             ("young adult", 51, 200, False, "#8E24AA"),
-            ("dams", None, None, True, "#2E0854"),
+            ("Dams", None, None, True, "#2E0854"),
         ],
         "abbrev": {
             "juvenile": "Juv",
             "adolescent": "Adol",
             "young adult": "YAd",
-            "dams": "dams",
+            "Dams": "Dams",
         },
     },
     "5": {
-        "menu": "EJuv / LJuv / Adol / YAd / dams",
+        "menu": "EJuv / LJuv / Adol / YAd / Dams",
         "note": (
             "early juvenile P10–20 / late juvenile P21–32 / adolescent P33–50 / "
-            "young adult P50–200 / dams"
+            "young adult P50–200 / Dams"
         ),
         "bins": [
             # warmer / pinker separation so the three young bands read apart on backgrounds
@@ -276,14 +276,14 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
             ("late juvenile", 21, 32, False, "#FB8C00"),  # orange
             ("adolescent", 33, 50, False, "#EC407A"),  # rose / pink
             ("young adult", 51, 200, False, "#8E24AA"),
-            ("dams", None, None, True, "#2E0854"),
+            ("Dams", None, None, True, "#2E0854"),
         ],
         "abbrev": {
             "early juvenile": "EJuv",
             "late juvenile": "LJuv",
             "adolescent": "Adol",
             "young adult": "YAd",
-            "dams": "dams",
+            "Dams": "Dams",
         },
     },
 }
@@ -8474,8 +8474,8 @@ def parse_args():
         dest="age_groups",
         help=(
             "Age grouping scheme: 3 (10–32 / 33–50 / 50+), "
-            "4 (10–32 / 33–50 / 50–200 / dams), "
-            "or 5 (EJuv / LJuv / Adol / YAd / dams). "
+            "4 (Juv / Adol / YAd / Dams), "
+            "or 5 (EJuv / LJuv / Adol / YAd / Dams). "
             "If omitted, the script asks interactively."
         ),
     )
@@ -8891,7 +8891,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (EJuv / LJuv / Adol / YAd / dams)",
+            "label": "37  Delays by age (EJuv / LJuv / Adol / YAd / Dams)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
