@@ -3716,6 +3716,110 @@ def plot_coupling_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
         savefig(fig, out_dir, "10_Gj_CC_vs_age_continuous.png")
 
 
+def plot_cell_params_vs_age_continuous(df: pd.DataFrame, out_dir: Path):
+    """
+    Pair-mean Rin, Cm, Em vs warped continuous age (no age-group bins).
+    Same style as fig 10: Spearman ρ + LOWESS.
+    """
+    sub = analysis_pool(df)
+    vmin, max_age, mt_val, has_mt = age_limits(sub)
+    age_ticks = unique_ages_for_colorbar(sub)
+    sub = sub.copy()
+    sub["x_warp"] = [
+        _warped_age_x(a, bool(mt), vmin, max_age, mt_val)
+        for a, mt in zip(sub["age_num"], sub["is_mt"])
+    ]
+    panels = [
+        ("Rin_pair_mean", PARAM_YLABELS["Rin"] + r" pair mean"),
+        ("Cm_pair_mean", PARAM_YLABELS["Cm"] + r" pair mean"),
+        ("Vm_pair_mean", PARAM_YLABELS["Vm"] + r" pair mean"),
+    ]
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), constrained_layout=True)
+        print("\nPair-mean Rin / Cm / Em vs warped age (Spearman + LOWESS):")
+        for ax, (col, ylabel) in zip(axes, panels):
+            if col not in sub.columns:
+                ax.set_visible(False)
+                continue
+            d = sub[sub[col].notna()].copy()
+            colors, _, _ = age_colors(
+                d["age_num"].to_numpy(), d["is_mt"].to_numpy(), vmin, max_age, mt_val
+            )
+            ax.scatter(
+                d["x_warp"],
+                d[col],
+                c=colors,
+                s=POINT_SIZE,
+                alpha=POINT_ALPHA,
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=2,
+            )
+            if len(d) >= 5:
+                xs, ys = lowess_smooth(
+                    d["x_warp"].to_numpy(dtype=float),
+                    d[col].to_numpy(dtype=float),
+                    frac=0.45,
+                )
+                ax.plot(xs, ys, color="crimson", lw=1.6, zorder=3, label="LOWESS")
+            if len(d) >= 3:
+                age_for_rank = np.where(
+                    d["is_mt"].to_numpy(),
+                    mt_val,
+                    d["age_num"].to_numpy(dtype=float),
+                )
+                rho, p = stats.spearmanr(age_for_rank, d[col].to_numpy(dtype=float))
+                ax.text(
+                    0.04,
+                    0.96,
+                    f"Spearman ρ={rho:.2f}\n{format_p(p)}\n$n$={len(d)}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color="0.25",
+                )
+                print(f"  {col}: ρ={rho:.3f}, {format_p(p)}, n={len(d)}")
+            else:
+                print(f"  {col}: n={len(d)} (too few)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlabel("Age [postnatal days]")
+            _set_warped_age_ticks(ax, vmin, max_age, mt_val, age_ticks, has_mt)
+            _style_pub_ax(ax)
+
+        handles = [
+            Line2D([0], [0], color="crimson", lw=1.6, label="LOWESS"),
+        ]
+        fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
+        cbar = add_age_colorbar(
+            fig,
+            list(axes),
+            vmin=vmin,
+            max_age=max_age,
+            mt_val=mt_val,
+            age_ticks=age_ticks,
+            has_mt=has_mt,
+        )
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.tick_params(labelsize=8, length=3, width=0.7)
+        cbar.set_label("Age [postnatal days]", fontsize=9)
+        fig.suptitle(
+            r"Pair-mean $R_{in}$, $C_m$, $E_m$ vs age (continuous)"
+            "\n"
+            rf"Spearman ρ = rank correlation (not a fit slope); crimson: LOWESS; {POOL_NOTE}",
+            fontsize=11,
+            color="0.15",
+        )
+        savefig(fig, out_dir, "10b_Rin_Cm_Em_vs_age_continuous.png")
+
+
 # ---------------------------------------------------------------------------
 # Coverage: Distance + age histograms (with / without Exclude?=yes)
 # ---------------------------------------------------------------------------
@@ -8632,7 +8736,7 @@ def build_figure_catalog(
         },
         {
             "id": "07c",
-            "label": "07c Pooled Gj/CC/Rin/Cm/Vm by age (stars; stats → 07d)",
+            "label": "07c Pooled Gj/CC/Rin/Cm/Em by age (stars; stats → 07d)",
             "outputs": [
                 "07c_params_by_age_group_pooled.png",
                 "07d_params_by_age_group_pooled_stats.png",
@@ -8656,6 +8760,12 @@ def build_figure_catalog(
             "label": "10  Gj/CC vs age continuous (Spearman + LOWESS)",
             "outputs": ["10_Gj_CC_vs_age_continuous.png"],
             "run": lambda: plot_coupling_vs_age_continuous(df, out_dir),
+        },
+        {
+            "id": "10b",
+            "label": "10b Rin/Cm/Em vs age continuous (Spearman + LOWESS)",
+            "outputs": ["10b_Rin_Cm_Em_vs_age_continuous.png"],
+            "run": lambda: plot_cell_params_vs_age_continuous(df, out_dir),
         },
         {
             "id": "11",
