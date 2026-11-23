@@ -5435,6 +5435,134 @@ def plot_detail_fine6(df: pd.DataFrame, out_dir: Path):
     )
 
 
+def plot_coupling_pairmean_by_age_fine6(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    days: set[int],
+    outfile_overview: str,
+    outfile_stats: str,
+    day_note: str,
+):
+    """
+    Fast companion to fig 42: pair-mean CC and Gj only, 6 age groups (W2/W3).
+    Layout: 1×2 (CC | Gj). Separate catalog entry so it rebuilds quickly.
+    """
+    sub = _fine6_day_subset(df, days)
+    with temporary_age_scheme(AGE_FINE6_BINS, AGE_FINE6_ABBREV, AGE_FINE6_NOTE):
+        group_labels = [b[0] for b in AGE_ASYM_BINS]
+        x_pos = {lab: i + 1 for i, lab in enumerate(group_labels)}
+        panels_all = [
+            ("pair", "CC_pair_mean", PARAM_YLABELS["CC"] + r" pair mean", "CC pair mean"),
+            ("pair", "Gj_pair_mean", PARAM_YLABELS["Gj"] + r" pair mean", "Gj pair mean"),
+        ]
+        print(
+            f"\nPair-mean CC / Gj by 6 age groups ({day_note}; W2/W3) — "
+            "Kruskal–Wallis + Dunn (Bonferroni):"
+        )
+        panel_stats: list[tuple[str, list[np.ndarray], float, float, list]] = []
+        with plt.rc_context(
+            {
+                "font.family": "sans-serif",
+                "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+                "axes.unicode_minus": False,
+            }
+        ):
+            fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.2), constrained_layout=True)
+            for ax, (mode, spec, ylabel, title) in zip(axes, panels_all):
+                samples = _age_group_samples(sub, mode, spec)
+                H, p, dunn = _kw_dunn_for_samples(samples, group_labels)
+                dunn_bits = [
+                    f"{_short_age_pair(a, b)} {format_p(pv)}" for a, b, pv in dunn
+                ]
+                n_bits = ", ".join(
+                    f"{_age_abbrev(lab)} n={len(s)}"
+                    for lab, s in zip(group_labels, samples)
+                )
+                if np.isfinite(H):
+                    print(
+                        f"  {title}: KW H={H:.3f}, {format_p(p)}; "
+                        f"Dunn: {dunn_bits}; {n_bits}"
+                    )
+                else:
+                    print(f"  {title}: KW n/a; {n_bits}")
+                _scatter_age_group_panel(
+                    ax,
+                    samples,
+                    group_labels=group_labels,
+                    x_pos=x_pos,
+                    ylabel=ylabel,
+                    seed_key=f"fine6-pair-{outfile_overview}-{title}",
+                    dunn=dunn,
+                )
+                panel_stats.append((title, samples, H, p, dunn))
+
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="crimson",
+                    linestyle="None",
+                    markersize=6,
+                    label="mean ± SEM",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="D",
+                    color="royalblue",
+                    linestyle="None",
+                    markersize=5,
+                    label="median",
+                ),
+            ]
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.55),
+                frameon=False,
+                fontsize=9,
+            )
+            fig.suptitle(
+                rf"Pair-mean $CC$ and $G_j$ by age "
+                rf"(6 groups; {PAIR_MEAN_FORMULA}; {day_note})"
+                "\n"
+                rf"{AGE_FINE6_NOTE}; brackets: significant Dunn",
+                fontsize=11,
+                color="0.15",
+            )
+            savefig(fig, out_dir, outfile_overview)
+
+        _save_age_group_stats_figure(
+            out_dir,
+            outfile_stats,
+            rf"6-group pair-mean $CC$/$G_j$ stats (W2/W3; {day_note})",
+            panel_stats,
+            group_labels,
+        )
+
+
+def plot_detail_fine6_coupling_pairmean(df: pd.DataFrame, out_dir: Path):
+    """Fig 43: pair-mean CC/Gj, 6 age groups — Days 1–2 and Day 1 only."""
+    plot_coupling_pairmean_by_age_fine6(
+        df,
+        out_dir,
+        days={1, 2},
+        outfile_overview="43_CC_Gj_pairmean_by_age_fine6_days12.png",
+        outfile_stats="43b_CC_Gj_pairmean_by_age_fine6_days12_stats.png",
+        day_note="Days 1–2 pooled",
+    )
+    plot_coupling_pairmean_by_age_fine6(
+        df,
+        out_dir,
+        days={1},
+        outfile_overview="43c_CC_Gj_pairmean_by_age_fine6_day1.png",
+        outfile_stats="43d_CC_Gj_pairmean_by_age_fine6_day1_stats.png",
+        day_note="Day 1 only",
+    )
+
+
 def plot_day_by_age(df: pd.DataFrame, out_dir: Path):
     """Run Day×age analysis for pair means and for pooled sides."""
     plot_day_by_age_pair_mean(df, out_dir)
@@ -9378,6 +9506,20 @@ def build_figure_catalog(
                 "42d_params_by_age_fine6_day1_stats.png",
             ],
             "run": lambda: plot_detail_fine6(df, out_dir),
+        },
+        {
+            "id": "43",
+            "label": (
+                "43  Pair-mean CC/Gj × 6 age groups W2/W3 "
+                "(Days1–2 + Day1; fast)"
+            ),
+            "outputs": [
+                "43_CC_Gj_pairmean_by_age_fine6_days12.png",
+                "43b_CC_Gj_pairmean_by_age_fine6_days12_stats.png",
+                "43c_CC_Gj_pairmean_by_age_fine6_day1.png",
+                "43d_CC_Gj_pairmean_by_age_fine6_day1_stats.png",
+            ],
+            "run": lambda: plot_detail_fine6_coupling_pairmean(df, out_dir),
         },
     ]
 
