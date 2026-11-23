@@ -4681,11 +4681,19 @@ def _run_day_by_age_mode(
                 hi=hi,
                 include_mt=include_mt,
             )
-            res = (
-                compare_two_groups(v1, v2)
-                if len(v1) >= 1 and len(v2) >= 1
-                else _empty_compare(len(v1), len(v2))
-            )
+            if len(v1) >= 1 and len(v2) >= 1:
+                res = compare_two_groups(v1, v2)
+            else:
+                # Still report mean±SEM for whichever day has data
+                res = _empty_compare(len(v1), len(v2))
+                if len(v1) >= 1:
+                    m1, s1, med1 = _mean_sem_median(v1)
+                    res["mean1"], res["sem1"], res["median1"] = m1, s1, med1
+                    res["n1"] = int(len(v1))
+                if len(v2) >= 1:
+                    m2, s2, med2 = _mean_sem_median(v2)
+                    res["mean2"], res["sem2"], res["median2"] = m2, s2, med2
+                    res["n2"] = int(len(v2))
             res["p_adj"] = bonferroni_adjust(res.get("p"), n_age)
             res["age"] = label
             day_results.append(res)
@@ -4943,12 +4951,15 @@ def _run_day_by_age_mode(
             if name not in day_vs:
                 continue
             lines = [rf"{PARAM_MATH[name]} {mode_tag}", ""]
-            lines.append(f"Day1 vs Day2 (Bonferroni×{n_age})")
+            lines.append(
+                f"Per age group — mean±SEM (shown even if one day is missing)"
+            )
+            lines.append(f"Day1 vs Day2 test (Bonferroni×{n_age}) when both days present")
             for res in day_vs[name]:
                 lines.append(
                     f"  {_age_abbrev(res['age'])}: n={res['n1']}/{res['n2']}"
                 )
-                # 95% CI of the mean for each day
+                # Always list available days (including single-day groups)
                 for tag, mean_k, sem_k, n_k in (
                     ("D1", "mean1", "sem1", "n1"),
                     ("D2", "mean2", "sem2", "n2"),
@@ -4963,16 +4974,28 @@ def _run_day_by_age_mode(
                             f"    {tag}: mean±SEM={m:.4g}±{sem:.4g}; "
                             f"95% CI [{lo:.4g}, {hi:.4g}]"
                         )
-                    elif n > 0 and np.isfinite(m):
-                        lines.append(f"    {tag}: mean={m:.4g} (n={n})")
-                lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
-                lines.append(
-                    f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
-                )
+                    elif n == 1 and np.isfinite(m):
+                        lines.append(f"    {tag}: mean={m:.4g} (n=1)")
+                    elif n == 0:
+                        lines.append(f"    {tag}: n=0")
+                if res.get("test") in (None, "n/a") or not np.isfinite(
+                    res.get("p", np.nan)
+                ):
+                    lines.append("    Day1–Day2 test: n/a (need both days)")
+                else:
+                    lines.append(f"    {res['test']}: {format_p(res.get('p'))}")
+                    lines.append(
+                        f"    adj {format_p(res['p_adj'])} {p_to_stars(res['p_adj'])}"
+                    )
             lines.append("")
             for day in (1, 2):
                 info = age_kw[name][day]
                 lines.append(f"Age KW Day{day}: {format_p(info['p'])}")
+                lines.extend(
+                    _group_summary_lines(
+                        info.get("samples") or [], group_labels
+                    )
+                )
                 dunn = info.get("dunn") or []
                 lines.extend(_dunn_stats_lines(dunn))
                 lines.append("")
@@ -4983,16 +5006,18 @@ def _run_day_by_age_mode(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=7.0,
+                fontsize=6.2,
                 family="monospace",
                 color="0.15",
-                linespacing=1.2,
+                linespacing=1.12,
             )
+        fig.set_size_inches(16.5, 7.2)
         fig.suptitle(
             f"Day × age statistics ({title_mode}; Days 1–2 only)\n"
             f"Day within age: Shapiro→Welch or Mann–Whitney, "
             f"Bonferroni across {n_age} ages; "
-            "Age within day: Kruskal–Wallis + Dunn (Bonferroni); 95% CI of the mean",
+            "Age within day: Kruskal–Wallis + Dunn (Bonferroni); "
+            "mean±SEM for every age×day with data",
             fontsize=11,
             color="0.15",
         )
