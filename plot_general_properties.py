@@ -229,9 +229,10 @@ TEST_RULE = r"Shapiro ($\alpha=0.05$) $\rightarrow$ Welch if both normal, else M
 # Age-group schemes selectable at startup (or via --age-groups).
 # Convention: age 50 stays in the 33–50 bin; young adult = ages >50 ≤200.
 # Scheme 3 "adult" is open-ended age>50 and includes dams/MT.
+# Plot ticks / picker short labels: EJuv, LJuv, Adol, YAd, dams (scheme 5).
 AGE_GROUP_SCHEMES: dict[str, dict] = {
     "3": {
-        "menu": "10–32, 33–50, 50+",
+        "menu": "Juv / Adol / Adult",
         "note": "juvenile P10–32 / adolescent P33–50 / adult P50+",
         "bins": [
             ("juvenile", 10, 32, False, "#FB8C00"),
@@ -239,13 +240,13 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
             ("adult", 50, None, True, "#2E0854"),  # age >50 + dams/MT
         ],
         "abbrev": {
-            "juvenile": "juv",
-            "adolescent": "adol",
-            "adult": "adult",
+            "juvenile": "Juv",
+            "adolescent": "Adol",
+            "adult": "Adult",
         },
     },
     "4": {
-        "menu": "10–32, 33–50, 50–200, dams",
+        "menu": "Juv / Adol / YAd / dams",
         "note": (
             "juvenile P10–32 / adolescent P33–50 / "
             "young adult P50–200 / dams"
@@ -257,14 +258,14 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
             ("dams", None, None, True, "#2E0854"),
         ],
         "abbrev": {
-            "juvenile": "juv",
-            "adolescent": "adol",
-            "young adult": "YA",
+            "juvenile": "Juv",
+            "adolescent": "Adol",
+            "young adult": "YAd",
             "dams": "dams",
         },
     },
     "5": {
-        "menu": "10–20, 21–32, 33–50, 50–200, dams",
+        "menu": "EJuv / LJuv / Adol / YAd / dams",
         "note": (
             "early juvenile P10–20 / late juvenile P21–32 / adolescent P33–50 / "
             "young adult P50–200 / dams"
@@ -278,10 +279,10 @@ AGE_GROUP_SCHEMES: dict[str, dict] = {
             ("dams", None, None, True, "#2E0854"),
         ],
         "abbrev": {
-            "early juvenile": "EJ",
-            "late juvenile": "LJ",
-            "adolescent": "adol",
-            "young adult": "YA",
+            "early juvenile": "EJuv",
+            "late juvenile": "LJuv",
+            "adolescent": "Adol",
+            "young adult": "YAd",
             "dams": "dams",
         },
     },
@@ -408,10 +409,11 @@ def _ask_age_group_scheme_tk() -> str | None:
     ).pack(anchor=tk.W, pady=(0, 8))
     var = tk.StringVar(value="")  # force an explicit choice
     for key in ("3", "4", "5"):
+        menu = AGE_GROUP_SCHEMES[key]["menu"]
         note = AGE_GROUP_SCHEMES[key]["note"]
         ttk.Radiobutton(
             frm,
-            text=f"{key}:  {AGE_GROUP_SCHEMES[key]['menu']}\n     ({note})",
+            text=f"{key}:  {menu}\n     {note}",
             variable=var,
             value=key,
         ).pack(anchor=tk.W, pady=4)
@@ -2337,15 +2339,26 @@ def _short_age_pair(a: str, b: str) -> str:
     return f"{_short(a)} vs {_short(b)}"
 
 
+def _age_abbrev(lab: str) -> str:
+    """Short tick / legend label for an age-group full name."""
+    return AGE_GROUP_ABBREV.get(lab, lab)
+
+
 def _set_age_group_xticks(ax, group_labels, *, x_pos=None, fontsize: float = 7.5):
-    """X ticks for age-group categorical panels (rotate long stage names)."""
+    """X ticks for age-group panels (short abbrev labels: EJuv, LJuv, …)."""
     if x_pos is None:
         xs = list(range(1, len(group_labels) + 1))
     else:
         xs = [x_pos[lab] for lab in group_labels]
+    tick_lab = [_age_abbrev(lab) for lab in group_labels]
     ax.set_xticks(xs)
+    # Short labels usually fit without heavy rotation
+    rot = 0 if max((len(t) for t in tick_lab), default=0) <= 5 else 18
     ax.set_xticklabels(
-        group_labels, fontsize=fontsize, rotation=18, ha="right"
+        tick_lab,
+        fontsize=fontsize,
+        rotation=rot,
+        ha="right" if rot else "center",
     )
     if xs:
         ax.set_xlim(xs[0] - 0.55, xs[-1] + 0.55)
@@ -2430,14 +2443,15 @@ def _group_summary_lines(
     unit_s = f" {unit}" if unit else ""
     lines = []
     for lab, vals in zip(group_labels, samples):
+        short = _age_abbrev(lab)
         if len(vals) == 0:
-            lines.append(f"  {lab}: n=0")
+            lines.append(f"  {short}: n=0")
             continue
         m, lo, hi = _mean_ci95(vals)
         med = float(np.median(vals))
         sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
         lines.append(
-            f"  {lab}: n={len(vals)}, median={med:.4g}{unit_s}"
+            f"  {short}: n={len(vals)}, median={med:.4g}{unit_s}"
         )
         lines.append(
             f"    mean±SEM={m:.4g}±{sem:.4g}{unit_s}; "
@@ -2893,7 +2907,7 @@ def plot_asymmetry_by_age_bins(
                 _style_pub_ax(ax)
                 if r == 0:
                     ax.set_title(
-                        f"{label}\n$n_{{ec}}$={n_by_col[c]}",
+                        f"{_age_abbrev(label)}\n$n_{{ec}}$={n_by_col[c]}",
                         fontsize=10,
                         color="0.2",
                     )
@@ -3854,7 +3868,7 @@ def _draw_age_coverage_hist(ax, frame: pd.DataFrame, panel_title: str):
         ax.text(
             0.5 * (u_lo + u_hi),
             1.08,
-            f"{lab_b}\n$n_{{ec}}$={n_band}",
+            f"{_age_abbrev(lab_b)}\n$n_{{ec}}$={n_band}",
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="bottom",
@@ -4754,7 +4768,7 @@ def _run_day_by_age_mode(
             color="w",
             markerfacecolor=color,
             markersize=7,
-            label=label,
+            label=_age_abbrev(label),
         )
         for label, _lo, _hi, _mt, color in AGE_ASYM_BINS
     ]
@@ -4770,6 +4784,7 @@ def _run_day_by_age_mode(
         fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.5), constrained_layout=True)
         axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[1, 2]]
         axes[0, 2].set_visible(False)
+        first_panel = True
 
         for ax, (name, c1, c2, mean_col) in zip(axes_flat, params):
             if name not in day_vs:
@@ -4829,7 +4844,7 @@ def _run_day_by_age_mode(
                 y_all = np.concatenate(all_y)
                 y_lo, y_hi = float(np.min(y_all)), float(np.max(y_all))
                 span = max(y_hi - y_lo, abs(y_hi) * 0.05, 1e-6)
-                ax.set_ylim(y_lo - 0.08 * span, y_hi + 0.55 * span)
+                ax.set_ylim(y_lo - 0.14 * span, y_hi + 0.55 * span)
             else:
                 y_lo, y_hi, span = 0.0, 1.0, 1.0
 
@@ -4868,6 +4883,32 @@ def _run_day_by_age_mode(
             _set_age_group_xticks(ax, group_labels)
             ax.set_ylabel(PARAM_YLABELS[name])
             ax.set_xlabel("")
+            # On the first panel: explicit Day 1 / Day 2 under the first age bin
+            if first_panel and group_labels:
+                lab0 = group_labels[0]
+                if lab0 in x_day[1] and lab0 in x_day[2]:
+                    y_lab = y_lo - 0.06 * span
+                    ax.text(
+                        x_day[1][lab0],
+                        y_lab,
+                        "Day 1",
+                        ha="center",
+                        va="top",
+                        fontsize=7.5,
+                        color="0.25",
+                        clip_on=False,
+                    )
+                    ax.text(
+                        x_day[2][lab0],
+                        y_lab,
+                        "Day 2",
+                        ha="center",
+                        va="top",
+                        fontsize=7.5,
+                        color="0.25",
+                        clip_on=False,
+                    )
+                first_panel = False
             _style_pub_ax(ax)
 
         fig.legend(
@@ -4904,7 +4945,9 @@ def _run_day_by_age_mode(
             lines = [rf"{PARAM_MATH[name]} {mode_tag}", ""]
             lines.append(f"Day1 vs Day2 (Bonferroni×{n_age})")
             for res in day_vs[name]:
-                lines.append(f"  {res['age']}: n={res['n1']}/{res['n2']}")
+                lines.append(
+                    f"  {_age_abbrev(res['age'])}: n={res['n1']}/{res['n2']}"
+                )
                 # 95% CI of the mean for each day
                 for tag, mean_k, sem_k, n_k in (
                     ("D1", "mean1", "sem1", "n1"),
@@ -6464,7 +6507,11 @@ def plot_cca_vs_cc_by_age(df: pd.DataFrame, out_dir: Path):
                     ax.set_ylabel(ylab)
                 _style_pub_ax(ax)
                 if row == 0:
-                    ax.set_title(f"{label}\n$n_{{ec}}$={int(mask.sum())}", fontsize=10, color="0.2")
+                    ax.set_title(
+                        f"{_age_abbrev(label)}\n$n_{{ec}}$={int(mask.sum())}",
+                        fontsize=10,
+                        color="0.2",
+                    )
         fig.suptitle(
             r"$CC_a$ vs $CC$ by age group"
             "\n"
@@ -6655,8 +6702,11 @@ def plot_cca_asymmetry(df: pd.DataFrame, out_dir: Path):
             ax.set_xlabel(r"$CC_a$ min (missing→0)")
             ax.set_ylabel(r"$CC_a$ max (missing→0)")
             ax.set_title(
-                f"{label}\n$n$={len(g)} (both={int((g['cca_modality']=='both').sum()) if len(g) else 0})",
-                fontsize=10, color="0.2",
+                f"{_age_abbrev(label)}\n"
+                f"$n$={len(g)} (both="
+                f"{int((g['cca_modality']=='both').sum()) if len(g) else 0})",
+                fontsize=10,
+                color="0.2",
             )
             _style_pub_ax(ax)
         for ax in axes_flat[n_age:]:
@@ -8351,8 +8401,12 @@ def plot_animals_pairs_vs_age(
         }
     ):
         fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+        bins_short = [
+            (_age_abbrev(lab), lo, hi, mt, col)
+            for lab, lo, hi, mt, col in AGE_ASYM_BINS
+        ]
         draw_age_group_background(
-            ax, AGE_ASYM_BINS, vmin, max_age, mt_val, alpha=0.12, label=True
+            ax, bins_short, vmin, max_age, mt_val, alpha=0.12, label=True
         )
         ax.scatter(
             d["x_warp"],
@@ -8421,7 +8475,7 @@ def parse_args():
         help=(
             "Age grouping scheme: 3 (10–32 / 33–50 / 50+), "
             "4 (10–32 / 33–50 / 50–200 / dams), "
-            "or 5 (10–20 / 21–32 / 33–50 / 50–200 / dams). "
+            "or 5 (EJuv / LJuv / Adol / YAd / dams). "
             "If omitted, the script asks interactively."
         ),
     )
@@ -8837,7 +8891,7 @@ def build_figure_catalog(
         },
         {
             "id": "37",
-            "label": "37  Delays by age (EJ / LJ / adol / YA / dams)",
+            "label": "37  Delays by age (EJuv / LJuv / Adol / YAd / dams)",
             "outputs": [
                 "37_delays_by_age_group.png",
                 "37b_delays_by_age_group_stats.png",
